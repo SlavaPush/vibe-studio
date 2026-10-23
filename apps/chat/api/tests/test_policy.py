@@ -1,3 +1,5 @@
+import json
+
 from conftest import FakeProviders, client_for, login, make_app
 
 from app import executor, policy
@@ -51,6 +53,44 @@ def test_context_keeps_recent_messages_with_marker():
         {"role": "assistant", "content": "b"},
         {"role": "user", "content": "c"},
     ]
+
+
+def test_history_skips_refused_and_unchecked_requests(db):
+    providers = FakeProviders()
+    providers.chunks = ["y" * 1500]
+    with client_for(make_app(db, providers)) as client:
+        user = login(client)
+        conversation_id = user.conversation()
+        assert user.ask("Привет", conversation_id=conversation_id)["status"] == "completed"
+        assert user.ask("Запрещённый вопрос", conversation_id=conversation_id)["status"] == "refused"
+        providers.fail("moderation", TimeoutError())
+        assert user.ask("Непроверенный вопрос", conversation_id=conversation_id)["status"] == "check_unavailable"
+        providers.chunks = ["Ответ ", "модели."]
+        assert user.ask("Второй вопрос", conversation_id=conversation_id)["status"] == "completed"
+        assert user.ask("а подробнее?", conversation_id=conversation_id)["status"] == "completed"
+    assert providers.contexts[-1] == [
+        {"role": "user", "content": "Привет"},
+        {"role": "assistant", "content": "y" * 1500},
+        {"role": "user", "content": "Второй вопрос"},
+        {"role": "assistant", "content": "Ответ модели."},
+        {"role": "user", "content": "а подробнее?"},
+    ]
+    assert providers.classifier_inputs[-1] == {
+        "previous_messages": [
+            {"role": "user", "text": "Привет"},
+            {"role": "assistant", "text": "y" * policy.CLASSIFIER_REPLY_CHARS},
+            {"role": "user", "text": "Второй вопрос"},
+            {"role": "assistant", "text": "Ответ модели."},
+        ],
+        "current_message": "а подробнее?",
+    }
+
+
+def test_classifier_input_keeps_last_messages():
+    previous = [{"role": "user" if index % 2 == 0 else "assistant", "text": str(index)} for index in range(6)]
+    data = json.loads(policy.classifier_input("текущее", previous))
+    assert data["previous_messages"] == previous[-policy.CLASSIFIER_HISTORY:]
+    assert json.loads(policy.classifier_input("текущее", []))["previous_messages"] == []
 
 
 def test_route_table():

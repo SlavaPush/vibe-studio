@@ -3,7 +3,7 @@ import {
   type AppendMessage,
   type ThreadMessageLike,
 } from '@assistant-ui/react'
-import { useCallback } from 'react'
+import { useCallback, useMemo } from 'react'
 import type { AssetRef, Effort, Message, ModelId, SystemMessageKind } from '@/api/types'
 import { activeRunId, isSendBlocked, useChatState, type ChatStore, type RunState } from './conversations'
 
@@ -56,12 +56,18 @@ function messageText(message: AppendMessage): string {
     .trim()
 }
 
+function withLastRefusal(messages: Message[]): Message[] {
+  const last = messages.findLast((message) => message.kind === 'refusal')
+  return last ? messages.filter((message) => message.kind !== 'refusal' || message === last) : messages
+}
+
 export function useConversationRuntime(store: ChatStore, actions: ConversationActions) {
-  const messages = useChatState(store, (state) =>
+  const allMessages = useChatState(store, (state) =>
     state.activeConversationId
       ? (state.messages[state.activeConversationId] ?? NO_MESSAGES)
       : NO_MESSAGES,
   )
+  const messages = useMemo(() => withLastRefusal(allMessages), [allMessages])
   const runs = useChatState(store, (state) => state.runs)
   const isRunning = useChatState(store, (state) => activeRunId(state) !== null)
   const isSendDisabled = useChatState(store, isSendBlocked)

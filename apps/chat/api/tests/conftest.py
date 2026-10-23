@@ -130,6 +130,7 @@ class FakeProviders:
         self.scores = lambda text: {"violence": 0.9} if "запрещ" in text.lower() else {"violence": 0.01}
         self.chunks = ["Ответ ", "модели."]
         self.contexts: list[list[dict]] = []
+        self.classifier_inputs: list[dict] = []
 
     def fail(self, key: str, *behaviors) -> None:
         self.failures.setdefault(key, []).extend(behaviors)
@@ -161,6 +162,7 @@ class FakeProviders:
         behavior = await self._behavior(f"classifier:{model}", "classifier")
         if behavior == "invalid":
             raise retry.InvalidResponse("invalid")
+        self.classifier_inputs.append(json.loads(data))
         current = json.loads(data)["current_message"]
         return Classification(**self.labels(current)), Usage(100, 10)
 

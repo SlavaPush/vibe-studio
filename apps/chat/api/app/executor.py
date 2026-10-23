@@ -424,19 +424,14 @@ class Executor:
             user_message = await fetch_one(
                 conn, "SELECT text, position FROM messages WHERE id = %s", (run["user_message_id"],)
             )
-            previous = await fetch_all(
-                conn,
-                """
-                SELECT text FROM messages WHERE conversation_id = %s AND role = 'user' AND position < %s
-                ORDER BY position DESC LIMIT %s
-                """,
-                (run["conversation_id"], user_message["position"], policy.CLASSIFIER_HISTORY),
-            )
             history = await fetch_all(
                 conn,
                 """
                 SELECT role, text FROM messages
                 WHERE conversation_id = %s AND role IN ('user', 'assistant') AND text <> '' AND position <= %s
+                  AND NOT EXISTS (
+                    SELECT 1 FROM runs WHERE runs.id = messages.run_id AND runs.status IN ('refused', 'check_unavailable')
+                  )
                 ORDER BY position
                 """,
                 (run["conversation_id"], user_message["position"]),
@@ -449,7 +444,7 @@ class Executor:
         text = user_message["text"]
 
         if run["intent"] is None:
-            run = await self._gateway(ctx, text, [row["text"] for row in reversed(previous)], attempts)
+            run = await self._gateway(ctx, text, history[:-1], attempts)
             if run is None:
                 return
 
@@ -468,7 +463,7 @@ class Executor:
                 return
         await self._complete(ctx)
 
-    async def _gateway(self, ctx: RunContext, text: str, previous: list[str], attempts: list[dict]):
+    async def _gateway(self, ctx: RunContext, text: str, previous: list[dict], attempts: list[dict]):
         moderation_done = next((row for row in attempts if row["purpose"] == "moderation" and row["status"] == "succeeded"), None)
         classifier_done = next((row for row in attempts if row["purpose"] == "classifier" and row["status"] == "succeeded"), None)
 
@@ -528,7 +523,7 @@ class Executor:
         except (OutcomeUnknown, Exhausted) as error:
             raise CheckFailed() from error
 
-    async def _classify(self, ctx: RunContext, text: str, previous: list[str]) -> Classification:
+    async def _classify(self, ctx: RunContext, text: str, previous: list[dict]) -> Classification:
         data = policy.classifier_input(text, previous)
         tokens = budget.input_token_bound(policy.CLASSIFIER_PROMPT, [{"role": "user", "content": data}])
 

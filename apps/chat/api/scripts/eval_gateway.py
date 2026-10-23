@@ -28,8 +28,8 @@ class CheckUnavailable(Exception):
     pass
 
 
-async def classify(providers: Providers, text: str):
-    data = policy.classifier_input(text, [])
+async def classify(providers: Providers, text: str, history: list[dict]):
+    data = policy.classifier_input(text, history)
     invalid_left = 1
     for model in CLASSIFIER_MODELS:
         while True:
@@ -51,7 +51,7 @@ async def evaluate(providers: Providers, case: dict, limit: asyncio.Semaphore) -
     async with limit:
         try:
             scores, (labels, model) = await asyncio.gather(
-                providers.moderate(case["text"]), classify(providers, case["text"])
+                providers.moderate(case["text"]), classify(providers, case["text"], case.get("history", []))
             )
         except Exception as error:
             return {"id": case["id"], "ok": False, "error": str(error) if isinstance(error, CheckUnavailable) else type(error).__name__}

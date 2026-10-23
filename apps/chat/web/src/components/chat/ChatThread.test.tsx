@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { StrictMode } from 'react'
 import { afterEach, describe, expect, it } from 'vitest'
+import type { Message } from '@/api/types'
 import type { ConversationActions } from '@/store/assistantAdapter'
 import { createChatStore, type ChatStore } from '@/store/conversations'
 import { draftKey } from '@/store/drafts'
@@ -102,6 +103,64 @@ describe('ChatThread', () => {
     expect(answers[0]).toHaveTextContent('Потоки')
     expect(within(answers[0]).getByText('Ответ не завершён')).toBeInTheDocument()
     expect(screen.getAllByText('Ответ не завершён')).toHaveLength(1)
+  })
+
+  it('показывает только последнее сообщение об отказе в диалоге', async () => {
+    const message = (id: string, role: Message['role'], kind: Message['kind'], text: string): Message => ({
+      ...testRun(id).userMessage,
+      id,
+      role,
+      kind,
+      text,
+    })
+    const state = testState()
+    const store = createChatStore({
+      ...state,
+      messages: {
+        [CONVERSATION_ID]: [
+          message('u1', 'user', null, 'Первый запрос'),
+          message('s1', 'system', 'refusal', 'Первый отказ'),
+          message('s2', 'system', 'model_switched', 'Модель переключена на резервную'),
+          message('u2', 'user', null, 'Второй запрос'),
+          message('s3', 'system', 'refusal', 'Второй отказ'),
+          message('s4', 'system', 'check_unavailable', 'Проверка недоступна'),
+        ],
+      },
+    })
+    render(
+      <ChatThread
+        store={store}
+        actions={{ send: () => {}, cancel: () => {} }}
+        loadAssetUrl={() => new Promise(() => {})}
+      />,
+    )
+
+    const refusals = () => screen.getAllByRole('note', { name: 'Запрос отклонён' })
+    expect(await screen.findByText('Второй отказ')).toBeInTheDocument()
+    expect(refusals()).toHaveLength(1)
+    expect(screen.queryByText('Первый отказ')).not.toBeInTheDocument()
+    expect(screen.getByText('Первый запрос')).toBeInTheDocument()
+    expect(screen.getByText('Второй запрос')).toBeInTheDocument()
+    expect(screen.getByRole('note', { name: 'Модель переключена' })).toBeInTheDocument()
+    expect(screen.getByRole('note', { name: 'Проверка недоступна' })).toBeInTheDocument()
+
+    const { run, userMessage } = testRun('run-3')
+    act(() => store.startRun(run, { ...userMessage, text: 'Третий запрос' }))
+    act(() =>
+      store.dispatch({
+        event_id: 'run-3-1',
+        run_id: 'run-3',
+        seq: 1,
+        timestamp: '2026-10-23T18:00:01Z',
+        type: 'refusal',
+        payload: { message: message('s5', 'system', 'refusal', 'Третий отказ') },
+      }),
+    )
+
+    expect(await screen.findByText('Третий отказ')).toBeInTheDocument()
+    expect(refusals()).toHaveLength(1)
+    expect(screen.queryByText('Второй отказ')).not.toBeInTheDocument()
+    expect(screen.getByText('Третий запрос')).toBeInTheDocument()
   })
 })
 
