@@ -5,7 +5,14 @@ import {
 } from '@assistant-ui/react'
 import { useCallback, useMemo } from 'react'
 import type { AssetRef, Effort, Message, ModelId, SystemMessageKind } from '@/api/types'
-import { activeRunId, isSendBlocked, useChatState, type ChatStore, type RunState } from './conversations'
+import {
+  activeRunId,
+  isSendBlocked,
+  NO_CONVERSATION,
+  useChatState,
+  type ChatStore,
+  type RunState,
+} from './conversations'
 
 export type MessageCustom = {
   kind: SystemMessageKind | null
@@ -62,10 +69,9 @@ function withLastRefusal(messages: Message[]): Message[] {
 }
 
 export function useConversationRuntime(store: ChatStore, actions: ConversationActions) {
-  const allMessages = useChatState(store, (state) =>
-    state.activeConversationId
-      ? (state.messages[state.activeConversationId] ?? NO_MESSAGES)
-      : NO_MESSAGES,
+  const allMessages = useChatState(
+    store,
+    (state) => state.messages[state.activeConversationId ?? NO_CONVERSATION] ?? NO_MESSAGES,
   )
   const messages = useMemo(() => withLastRefusal(allMessages), [allMessages])
   const runs = useChatState(store, (state) => state.runs)

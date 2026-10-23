@@ -17,6 +17,8 @@ function fakeController(overrides: Partial<ChatController> = {}): ChatController
     renameConversation: vi.fn(),
     send: vi.fn(),
     cancel: vi.fn(),
+    removeQueued: vi.fn(),
+    resumeQueue: vi.fn(),
     loadAssetUrl: () => new Promise(() => {}),
     ...overrides,
   }
@@ -302,8 +304,8 @@ describe('App', () => {
     expect(me).toHaveBeenCalledTimes(2)
   })
 
-  it('при активном задании Enter и кнопка не отправляют сообщение и не меняют текст', async () => {
-    const send = vi.fn()
+  it('при активном задании Enter и кнопка «В очередь» передают сообщение и очищают поле', async () => {
+    const send = vi.fn().mockResolvedValue({ sent: true, conversationId: CONVERSATION_ID })
     const other = { ...testState().conversations[0], id: 'other-conversation', title: 'Другой' }
     const state = testState()
     const store = createChatStore({
@@ -319,29 +321,34 @@ describe('App', () => {
     const composer = screen.getByRole('textbox', { name: 'Сообщение' })
     fireEvent.change(composer, { target: { value: 'Ещё вопрос' } })
     expect(fireEvent.keyDown(composer, { key: 'Enter' })).toBe(false)
-    expect(composer).toHaveValue('Ещё вопрос')
+    await waitFor(() => expect(send).toHaveBeenCalledWith('Ещё вопрос'))
+    expect(composer).toHaveValue('')
+
+    fireEvent.change(composer, { target: { value: 'Третий вопрос' } })
+    fireEvent.click(screen.getByRole('button', { name: 'В очередь' }))
+    await waitFor(() => expect(send).toHaveBeenCalledWith('Третий вопрос'))
+    expect(composer).toHaveValue('')
+    expect(screen.getByRole('button', { name: 'Остановить' })).toBeInTheDocument()
 
     act(() => store.selectConversation(other.id))
     const otherComposer = screen.getByRole('textbox', { name: 'Сообщение' })
     fireEvent.change(otherComposer, { target: { value: 'Вопрос в другом диалоге' } })
-    expect(fireEvent.keyDown(otherComposer, { key: 'Enter' })).toBe(false)
-    const button = screen.getByRole('button', { name: 'Отправить' })
-    expect(button).toBeDisabled()
-    fireEvent.click(button)
-    await act(async () => {})
-    expect(otherComposer).toHaveValue('Вопрос в другом диалоге')
-    expect(send).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить' }))
+    await waitFor(() => expect(send).toHaveBeenCalledWith('Вопрос в другом диалоге'))
     window.localStorage.clear()
   })
 
-  it('до загрузки истории диалога не отправляет сообщение и сохраняет текст, если в истории активное задание', async () => {
-    const send = vi.fn()
+  it('до загрузки истории диалога не отправляет сообщение, а после загрузки с активным заданием ставит его в очередь', async () => {
+    const send = vi.fn().mockResolvedValue({ sent: true, conversationId: CONVERSATION_ID })
     const store = createChatStore({ ...testState(), messages: {}, loaded: {} })
     render(<App store={store} controller={fakeController({ send })} />)
     const composer = screen.getByRole('textbox', { name: 'Сообщение' })
     fireEvent.change(composer, { target: { value: 'Ранний вопрос' } })
     expect(fireEvent.keyDown(composer, { key: 'Enter' })).toBe(false)
     expect(screen.getByRole('button', { name: 'Отправить' })).toBeDisabled()
+    await act(async () => {})
+    expect(composer).toHaveValue('Ранний вопрос')
+    expect(send).not.toHaveBeenCalled()
 
     const { run, userMessage } = testRun('run-history')
     act(() =>
@@ -352,10 +359,116 @@ describe('App', () => {
       }),
     )
     expect(fireEvent.keyDown(composer, { key: 'Enter' })).toBe(false)
-    await act(async () => {})
-    expect(composer).toHaveValue('Ранний вопрос')
-    expect(send).not.toHaveBeenCalled()
+    await waitFor(() => expect(send).toHaveBeenCalledWith('Ранний вопрос'))
+    expect(composer).toHaveValue('')
     window.localStorage.clear()
+  })
+
+  it('ошибка отправки из очереди не трогает поле: сообщение остаётся в очереди с тем же ключом до «Продолжить»', async () => {
+    const listeners = new Map<string, (event: MessageEvent<string>) => void>()
+    const openEvents = () =>
+      ({
+        addEventListener: (type: string, listener: (event: MessageEvent<string>) => void) => listeners.set(type, listener),
+        close: () => {},
+      }) as unknown as EventSource
+    const { run } = testRun('run-1')
+    let rejectQueued: (reason: unknown) => void = () => {}
+    const createRun = vi
+      .fn()
+      .mockResolvedValueOnce(run)
+      .mockReturnValueOnce(new Promise((_, fail) => (rejectQueued = fail)))
+      .mockResolvedValueOnce(testRun('run-2').run)
+    const api = {
+      createRun,
+      conversations: vi.fn().mockResolvedValue({ items: testState().conversations }),
+    } as unknown as ApiClient
+    const store = createChatStore(testState())
+    render(<App store={store} controller={createChatController(store, api, openEvents)} />)
+    const composer = screen.getByRole('textbox', { name: 'Сообщение' })
+    const log = screen.getByRole('log', { name: 'Сообщения диалога' })
+
+    fireEvent.change(composer, { target: { value: 'Первый' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить' }))
+    await waitFor(() => expect(store.getState().runs[run.id]).toBeDefined())
+    fireEvent.change(composer, { target: { value: 'Второй' } })
+    fireEvent.keyDown(composer, { key: 'Enter' })
+    await waitFor(() => expect(store.getState().queue).toHaveLength(1))
+    const key = store.getState().queue[0].idempotencyKey
+    fireEvent.change(composer, { target: { value: 'Черновик' } })
+
+    await act(async () => {
+      listeners.get('completed')?.({ data: JSON.stringify(switchedRunEvents(run.id).at(-1)) } as MessageEvent<string>)
+    })
+    expect(await within(log).findByText('Второй')).toBeInTheDocument()
+    await act(async () => {
+      rejectQueued(
+        new ApiRequestError(
+          { code: 'rate_limited', message: 'Дождитесь завершения текущего ответа.', retryable: true, operation_id: 'op' },
+          429,
+        ),
+      )
+    })
+
+    expect(within(log).queryByText('Второй')).not.toBeInTheDocument()
+    expect(composer).toHaveValue('Черновик')
+    const queue = screen.getByRole('region', { name: 'Очередь сообщений' })
+    expect(within(queue).getByText('Второй')).toBeInTheDocument()
+    expect(within(queue).getByRole('status')).toHaveTextContent(
+      'Очередь приостановлена: Дождитесь завершения текущего ответа.',
+    )
+    expect(within(queue).getByRole('button', { name: 'Убрать из очереди сообщение 1' })).toBeInTheDocument()
+    expect(store.getState().queue[0].idempotencyKey).toBe(key)
+
+    await act(async () => fireEvent.click(within(queue).getByRole('button', { name: 'Продолжить' })))
+    await waitFor(() => expect(createRun).toHaveBeenCalledTimes(3))
+    expect(createRun.mock.calls[2][1]).toEqual(createRun.mock.calls[1][1])
+    expect(createRun.mock.calls[2][1].idempotency_key).toBe(key)
+    expect(composer).toHaveValue('Черновик')
+    window.localStorage.clear()
+  })
+
+  it('при полной очереди кнопка и Enter недоступны, текст остаётся в поле, причина видна', async () => {
+    const send = vi.fn()
+    const items = Array.from({ length: 5 }, (_, index) => ({
+      id: `q${index}`,
+      conversationId: CONVERSATION_ID,
+      text: `Сообщение ${index + 1}`,
+      model: 'auto' as const,
+      idempotencyKey: `key-${index}`,
+      createdAt: '2026-10-24T05:00:00Z',
+    }))
+    const store = createChatStore({ ...testState(), queue: items })
+    render(<App store={store} controller={fakeController({ send })} />)
+    const { run, userMessage } = testRun('run-busy')
+    act(() => store.startRun(run, userMessage))
+    const composer = screen.getByRole('textbox', { name: 'Сообщение' })
+    fireEvent.change(composer, { target: { value: 'Шестое' } })
+    expect(fireEvent.keyDown(composer, { key: 'Enter' })).toBe(false)
+    expect(screen.getByRole('button', { name: 'В очередь' })).toBeDisabled()
+    await act(async () => {})
+    expect(send).not.toHaveBeenCalled()
+    expect(composer).toHaveValue('Шестое')
+    expect(screen.getByText(/Очередь заполнена: не больше 5 сообщений/)).toBeInTheDocument()
+    window.localStorage.clear()
+  })
+
+  it('окно новой версии не открывается, пока очередь не пуста', async () => {
+    const item = {
+      id: 'q1',
+      conversationId: CONVERSATION_ID,
+      text: 'В очереди',
+      model: 'auto' as const,
+      idempotencyKey: 'key-1',
+      createdAt: '2026-10-24T05:00:00Z',
+    }
+    const store = createChatStore({ ...testState(), queue: [item] })
+    render(<App store={store} controller={fakeController({ removeQueued: store.removeQueued })} />)
+    act(() => store.showUpdate())
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.getByText('Доступна новая версия.')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Убрать из очереди сообщение 1' }))
+    expect(await screen.findByRole('dialog', { name: 'Доступна новая версия' })).toBeInTheDocument()
   })
 
   it('при ответе 429 на отправку возвращает текст в поле и черновик и показывает ошибку', async () => {
@@ -429,6 +542,8 @@ describe('App', () => {
     fireEvent.change(composer, { target: { value: 'Первый' } })
     fireEvent.click(screen.getByRole('button', { name: 'Отправить' }))
     await waitFor(() => expect(createRun).toHaveBeenCalledTimes(1))
+    const log = screen.getByRole('log', { name: 'Сообщения диалога' })
+    expect(await within(log).findByText('Первый')).toBeInTheDocument()
     fireEvent.change(composer, { target: { value: 'Второй' } })
     await act(async () => {
       reject(
@@ -437,6 +552,7 @@ describe('App', () => {
     })
     expect(composer).toHaveValue('Первый\nВторой')
     expect(screen.getByText('Ошибка сервера.')).toBeInTheDocument()
+    expect(within(log).queryByText('Первый')).not.toBeInTheDocument()
     window.localStorage.clear()
   })
 

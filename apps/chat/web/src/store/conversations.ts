@@ -18,11 +18,40 @@ export interface RunState {
   lastSeq: number
 }
 
+export interface QueuedMessage {
+  id: string
+  conversationId: string
+  text: string
+  model: ModelChoice
+  idempotencyKey: string
+  createdAt: string
+}
+
+export type QueuePauseReason = 'failed' | 'cancelled' | 'check_unavailable' | 'request_failed'
+
+export interface QueuePause {
+  reason: QueuePauseReason
+  error?: ApiError
+}
+
+export interface StoredQueue {
+  items: QueuedMessage[]
+  pause: QueuePause | null
+  trackedRunId: string | null
+}
+
+export const QUEUE_LIMIT = 5
+export const PENDING_PREFIX = 'pending:'
+
 export interface ChatState {
   session: Session | null
   sessionChecked: boolean
   sessionError: ApiError | null
   sending: boolean
+  sendingQueuedId: string | null
+  queue: QueuedMessage[]
+  queuePause: QueuePause | null
+  trackedRunId: string | null
   conversations: Conversation[]
   activeConversationId: string | null
   messages: Record<string, Message[]>
@@ -49,6 +78,10 @@ export function initialChatState(): ChatState {
     sessionChecked: false,
     sessionError: null,
     sending: false,
+    sendingQueuedId: null,
+    queue: [],
+    queuePause: null,
+    trackedRunId: null,
     conversations: [],
     activeConversationId: null,
     messages: {},
@@ -173,20 +206,33 @@ export function applyMessageList(state: ChatState, conversationId: string, list:
   const last = list.runs.at(-1)
   const error =
     last && (last.status === 'failed' || last.status === 'cancelled') ? (last.error ?? undefined) : undefined
+  const pending = (state.messages[conversationId] ?? []).filter((message) => message.id.startsWith(PENDING_PREFIX))
   return {
     ...state,
-    messages: { ...state.messages, [conversationId]: list.items },
+    messages: { ...state.messages, [conversationId]: [...list.items, ...pending] },
     loaded: { ...state.loaded, [conversationId]: true },
     runs,
     errors: { ...state.errors, [conversationId]: error },
   }
 }
 
-export function addRun(state: ChatState, run: Run, userMessage: Message): ChatState {
+export function pendingMessageId(item: QueuedMessage): string {
+  return `${PENDING_PREFIX}${item.idempotencyKey}`
+}
+
+export function addRun(state: ChatState, run: Run, userMessage: Message, pendingId?: string): ChatState {
   const messages = state.messages[run.conversation_id] ?? []
+  const next = messages.some((message) => message.id === userMessage.id)
+    ? upsertMessage(
+        messages.filter((message) => message.id !== pendingId),
+        userMessage,
+      )
+    : messages.some((message) => message.id === pendingId)
+      ? messages.map((message) => (message.id === pendingId ? userMessage : message))
+      : [...messages, userMessage]
   return {
     ...state,
-    messages: { ...state.messages, [run.conversation_id]: upsertMessage(messages, userMessage) },
+    messages: { ...state.messages, [run.conversation_id]: next },
     runs: {
       ...state.runs,
       [run.id]: state.runs[run.id] ?? { conversationId: run.conversation_id, status: run.status, lastSeq: 0 },
@@ -223,11 +269,56 @@ export function createChatStore(initial: ChatState = initialChatState()) {
     finishSessionCheck(error: ApiError | null = null) {
       set({ ...state, sessionChecked: true, sessionError: error })
     },
-    setSending(sending: boolean) {
-      set({ ...state, sending })
+    setSending(sending: boolean, queuedId: string | null = null) {
+      set({ ...state, sending, sendingQueuedId: sending ? queuedId : null })
     },
-    signIn(session: Session) {
-      set({ ...state, session })
+    signIn(session: Session, stored?: StoredQueue) {
+      set(
+        stored
+          ? { ...state, session, queue: stored.items, queuePause: stored.pause, trackedRunId: stored.trackedRunId }
+          : { ...state, session },
+      )
+    },
+    enqueue(item: QueuedMessage) {
+      set({ ...state, queue: [...state.queue, item] })
+    },
+    removeQueued(id: string) {
+      const queue = state.queue.filter((item) => item.id !== id)
+      set({ ...state, queue, queuePause: queue.length > 0 ? state.queuePause : null })
+    },
+    pauseQueue(pause: QueuePause) {
+      set({ ...state, queuePause: pause })
+    },
+    resumeQueue() {
+      set({ ...state, queuePause: null })
+    },
+    setTrackedRun(runId: string | null) {
+      set({ ...state, trackedRunId: runId })
+    },
+    addPendingMessage(item: QueuedMessage) {
+      const message: Message = {
+        id: pendingMessageId(item),
+        conversation_id: item.conversationId,
+        role: 'user',
+        kind: null,
+        text: item.text,
+        run_id: null,
+        effective_model: null,
+        effort: null,
+        asset: null,
+        created_at: new Date().toISOString(),
+      }
+      const messages = state.messages[item.conversationId] ?? []
+      set({ ...state, messages: { ...state.messages, [item.conversationId]: upsertMessage(messages, message) } })
+    },
+    removePendingMessage(item: QueuedMessage) {
+      const id = pendingMessageId(item)
+      const messages = state.messages[item.conversationId]
+      if (!messages?.some((message) => message.id === id)) return
+      set({
+        ...state,
+        messages: { ...state.messages, [item.conversationId]: messages.filter((message) => message.id !== id) },
+      })
     },
     signOut() {
       set({
@@ -261,15 +352,19 @@ export function createChatStore(initial: ChatState = initialChatState()) {
         ...state,
         conversations: [conversation, ...state.conversations],
         activeConversationId: conversation.id,
-        messages: { ...state.messages, [conversation.id]: [] },
+        messages: {
+          ...state.messages,
+          [conversation.id]: state.messages[NO_CONVERSATION] ?? [],
+          [NO_CONVERSATION]: [],
+        },
         loaded: { ...state.loaded, [conversation.id]: true },
       })
     },
     loadMessages(conversationId: string, list: MessageList) {
       set(applyMessageList(state, conversationId, list))
     },
-    startRun(run: Run, userMessage: Message) {
-      set(addRun(state, run, userMessage))
+    startRun(run: Run, userMessage: Message, pendingId?: string) {
+      set(addRun(state, run, userMessage, pendingId))
     },
     setError(conversationId: string, error: ApiError | undefined) {
       set({ ...state, errors: { ...state.errors, [conversationId]: error } })
@@ -301,7 +396,7 @@ export function hasActiveRun(state: ChatState): boolean {
 export function isSendBlocked(state: ChatState): boolean {
   const id = state.activeConversationId
   const loading = id !== null && !state.loaded[id] && !state.errors[id]
-  return state.sending || loading || hasActiveRun(state)
+  return loading || state.queue.length >= QUEUE_LIMIT
 }
 
 export function isIncomplete(state: ChatState, message: Message): boolean {

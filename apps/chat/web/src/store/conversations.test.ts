@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import type { ApiError, Message, MessageList, Run, RunStatus } from '@/api/types'
 import { CONVERSATION_ID, switchedRunEvents, testRun, testState } from '@/test/fixtures'
-import { addRun, applyMessageList, applyRunEvent, isIncomplete } from './conversations'
+import {
+  addRun,
+  applyMessageList,
+  applyRunEvent,
+  createChatStore,
+  isIncomplete,
+  pendingMessageId,
+} from './conversations'
 
 function finishedRun(id: string, status: RunStatus, error: ApiError | null): Run {
   return { ...testRun(id).run, status, error, assistant_message_id: `${id}-assistant` }
@@ -36,6 +43,50 @@ describe('applyRunEvent', () => {
   it('игнорирует события неизвестного задания', () => {
     const state = testState()
     expect(switchedRunEvents('unknown').reduce(applyRunEvent, state)).toBe(state)
+  })
+})
+
+describe('временное сообщение пользователя', () => {
+  const item = {
+    id: 'q1',
+    conversationId: CONVERSATION_ID,
+    text: 'Расскажи о потоках',
+    model: 'auto' as const,
+    idempotencyKey: 'key-1',
+    createdAt: '2026-10-24T05:00:00Z',
+  }
+
+  it('заменяется серверным сообщением на том же месте', () => {
+    const store = createChatStore(testState())
+    const earlier = { ...testRun('run-0').userMessage, id: 'earlier', text: 'Раньше' }
+    store.loadMessages(CONVERSATION_ID, { items: [earlier], active_run_id: null, runs: [] })
+    store.addPendingMessage(item)
+    expect(store.getState().messages[CONVERSATION_ID].map((message) => message.id)).toEqual([
+      'earlier',
+      pendingMessageId(item),
+    ])
+    const { run, userMessage } = testRun('run-1')
+    store.startRun(run, userMessage, pendingMessageId(item))
+    expect(store.getState().messages[CONVERSATION_ID].map((message) => message.id)).toEqual(['earlier', userMessage.id])
+  })
+
+  it('при повторе с тем же ключом сохраняет позицию серверного сообщения из истории', () => {
+    const store = createChatStore(testState())
+    const { run, userMessage } = testRun('run-1')
+    const answer = { ...userMessage, id: 'answer', role: 'assistant' as const, text: 'Ответ' }
+    store.loadMessages(CONVERSATION_ID, { items: [userMessage, answer], active_run_id: null, runs: [] })
+    store.addPendingMessage(item)
+    store.startRun(run, userMessage, pendingMessageId(item))
+    expect(store.getState().messages[CONVERSATION_ID].map((message) => message.id)).toEqual([userMessage.id, 'answer'])
+  })
+
+  it('сохраняется при перезагрузке истории и удаляется при ошибке', () => {
+    const store = createChatStore(testState())
+    store.addPendingMessage(item)
+    store.loadMessages(CONVERSATION_ID, { items: [], active_run_id: null, runs: [] })
+    expect(store.getState().messages[CONVERSATION_ID].map((message) => message.id)).toEqual([pendingMessageId(item)])
+    store.removePendingMessage(item)
+    expect(store.getState().messages[CONVERSATION_ID]).toEqual([])
   })
 })
 

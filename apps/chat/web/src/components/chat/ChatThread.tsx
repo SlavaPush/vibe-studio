@@ -8,7 +8,7 @@ import {
   type AssistantRuntime,
   type MessageState,
 } from '@assistant-ui/react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ApiRequestError } from '@/api/client'
 import type { AssetRef, AssetUrl, Effort, ModelProfile, SystemMessageKind } from '@/api/types'
 import { Button } from '@/components/ui/button'
@@ -19,7 +19,7 @@ import {
   useConversationRuntime,
   type ConversationActions,
 } from '@/store/assistantAdapter'
-import { isSendBlocked, useChatState, type ChatStore } from '@/store/conversations'
+import { activeRunId, isSendBlocked, useChatState, type ChatStore } from '@/store/conversations'
 import { draftKey, readLocal, writeLocal } from '@/store/drafts'
 import { cn } from 'cn'
 
@@ -44,9 +44,10 @@ interface ChatThreadProps {
   store: ChatStore
   actions: ConversationActions
   loadAssetUrl: LoadAssetUrl
+  queue?: ReactNode
 }
 
-export function ChatThread({ store, actions, loadAssetUrl }: ChatThreadProps) {
+export function ChatThread({ store, actions, loadAssetUrl, queue }: ChatThreadProps) {
   const storageKey = useChatState(store, (state) =>
     draftKey(state.session?.user_id ?? '', state.activeConversationId),
   )
@@ -85,6 +86,14 @@ export function ChatThread({ store, actions, loadAssetUrl }: ChatThreadProps) {
   }, [runtime])
   const models = useChatState(store, (state) => state.models)
   const sendBlocked = useChatState(store, isSendBlocked)
+  const running = useChatState(store, (state) => activeRunId(state) !== null)
+  const enqueueComposer = () => {
+    const composer = runtimeRef.current?.thread.composer
+    const text = composer?.getState().text.trim()
+    if (!composer || !text || isSendBlocked(store.getState())) return
+    composer.setText('')
+    void threadActions.send(text)
+  }
   const historyStatus = useChatState(store, (state) => {
     const id = state.activeConversationId
     if (!id || state.loaded[id]) return 'ready'
@@ -114,15 +123,16 @@ export function ChatThread({ store, actions, loadAssetUrl }: ChatThreadProps) {
             )}
           </ThreadPrimitive.Messages>
         </ThreadPrimitive.Viewport>
+        {queue}
         <ComposerPrimitive.Root className="flex items-end gap-2 border-t p-4">
           <ComposerPrimitive.Input
             aria-label="Сообщение"
             placeholder="Напишите сообщение"
             rows={1}
             onKeyDown={(event) => {
-              if (sendBlocked && event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-                event.preventDefault()
-              }
+              if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return
+              if (sendBlocked || running) event.preventDefault()
+              if (!sendBlocked && running) enqueueComposer()
             }}
             className="min-h-9 flex-1 resize-none rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
           />
@@ -132,6 +142,7 @@ export function ChatThread({ store, actions, loadAssetUrl }: ChatThreadProps) {
             </ComposerPrimitive.Send>
           </AuiIf>
           <AuiIf condition={(state) => state.thread.isRunning}>
+            <EnqueueButton disabled={sendBlocked} onClick={enqueueComposer} />
             <ComposerPrimitive.Cancel asChild>
               <Button variant="outline">Остановить</Button>
             </ComposerPrimitive.Cancel>
@@ -139,6 +150,15 @@ export function ChatThread({ store, actions, loadAssetUrl }: ChatThreadProps) {
         </ComposerPrimitive.Root>
       </ThreadPrimitive.Root>
     </AssistantRuntimeProvider>
+  )
+}
+
+function EnqueueButton({ disabled, onClick }: { disabled: boolean; onClick: () => void }) {
+  const empty = useAuiState((state) => state.composer.isEmpty)
+  return (
+    <Button type="button" disabled={disabled || empty} onClick={onClick}>
+      В очередь
+    </Button>
   )
 }
 

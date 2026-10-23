@@ -1,8 +1,19 @@
 import { ApiRequestError, isNetworkError, type ApiClient } from '@/api/client'
-import type { Message, MessageList, Run, RunEvent, RunEventType } from '@/api/types'
+import type { Message, MessageList, Run, RunEvent, RunEventType, RunStatus, Session } from '@/api/types'
 import type { SendResult } from './assistantAdapter'
-import { activeRunId, hasActiveRun, NO_CONVERSATION, type ChatStore } from './conversations'
+import {
+  activeRunId,
+  hasActiveRun,
+  NO_CONVERSATION,
+  pendingMessageId,
+  QUEUE_LIMIT,
+  type ChatState,
+  type ChatStore,
+  type QueuedMessage,
+  type QueuePause,
+} from './conversations'
 import { activeConversationKey, readLocal, writeLocal } from './drafts'
+import { readQueue, writeQueue } from './queueStorage'
 
 const EVENT_TYPES: RunEventType[] = [
   'accepted',
@@ -18,6 +29,7 @@ const EVENT_TYPES: RunEventType[] = [
 ]
 const TERMINAL_EVENTS = new Set<RunEventType>(['completed', 'refusal', 'check_unavailable', 'failed'])
 const RESUME_DELAYS = [1000, 2000, 5000, 10000, 15000]
+const PAUSE_STATUSES = new Set<RunStatus>(['failed', 'cancelled', 'check_unavailable'])
 
 export type EventSourceFactory = (url: string) => EventSource
 
@@ -36,6 +48,10 @@ function userMessage(run: Run, text: string): Message {
   }
 }
 
+function isActive(status: RunStatus | undefined): boolean {
+  return status === 'queued' || status === 'running'
+}
+
 export function createChatController(
   store: ChatStore,
   api: ApiClient,
@@ -44,6 +60,27 @@ export function createChatController(
   const sources = new Map<string, EventSource>()
   const loading = new Map<string, Promise<void>>()
   let generation = 0
+  let restoring = false
+  let creating: Promise<string | null> | null = null
+  let persisted: Pick<ChatState, 'queue' | 'queuePause' | 'trackedRunId'> | null = null
+
+  store.subscribe(() => {
+    const { session, queue, queuePause, trackedRunId } = store.getState()
+    if (!session) {
+      persisted = null
+      return
+    }
+    if (
+      persisted &&
+      persisted.queue === queue &&
+      persisted.queuePause === queuePause &&
+      persisted.trackedRunId === trackedRunId
+    ) {
+      return
+    }
+    persisted = { queue, queuePause, trackedRunId }
+    writeQueue(session.user_id, { items: queue, pause: queuePause, trackedRunId })
+  })
 
   function close(runId: string) {
     sources.get(runId)?.close()
@@ -55,8 +92,15 @@ export function createChatController(
     if (userId) writeLocal(activeConversationKey(userId), id)
   }
 
+  function signIn(session: Session) {
+    restoring = true
+    store.signIn(session, readQueue(session.user_id))
+  }
+
   function signOut() {
     generation += 1
+    restoring = false
+    creating = null
     for (const runId of [...sources.keys()]) close(runId)
     loading.clear()
     api.forgetSession()
@@ -72,6 +116,16 @@ export function createChatController(
     if (conversationId !== undefined) store.setError(conversationId ?? NO_CONVERSATION, error.error)
   }
 
+  function pauseQueue(pause: QueuePause) {
+    if (store.getState().queue.length > 0) store.pauseQueue(pause)
+  }
+
+  function finishRun(runId: string, status: RunStatus) {
+    if (store.getState().trackedRunId === runId) store.setTrackedRun(null)
+    if (PAUSE_STATUSES.has(status)) pauseQueue({ reason: status as QueuePause['reason'] })
+    pump()
+  }
+
   function subscribe(runId: string) {
     if (sources.has(runId)) return
     const lastSeq = store.getState().runs[runId]?.lastSeq ?? 0
@@ -81,7 +135,10 @@ export function createChatController(
     const onEvent = (message: MessageEvent<string>) => {
       const event = JSON.parse(message.data) as RunEvent
       store.dispatch(event)
-      if (TERMINAL_EVENTS.has(event.type)) close(runId)
+      if (!TERMINAL_EVENTS.has(event.type)) return
+      close(runId)
+      const status = store.getState().runs[runId]?.status
+      if (status && !isActive(status)) finishRun(runId, status)
     }
     for (const type of EVENT_TYPES) source.addEventListener(type, onEvent as EventListener)
     source.onerror = () => {
@@ -96,11 +153,12 @@ export function createChatController(
     if (session !== generation || sources.has(runId)) return
     try {
       const run = await api.run(runId)
-      if (run.status === 'queued' || run.status === 'running') {
+      if (isActive(run.status)) {
         subscribe(runId)
         return
       }
       applyHistory(run.conversation_id, await api.messages(run.conversation_id))
+      if (session === generation) finishRun(runId, run.status)
     } catch (error) {
       if (!(error instanceof ApiRequestError)) throw error
       if (error.status === 401) signOut()
@@ -152,6 +210,183 @@ export function createChatController(
     if (id) await loadConversation(id)
   }
 
+  async function restoreTrackedRun(session: number) {
+    const runId = store.getState().trackedRunId
+    if (!runId) return
+    let run: Run
+    try {
+      run = await api.run(runId)
+    } catch (error) {
+      if (!(error instanceof ApiRequestError)) throw error
+      if (error.status === 401) signOut()
+      else if (session === generation) pauseQueue({ reason: 'request_failed', error: error.error })
+      return
+    }
+    if (session !== generation) return
+    if (isActive(run.status)) {
+      await loadConversation(run.conversation_id)
+      if (session !== generation) return
+      const known = store.getState().runs[runId]?.status
+      if (isActive(known)) {
+        subscribe(runId)
+        return
+      }
+      if (!known) {
+        store.setTrackedRun(null)
+        pauseQueue({ reason: 'request_failed', error: store.getState().errors[run.conversation_id] })
+        return
+      }
+      finishRun(runId, known)
+      return
+    }
+    finishRun(runId, run.status)
+  }
+
+  async function restoreQueue() {
+    const session = generation
+    await loadConversations()
+    if (session !== generation) return
+    await restoreTrackedRun(session)
+    if (session !== generation) return
+    restoring = false
+    pump()
+  }
+
+  async function createRunFor(item: QueuedMessage): Promise<Run | null> {
+    const session = generation
+    await loadConversation(item.conversationId)
+    if (session !== generation) return null
+    if (!store.getState().loaded[item.conversationId] || hasActiveRun(store.getState())) return null
+    store.addPendingMessage(item)
+    const body = { text: item.text, model: item.model, idempotency_key: item.idempotencyKey }
+    let run: Run
+    try {
+      try {
+        run = await api.createRun(item.conversationId, body)
+      } catch (error) {
+        if (!isNetworkError(error)) throw error
+        run = await api.createRun(item.conversationId, body)
+      }
+    } catch (error) {
+      if (session === generation) store.removePendingMessage(item)
+      throw error
+    }
+    if (session !== generation) return null
+    const known = store.getState().runs[run.id]?.status
+    store.startRun(run, userMessage(run, item.text), pendingMessageId(item))
+    if (known && !isActive(known)) {
+      if (PAUSE_STATUSES.has(known)) pauseQueue({ reason: known as QueuePause['reason'] })
+    } else {
+      store.setTrackedRun(run.id)
+      subscribe(run.id)
+    }
+    api
+      .conversations()
+      .then((list) => store.setConversations(list.items))
+      .catch(() => {})
+    return run
+  }
+
+  function newItem(conversationId: string, text: string): QueuedMessage {
+    return {
+      id: crypto.randomUUID(),
+      conversationId,
+      text,
+      model: store.getState().selectedModel,
+      idempotencyKey: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+    }
+  }
+
+  function pump() {
+    const state = store.getState()
+    const head = state.queue[0]
+    if (!head || restoring || !state.session || state.queuePause || isRunBusy(state)) return
+    const session = generation
+    store.setSending(true, head.id)
+    void createRunFor(head)
+      .then((run) => {
+        if (session !== generation) return
+        if (run) {
+          store.removeQueued(head.id)
+          return
+        }
+        if (!store.getState().loaded[head.conversationId]) {
+          pauseQueue({ reason: 'request_failed', error: store.getState().errors[head.conversationId] })
+        }
+      })
+      .catch((error: unknown) => {
+        if (!(error instanceof ApiRequestError)) throw error
+        if (error.status === 401) signOut()
+        else if (session === generation) pauseQueue({ reason: 'request_failed', error: error.error })
+      })
+      .finally(() => {
+        if (session !== generation) return
+        store.setSending(false)
+        pump()
+      })
+  }
+
+  function isRunBusy(state: ChatState): boolean {
+    return state.sending || hasActiveRun(state) || state.trackedRunId !== null
+  }
+
+  function ensureConversation(): Promise<string | null> {
+    const id = store.getState().activeConversationId
+    if (id) return Promise.resolve(id)
+    if (!creating) {
+      const session = generation
+      const pending: Promise<string | null> = api
+        .createConversation()
+        .then((conversation) => {
+          if (session !== generation) return null
+          store.addConversation(conversation)
+          rememberActive(conversation.id)
+          return conversation.id
+        })
+        .finally(() => {
+          if (creating === pending) creating = null
+        })
+      creating = pending
+    }
+    return creating
+  }
+
+  async function enqueue(text: string): Promise<SendResult> {
+    const activeId = store.getState().activeConversationId
+    if (store.getState().queue.length >= QUEUE_LIMIT) return { sent: false, conversationId: activeId }
+    const item = newItem(activeId ?? NO_CONVERSATION, text)
+    const session = generation
+    let conversationId: string | null
+    try {
+      conversationId = await ensureConversation()
+    } catch (error) {
+      handleError(error, activeId)
+      return { sent: false, conversationId: activeId }
+    }
+    if (session !== generation || !conversationId) return { sent: false, conversationId: activeId }
+    if (store.getState().queue.length >= QUEUE_LIMIT) return { sent: false, conversationId }
+    store.enqueue({ ...item, conversationId })
+    pump()
+    return { sent: true, conversationId }
+  }
+
+  function resumeQueue() {
+    store.resumeQueue()
+    const runId = store.getState().trackedRunId
+    if (!runId || restoring || sources.has(runId)) {
+      pump()
+      return
+    }
+    const session = generation
+    restoring = true
+    void restoreTrackedRun(session).finally(() => {
+      if (session !== generation) return
+      restoring = false
+      pump()
+    })
+  }
+
   return {
     async start() {
       api
@@ -160,19 +395,19 @@ export function createChatController(
         .catch(() => {})
       store.checkSession()
       try {
-        store.signIn(await api.me())
+        signIn(await api.me())
       } catch (error) {
         if (!(error instanceof ApiRequestError)) throw error
         if (error.status === 401) signOut()
         else store.finishSessionCheck(error.error)
         return
       }
-      await loadConversations()
+      await restoreQueue()
     },
 
     async signIn(code: string) {
-      store.signIn(await api.createSession(code))
-      await loadConversations()
+      signIn(await api.createSession(code))
+      await restoreQueue()
     },
 
     async selectConversation(id: string) {
@@ -200,44 +435,33 @@ export function createChatController(
     },
 
     async send(text: string): Promise<SendResult> {
-      let conversationId = store.getState().activeConversationId
-      if (store.getState().sending || hasActiveRun(store.getState())) return { sent: false, conversationId }
+      const state = store.getState()
+      if (restoring || isRunBusy(state) || state.queue.length > 0) return enqueue(text)
+      let conversationId = state.activeConversationId
+      const item = newItem(conversationId ?? NO_CONVERSATION, text)
+      const session = generation
       store.setSending(true)
       try {
         if (!conversationId) {
-          const conversation = await api.createConversation()
-          store.addConversation(conversation)
-          rememberActive(conversation.id)
-          conversationId = conversation.id
+          store.addPendingMessage(item)
+          try {
+            conversationId = await ensureConversation()
+          } finally {
+            if (!conversationId && session === generation) store.removePendingMessage(item)
+          }
+          if (!conversationId) return { sent: false, conversationId }
         }
-        await loadConversation(conversationId)
-        if (!store.getState().loaded[conversationId] || hasActiveRun(store.getState())) {
-          return { sent: false, conversationId }
-        }
-        const body = {
-          text,
-          model: store.getState().selectedModel,
-          idempotency_key: crypto.randomUUID(),
-        }
-        let run: Run
-        try {
-          run = await api.createRun(conversationId, body)
-        } catch (error) {
-          if (!isNetworkError(error)) throw error
-          run = await api.createRun(conversationId, body)
-        }
-        store.startRun(run, userMessage(run, text))
-        subscribe(run.id)
-        api
-          .conversations()
-          .then((list) => store.setConversations(list.items))
-          .catch(() => {})
-        return { sent: true, conversationId }
+        const run = await createRunFor({ ...item, conversationId })
+        return { sent: run !== null, conversationId }
       } catch (error) {
+        if (error instanceof ApiRequestError && error.status !== 401) {
+          pauseQueue({ reason: 'request_failed', error: error.error })
+        }
         handleError(error, conversationId)
         return { sent: false, conversationId }
       } finally {
         store.setSending(false)
+        pump()
       }
     },
 
@@ -251,6 +475,12 @@ export function createChatController(
         handleError(error, state.activeConversationId)
       }
     },
+
+    removeQueued(id: string) {
+      store.removeQueued(id)
+    },
+
+    resumeQueue,
 
     loadAssetUrl: (id: string) => api.assetUrl(id),
   }

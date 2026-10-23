@@ -11,4 +11,7 @@ Element.prototype.scrollIntoView ??= () => {}
 Element.prototype.hasPointerCapture ??= () => false
 Element.prototype.releasePointerCapture ??= () => {}
 
-afterEach(() => cleanup())
+afterEach(() => {
+  cleanup()
+  window.sessionStorage.clear()
+})

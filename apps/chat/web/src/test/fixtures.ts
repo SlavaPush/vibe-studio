@@ -10,6 +10,10 @@ export function testState(): ChatState {
     sessionChecked: true,
     sessionError: null,
     sending: false,
+    sendingQueuedId: null,
+    queue: [],
+    queuePause: null,
+    trackedRunId: null,
     conversations: [
       {
         id: CONVERSATION_ID,

@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { ChatThread } from '@/components/chat/ChatThread'
 import { ConversationList } from '@/components/chat/ConversationList'
 import { LoginScreen } from '@/components/chat/LoginScreen'
+import { MessageQueue } from '@/components/chat/MessageQueue'
 import { ModelSelector } from '@/components/chat/ModelSelector'
 import {
   LoadingStatus,
@@ -29,7 +30,13 @@ export default function App({ store, controller }: AppProps) {
     [controller],
   )
   const [updatePrompt, setUpdatePrompt] = useState<'pending' | 'open' | 'closed'>('pending')
-  if (state.updateAvailable && updatePrompt === 'pending' && !state.sending && !hasActiveRun(state)) {
+  if (
+    state.updateAvailable &&
+    updatePrompt === 'pending' &&
+    !state.sending &&
+    !hasActiveRun(state) &&
+    state.queue.length === 0
+  ) {
     setUpdatePrompt('open')
   }
 
@@ -66,7 +73,14 @@ export default function App({ store, controller }: AppProps) {
                 <ThemeToggle />
               </div>
             </header>
-            <ChatThread store={store} actions={actions} loadAssetUrl={controller.loadAssetUrl} />
+            <ChatThread
+              store={store}
+              actions={actions}
+              loadAssetUrl={controller.loadAssetUrl}
+              queue={
+                <MessageQueue store={store} onRemove={controller.removeQueued} onResume={controller.resumeQueue} />
+              }
+            />
             {error && <RunErrorNotice error={error} />}
           </main>
         </div>
