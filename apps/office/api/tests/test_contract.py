@@ -99,6 +99,24 @@ def test_error_codes_match_contract_table():
     assert CONTRACT_CODES["forbidden_origin"] == 403
 
 
+def test_every_route_is_documented(office):
+    text = CONTRACT.read_text(encoding="utf-8")
+    headings = "\n".join(re.findall(r"^### .*$", text, re.MULTILINE))
+    documented = {
+        re.sub(r"\{[^}]+\}", "{}", operation)
+        for operation in re.findall(r"`((?:GET|POST|PUT|PATCH|DELETE) /api/[^`]*)`", headings)
+    }
+    routes = {
+        f"{method} {re.sub(r'{[^}]+}', '{}', route.path)}"
+        for route in office.app.routes
+        if route.path.startswith("/api/") and route.path != "/api/health"
+        for method in getattr(route, "methods", ())
+        if method != "HEAD"
+    }
+    assert routes == documented
+    assert "DELETE /api/office-session" in routes
+
+
 def test_check_report_example_allows_missing_hashes():
     reports = [schemas.CheckReport.model_validate(value) for value in examples_of("CheckReport")]
     assert any(report.commit_sha is None and report.spec_hash is None for report in reports)

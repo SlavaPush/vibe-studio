@@ -110,6 +110,12 @@ class SessionStore:
         participant = Participant(id=participant_id, display_name=name, role=role, expires_at=expires_at)
         return participant, token
 
+    def logout(self, token: str | None) -> None:
+        if not token:
+            return
+        with self.db.transaction() as conn:
+            conn.execute("DELETE FROM sessions WHERE token_hash = :hash", {"hash": token_hash(token)})
+
     def participant(self, token: str | None) -> Participant | None:
         if not token:
             return None

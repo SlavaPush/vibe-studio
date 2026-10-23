@@ -2,12 +2,14 @@ import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import {
   ApiRequestError,
   STALE_MESSAGE,
+  asApiError,
   getSlots,
   getTask,
   isStale,
   isUnauthorized,
   listReleases,
   listTasks,
+  logout,
   me,
   type Run,
 } from '@/api/client'
@@ -52,6 +54,8 @@ function App() {
   const [gateNotice, setGateNotice] = useState<string | null>(null)
   const [state, dispatch] = useReducer(officeReducer, initialOfficeState)
   const [dark, setDark] = useState(false)
+  const [leaving, setLeaving] = useState(false)
+  const [logoutError, setLogoutError] = useState<string | null>(null)
   const generation = useRef(0)
   const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>())
   const slotsSeq = useRef(0)
@@ -80,14 +84,18 @@ function App() {
     }
   }, [])
 
-  const expire = useCallback(() => {
+  const endSession = useCallback((notice: string | null) => {
     generation.current += 1
     for (const timer of timers.current.values()) clearTimeout(timer)
     timers.current.clear()
     dispatch({ type: 'reset' })
     setParticipant(null)
-    setGateNotice(SESSION_EXPIRED)
+    setGateNotice(notice)
+    setLeaving(false)
+    setLogoutError(null)
   }, [])
+
+  const expire = useCallback(() => endSession(SESSION_EXPIRED), [endSession])
 
   const run: Run = useCallback(
     async <T,>(operation: () => Promise<T>): Promise<T> => {
@@ -218,6 +226,21 @@ function App() {
     refresh(loadReleases)
     refresh(() => loadTask(release.task_id))
   }
+  const leave = async () => {
+    if (leaving) return
+    setLeaving(true)
+    setLogoutError(null)
+    try {
+      await run(logout)
+    } catch (error) {
+      if (!isStale(error) && !isUnauthorized(error)) {
+        setLogoutError(asApiError(error).message)
+        setLeaving(false)
+      }
+      return
+    }
+    endSession(null)
+  }
 
   return (
     <div className="min-h-svh">
@@ -239,7 +262,15 @@ function App() {
             >
               Тёмная тема
             </Button>
+            <Button type="button" variant="outline" disabled={leaving} onClick={() => void leave()}>
+              {leaving ? 'Выходим…' : 'Выйти'}
+            </Button>
           </div>
+          {logoutError && (
+            <p role="alert" className="w-full text-sm text-destructive">
+              {logoutError}
+            </p>
+          )}
         </div>
       </header>
       <main className="mx-auto grid max-w-7xl gap-6 px-4 py-6">

@@ -1,7 +1,7 @@
 import asyncio
 import threading
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 
 from app.schemas import TaskEvent
 from app.tasks import TaskStore
@@ -52,6 +52,7 @@ async def stream_events(
     after: int,
     ping_seconds: float,
     poll_seconds: float,
+    session_active: Callable[[], bool],
 ) -> AsyncIterator[str]:
     waiter = notifier.subscribe()
     cursor = after
@@ -65,6 +66,8 @@ async def stream_events(
                 cursor = event.event_id
                 yield format_event(event)
             if time.monotonic() >= next_ping:
+                if not await asyncio.to_thread(session_active):
+                    return
                 next_ping = time.monotonic() + ping_seconds
                 yield ": ping\n\n"
             if len(events) == BATCH:

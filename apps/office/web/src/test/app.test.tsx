@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
+import { NETWORK_MESSAGE } from '@/api/client'
 import type { Participant, Task } from '@/api/types'
 import App from '@/App'
 import { COOKIE_MISSING } from '@/components/office/AccessGate'
@@ -79,7 +80,7 @@ describe('вход', () => {
     expect(screen.getByText(releases[0].id)).toBeInTheDocument()
     expect(screen.queryByText('Тестовые данные')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Тестовый участник')).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Выйти' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Выйти' })).toBeEnabled()
   })
 
   it('после перезагрузки страницы участник определяется по GET /api/me', async () => {
@@ -145,6 +146,79 @@ describe('вход', () => {
       await new Promise((resolve) => setTimeout(resolve, 50))
     })
     expect(screen.queryByText('Ответ прежнего сеанса')).not.toBeInTheDocument()
+  })
+})
+
+describe('выход', () => {
+  const admin = participants.find((participant) => participant.id === 'prt_admin') as Participant
+  const noContent = () => new Response(null, { status: 204 })
+
+  it('«Выйти» удаляет сеанс, закрывает потоки, очищает данные и позволяет войти под другой ролью', async () => {
+    const api = backend()
+    let current: Participant | null = maria
+    api.on('GET /api/me', () => (current ? json(200, current) : unauthorized()))
+    api.on('DELETE /api/office-session', () => {
+      current = null
+      return noContent()
+    })
+    render(<App />)
+    await ready()
+    const source = openStream()
+    fireEvent.click(within(stack()).getByRole('button', { name: new RegExp(developing.title) }))
+    fireEvent.mouseDown(await screen.findByRole('tab', { name: 'Ход работы' }), { button: 0 })
+    await waitFor(() => expect(FakeEventSource.all('/api/tasks/tsk_101/events')).toHaveLength(1))
+    const late = deferred<Response>()
+    api.on('GET /api/tasks/tsk_101', () => late.promise)
+    act(() => source.emit(taskEvent('tsk_101', 'role_started', { step: 'implement' })))
+    await waitFor(() => expect(api.count('GET /api/tasks/tsk_101')).toBe(1))
+
+    const button = screen.getByRole('button', { name: 'Выйти' })
+    button.focus()
+    expect(button).toHaveFocus()
+    fireEvent.click(button)
+    expect(await screen.findByRole('heading', { name: 'Вход в панель офиса' })).toBeInTheDocument()
+    expect(api.count('DELETE /api/office-session')).toBe(1)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(FakeEventSource.instances.every((item) => item.closed)).toBe(true)
+
+    api.on('POST /api/office-session', () => {
+      current = admin
+      return json(200, admin)
+    })
+    api.on('GET /api/tasks/tsk_101', developing)
+    await login('ADMIN-2026', admin.display_name)
+    await ready()
+    expect(screen.getByText(`${admin.display_name} (администратор)`)).toBeInTheDocument()
+    expect(api.bodies('POST /api/office-session')).toEqual([
+      { access_code: 'ADMIN-2026', display_name: admin.display_name },
+    ])
+    expect(screen.queryByRole('heading', { name: developing.title })).not.toBeInTheDocument()
+    late.resolve(json(200, { ...developing, title: 'Ответ прежнего сеанса', version: 99 }))
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+    expect(screen.queryByText('Ответ прежнего сеанса')).not.toBeInTheDocument()
+  })
+
+  it('сетевая ошибка выхода показывается, панель и потоки остаются', async () => {
+    const api = backend()
+    api.on('DELETE /api/office-session', () => Promise.reject(new TypeError('Failed to fetch')))
+    render(<App />)
+    await ready()
+    const source = openStream()
+    fireEvent.click(screen.getByRole('button', { name: 'Выйти' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(NETWORK_MESSAGE)
+    expect(screen.getByRole('button', { name: 'Выйти' })).toBeEnabled()
+    expect(source.closed).toBe(false)
+    expect(within(stack()).getByText(developing.title)).toBeInTheDocument()
+    expect(screen.getByText('Мария (участник)')).toBeInTheDocument()
+
+    api.on('DELETE /api/office-session', noContent)
+    fireEvent.click(screen.getByRole('button', { name: 'Выйти' }))
+    expect(await screen.findByRole('heading', { name: 'Вход в панель офиса' })).toBeInTheDocument()
+    expect(source.closed).toBe(true)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(api.count('DELETE /api/office-session')).toBe(2)
   })
 })
 

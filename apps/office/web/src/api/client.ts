@@ -116,6 +116,10 @@ export const me = () => getJson<Participant>('/api/me')
 export const login = (body: OfficeSessionRequest) =>
   postJson<Participant>('/api/office-session', body)
 
+export async function logout(): Promise<void> {
+  await request('/api/office-session', { method: 'DELETE' })
+}
+
 export const listTasks = () => getJson<Task[]>('/api/tasks')
 
 export const getTask = (id: string) => getJson<Task>(taskPath(id))

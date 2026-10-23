@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Annotated
 
@@ -121,6 +121,10 @@ def create_app(
 
     CurrentParticipant = Annotated[Participant, Depends(current_participant)]
 
+    def session_check(request: Request) -> Callable[[], bool]:
+        token = request.cookies.get(COOKIE_NAME)
+        return lambda: sessions.participant(token) is not None
+
     @app.get("/api/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
@@ -139,6 +143,13 @@ def create_app(
             samesite="lax",
         )
         return participant
+
+    @app.delete("/api/office-session", status_code=204)
+    def delete_session(request: Request) -> Response:
+        sessions.logout(request.cookies.get(COOKIE_NAME))
+        response = Response(status_code=204)
+        response.delete_cookie(COOKIE_NAME, path="/", secure=True, httponly=True, samesite="lax")
+        return response
 
     @app.get("/api/me")
     def me(participant: CurrentParticipant) -> Participant:
@@ -172,6 +183,7 @@ def create_app(
     @app.get("/api/tasks/{task_id}/events")
     async def task_events(
         task_id: str,
+        request: Request,
         _: CurrentParticipant,
         last_event_id: Annotated[str | None, Header()] = None,
     ) -> StreamingResponse:
@@ -184,11 +196,13 @@ def create_app(
             after=after,
             ping_seconds=settings.sse_ping_seconds,
             poll_seconds=settings.sse_poll_seconds,
+            session_active=session_check(request),
         )
         return StreamingResponse(stream, media_type="text/event-stream", headers=SSE_HEADERS)
 
     @app.get("/api/events")
     async def all_events(
+        request: Request,
         _: CurrentParticipant,
         last_event_id: Annotated[str | None, Header()] = None,
     ) -> StreamingResponse:
@@ -202,6 +216,7 @@ def create_app(
             after=after,
             ping_seconds=settings.sse_ping_seconds,
             poll_seconds=settings.sse_poll_seconds,
+            session_active=session_check(request),
         )
         return StreamingResponse(stream, media_type="text/event-stream", headers=SSE_HEADERS)
 
