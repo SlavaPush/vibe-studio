@@ -4,7 +4,10 @@ import { Button } from '@/components/ui/button'
 
 export function UpdateNotice() {
   return (
-    <div role="status" className="flex items-center justify-center gap-3 border-b bg-muted px-4 py-2 text-sm">
+    <div
+      role="status"
+      className="flex items-center justify-center gap-3 border-b bg-secondary px-4 py-2 text-sm font-medium text-secondary-foreground"
+    >
       <span>Доступна новая версия.</span>
       <Button size="sm" variant="outline" onClick={() => window.location.reload()}>
         Обновить страницу

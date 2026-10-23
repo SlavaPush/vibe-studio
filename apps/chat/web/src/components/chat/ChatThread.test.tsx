@@ -50,6 +50,28 @@ describe('ChatThread', () => {
     expect(answers[0]).toHaveTextContent('Модель: GPT-6.1 Sol · усилия: высокий')
   })
 
+  it('пока ответ готовится, показывает статус «Думаю…» с декоративными точками', async () => {
+    const store = createChatStore(testState())
+    const { run, userMessage } = testRun('run-1')
+    render(
+      <ChatThread
+        store={store}
+        actions={{ send: () => {}, cancel: () => {} }}
+        loadAssetUrl={() => new Promise(() => {})}
+      />,
+    )
+
+    act(() => store.startRun(run, userMessage))
+    const [accepted] = switchedRunEvents('run-1')
+    act(() => store.dispatch(accepted))
+
+    const answer = await screen.findByRole('article', { name: 'Ответ ассистента' })
+    const status = within(answer).getByRole('status')
+    expect(status.textContent).toBe('Думаю…')
+    expect(status.querySelector('[aria-hidden="true"]')?.children).toHaveLength(3)
+    expect(screen.queryByText('Ответ готовится…')).not.toBeInTheDocument()
+  })
+
   it('сохраняет отметку незавершённого ответа после отмены и нового запроса', async () => {
     const store = createChatStore(testState())
     const first = testRun('run-1')

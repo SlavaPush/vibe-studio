@@ -1,16 +1,16 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
+import '@fontsource-variable/inter'
+import '@fontsource-variable/jetbrains-mono'
 import './index.css'
 import App from './App.tsx'
 import { createApiClient } from './api/client.ts'
 import { createChatController } from './store/chatController.ts'
 import { createChatStore } from './store/conversations.ts'
 import { buildVersion, watchVersion } from './store/versionWatch.ts'
+import { initTheme } from './theme.ts'
 
-const darkScheme = window.matchMedia('(prefers-color-scheme: dark)')
-const applyTheme = () => document.documentElement.classList.toggle('dark', darkScheme.matches)
-applyTheme()
-darkScheme.addEventListener('change', applyTheme)
+initTheme()
 
 const store = createChatStore()
 const controller = createChatController(store, createApiClient())

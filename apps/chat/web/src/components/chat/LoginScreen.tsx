@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { ThemeToggle } from '@/components/ThemeToggle'
 
 interface LoginScreenProps {
   onSubmit: (code: string) => Promise<void>
@@ -30,11 +31,14 @@ export function LoginScreen({ onSubmit }: LoginScreenProps) {
   }
 
   return (
-    <main className="flex flex-1 items-center justify-center p-4">
-      <Card className="w-full max-w-sm">
+    <main className="relative flex min-h-0 flex-1 flex-col items-center overflow-y-auto bg-banner p-4 pt-16">
+      <div className="dark absolute top-4 right-4">
+        <ThemeToggle />
+      </div>
+      <Card className="my-auto w-full max-w-sm shadow-[0_8px_24px_rgb(69_32_171_/_0.28)]">
         <CardHeader>
           <CardTitle>
-            <h1>Вход в vibe-chat</h1>
+            <h1 className="font-display text-2xl font-bold tracking-[-0.04em] uppercase">Вход в vibe-chat</h1>
           </CardTitle>
           <CardDescription>Введите код доступа от организатора.</CardDescription>
         </CardHeader>
@@ -59,7 +63,7 @@ export function LoginScreen({ onSubmit }: LoginScreenProps) {
             </Button>
           </form>
           <section aria-labelledby="access-info-title" className="mt-6 flex flex-col gap-2 text-sm text-muted-foreground">
-            <h2 id="access-info-title" className="font-medium text-foreground">
+            <h2 id="access-info-title" className="font-display font-bold tracking-[-0.02em] text-foreground uppercase">
               Как работает доступ
             </h2>
             <p>

@@ -4,6 +4,7 @@ import { ConversationList } from '@/components/chat/ConversationList'
 import { LoginScreen } from '@/components/chat/LoginScreen'
 import { ModelSelector } from '@/components/chat/ModelSelector'
 import { LoadingStatus, RunErrorNotice, SessionErrorNotice, UpdateNotice } from '@/components/chat/Notices'
+import { ThemeToggle } from '@/components/ThemeToggle'
 import type { ConversationActions } from '@/store/assistantAdapter'
 import type { ChatController } from '@/store/chatController'
 import { NO_CONVERSATION, useChatState, type ChatStore } from '@/store/conversations'
@@ -33,7 +34,7 @@ export default function App({ store, controller }: AppProps) {
         <SessionErrorNotice error={state.sessionError} onRetry={() => void controller.start()} />
       ) : state.session ? (
         <div className="flex min-h-0 flex-1">
-          <aside className="w-64 shrink-0 overflow-y-auto border-r">
+          <aside className="w-64 shrink-0 overflow-y-auto border-r bg-muted">
             <ConversationList
               conversations={state.conversations}
               activeId={state.activeConversationId}
@@ -43,13 +44,18 @@ export default function App({ store, controller }: AppProps) {
             />
           </aside>
           <main className="flex min-w-0 flex-1 flex-col">
-            <header className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3">
-              <h1 className="truncate text-base font-semibold">{active?.title ?? 'vibe-chat'}</h1>
-              <ModelSelector
-                models={state.models}
-                value={state.selectedModel}
-                onChange={store.selectModel}
-              />
+            <header className="flex flex-wrap items-center justify-between gap-3 border-b bg-background px-4 py-3">
+              <h1 className="min-w-0 truncate font-display text-base font-bold tracking-[-0.03em] uppercase">
+                {active?.title ?? 'vibe-chat'}
+              </h1>
+              <div className="flex items-center gap-3">
+                <ModelSelector
+                  models={state.models}
+                  value={state.selectedModel}
+                  onChange={store.selectModel}
+                />
+                <ThemeToggle />
+              </div>
             </header>
             <ChatThread store={store} actions={actions} loadAssetUrl={controller.loadAssetUrl} />
             {error && <RunErrorNotice error={error} />}
