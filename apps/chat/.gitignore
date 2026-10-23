@@ -3,6 +3,7 @@ node_modules/
 dist/
 *.tsbuildinfo
 npm-debug.log*
+web/src/mocks/contract-examples.ts
 
 # Python
 .venv/
