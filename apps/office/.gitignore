@@ -4,6 +4,7 @@ dist/
 dist-ssr/
 *.tsbuildinfo
 npm-debug.log*
+web/src/mocks/contract-examples.json
 
 # Python
 .venv/

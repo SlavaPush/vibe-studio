@@ -16,7 +16,29 @@
 | `api/scripts/` | Smoke-проверки локальных моделей |
 | `workspace/` | Клон `vibe-chat` и worktree задач; в `.gitignore` |
 
-Статус: этап `P0` — каркас репозитория, CI и проверки окружения. Граф ролей ещё не реализован.
+Статус: этап `P1` — контракты `contracts/api.md` и `contracts/integrations.md`, Pydantic-схемы, тестовые данные API и панель на тестовых данных. Граф ролей, запись решений, SSE и серверная проверка прав ещё не реализованы (этап `P4`).
+
+## Контракты
+
+`contracts/api.md` описывает API панели: операции, модели, перечисления, ошибки и права. Примеры JSON размечены маркером `<!-- example: <Модель> -->`. `api/tests/test_contract.py` разбирает каждый пример своей Pydantic-моделью. Скрипт `web/scripts/extract-contract-examples.mjs` извлекает те же примеры в `web/src/mocks/contract-examples.json` перед `npm run dev`, `npm run test` и `npm run build`; файл создаётся автоматически и не хранится в Git.
+
+`contracts/integrations.md` описывает работу офиса с GitHub, Render и `GET /api/version` сервиса `vibe-chat`: ветки задач, PR, обязательные проверки, очередь выпуска, деплой по `commitId` и откат.
+
+## Структура `web/src`
+
+| Путь | Назначение |
+| --- | --- |
+| `api/types.ts` | Типы и перечисления по `contracts/api.md` |
+| `components/ui/` | Компоненты shadcn/ui (`components.json`: `new-york`, `neutral`) |
+| `components/office/` | Экраны панели: `AccessGate`, `TaskStack`, `TaskCard`, `ReleaseQueue` |
+| `lib/permissions.ts` | `canAct`: доступность решений по владельцу, роли и статусу |
+| `lib/slots.ts` | `countSlots`: подсчёт занятых слотов |
+| `lib/labels.ts` | Русские подписи статусов, решений, ролей и событий |
+| `mocks/` | Тестовые данные: примеры контракта и данные только для панели |
+| `test/` | Тесты vitest и React Testing Library |
+| `index.css` | UI-токены shadcn/ui, тёмная тема `.dark`, focus и `prefers-reduced-motion` |
+
+Панель работает только на тестовых данных и не выполняет сетевых запросов. Тестовые коды входа: `OFFICE-2026` (участник) и `ADMIN-2026` (администратор). Переключатель «Тестовый участник» показывает ограничения действий для владельца задачи, другого участника и администратора.
 
 ## Профили моделей
 
@@ -58,6 +80,10 @@ cd web && npm ci && npm run dev
 
 ```bash
 cd api && uv run pytest
+```
+
+```bash
+cd web && npm ci && npm run lint && npm run test && npm run build
 ```
 
 Smoke-проверка локальной модели (ответ без рассуждения и с рассуждением, код возврата 0 только при двух завершённых ответах):
