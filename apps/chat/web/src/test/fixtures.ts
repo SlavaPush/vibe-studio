@@ -7,6 +7,9 @@ export const CONVERSATION_ID = 'test-conversation'
 export function testState(): ChatState {
   return {
     session: { user_id: 'test-user', expires_at: '2026-10-30T18:00:00Z', csrf_token: 'test' },
+    sessionChecked: true,
+    sessionError: null,
+    sending: false,
     conversations: [
       {
         id: CONVERSATION_ID,

@@ -1,6 +1,7 @@
 import { ApiRequestError, isNetworkError, type ApiClient } from '@/api/client'
 import type { Message, MessageList, Run, RunEvent, RunEventType } from '@/api/types'
-import { activeRunId, type ChatStore } from './conversations'
+import type { SendResult } from './assistantAdapter'
+import { activeRunId, hasActiveRun, NO_CONVERSATION, type ChatStore } from './conversations'
 import { activeConversationKey, readLocal, writeLocal } from './drafts'
 
 const EVENT_TYPES: RunEventType[] = [
@@ -68,7 +69,7 @@ export function createChatController(
       signOut()
       return
     }
-    if (conversationId) store.setError(conversationId, error.error)
+    if (conversationId !== undefined) store.setError(conversationId ?? NO_CONVERSATION, error.error)
   }
 
   function subscribe(runId: string) {
@@ -135,19 +136,20 @@ export function createChatController(
   }
 
   async function loadConversations() {
+    let id: string | undefined
     try {
       const list = await api.conversations()
       store.setConversations(list.items)
       const { activeConversationId, session } = store.getState()
       const saved = session ? readLocal(activeConversationKey(session.user_id)) : ''
-      const id = activeConversationId ?? list.items.find((item) => item.id === saved)?.id ?? list.items[0]?.id
-      if (id) {
-        store.selectConversation(id)
-        await loadConversation(id)
-      }
+      id = activeConversationId ?? list.items.find((item) => item.id === saved)?.id ?? list.items[0]?.id
+      if (id) store.selectConversation(id)
     } catch (error) {
       handleError(error)
+    } finally {
+      if (!store.getState().sessionChecked) store.finishSessionCheck()
     }
+    if (id) await loadConversation(id)
   }
 
   return {
@@ -156,11 +158,13 @@ export function createChatController(
         .models()
         .then((catalog) => store.setModels(catalog.items))
         .catch(() => {})
+      store.checkSession()
       try {
         store.signIn(await api.me())
       } catch (error) {
-        if (error instanceof ApiRequestError && error.status === 401) return
-        handleError(error)
+        if (!(error instanceof ApiRequestError)) throw error
+        if (error.status === 401) signOut()
+        else store.finishSessionCheck(error.error)
         return
       }
       await loadConversations()
@@ -195,8 +199,10 @@ export function createChatController(
       }
     },
 
-    async send(text: string) {
+    async send(text: string): Promise<SendResult> {
       let conversationId = store.getState().activeConversationId
+      if (store.getState().sending || hasActiveRun(store.getState())) return { sent: false, conversationId }
+      store.setSending(true)
       try {
         if (!conversationId) {
           const conversation = await api.createConversation()
@@ -205,7 +211,9 @@ export function createChatController(
           conversationId = conversation.id
         }
         await loadConversation(conversationId)
-        if (!store.getState().loaded[conversationId]) return
+        if (!store.getState().loaded[conversationId] || hasActiveRun(store.getState())) {
+          return { sent: false, conversationId }
+        }
         const body = {
           text,
           model: store.getState().selectedModel,
@@ -224,8 +232,12 @@ export function createChatController(
           .conversations()
           .then((list) => store.setConversations(list.items))
           .catch(() => {})
+        return { sent: true, conversationId }
       } catch (error) {
         handleError(error, conversationId)
+        return { sent: false, conversationId }
+      } finally {
+        store.setSending(false)
       }
     },
 

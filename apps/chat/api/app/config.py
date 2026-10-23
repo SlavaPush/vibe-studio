@@ -13,6 +13,7 @@ PUBLIC_REQUIRED = (
     "SUPABASE_SECRET_KEY",
     "DATABASE_URL",
 )
+CLIENT_IP_SOURCES = ("xff_from_end", "xff_first", "true-client-ip", "cf-connecting-ip", "x-real-ip")
 
 
 class ConfigError(Exception):
@@ -59,6 +60,8 @@ class Settings:
     quota_salt: str = ""
     trust_proxy_headers: bool = False
     proxy_hops: int = 1
+    client_ip_source: str = "xff_from_end"
+    log_forwarded_chain: bool = False
     web_dist_dir: str = ""
     image_quality: str = "medium"
     user_limits: Limits = field(default_factory=lambda: Limits(60, 5, 1_000_000))
@@ -95,6 +98,10 @@ def load_settings() -> Settings:
     if not hops.isdigit() or int(hops) < 1:
         raise ConfigError("PROXY_HOPS должна быть целым числом не меньше 1")
 
+    ip_source = get("CLIENT_IP_SOURCE", Settings.client_ip_source).strip().lower()
+    if ip_source not in CLIENT_IP_SOURCES:
+        raise ConfigError(f"CLIENT_IP_SOURCE должна быть одним из значений: {', '.join(CLIENT_IP_SOURCES)}")
+
     render_url = get("RENDER_EXTERNAL_URL").rstrip("/")
     origins = get("ALLOWED_ORIGINS", render_url or DEFAULT_ORIGINS)
 
@@ -113,6 +120,8 @@ def load_settings() -> Settings:
         quota_salt=get("QUOTA_SALT"),
         trust_proxy_headers=_flag(get("TRUST_PROXY_HEADERS", "false")),
         proxy_hops=int(hops),
+        client_ip_source=ip_source,
+        log_forwarded_chain=_flag(get("LOG_FORWARDED_CHAIN", "false")),
         web_dist_dir=get("WEB_DIST_DIR"),
         image_quality=get("IMAGE_QUALITY", Settings.image_quality),
         user_limits=limits("USER", 60, 5, 1_000_000),

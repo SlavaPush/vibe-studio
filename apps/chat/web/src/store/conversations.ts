@@ -20,6 +20,9 @@ export interface RunState {
 
 export interface ChatState {
   session: Session | null
+  sessionChecked: boolean
+  sessionError: ApiError | null
+  sending: boolean
   conversations: Conversation[]
   activeConversationId: string | null
   messages: Record<string, Message[]>
@@ -38,10 +41,14 @@ const TERMINAL_STATUS: Partial<Record<RunEvent['type'], RunStatus>> = {
 }
 
 const FINISHED_SEQ = Number.MAX_SAFE_INTEGER
+export const NO_CONVERSATION = ''
 
 export function initialChatState(): ChatState {
   return {
     session: null,
+    sessionChecked: false,
+    sessionError: null,
+    sending: false,
     conversations: [],
     activeConversationId: null,
     messages: {},
@@ -210,12 +217,22 @@ export function createChatStore(initial: ChatState = initialChatState()) {
     setModels(models: ModelProfile[]) {
       set({ ...state, models })
     },
+    checkSession() {
+      set({ ...state, sessionChecked: false, sessionError: null })
+    },
+    finishSessionCheck(error: ApiError | null = null) {
+      set({ ...state, sessionChecked: true, sessionError: error })
+    },
+    setSending(sending: boolean) {
+      set({ ...state, sending })
+    },
     signIn(session: Session) {
       set({ ...state, session })
     },
     signOut() {
       set({
         ...initialChatState(),
+        sessionChecked: true,
         models: state.models,
         selectedModel: state.selectedModel,
         updateAvailable: state.updateAvailable,
@@ -275,6 +292,16 @@ export function activeRunId(state: ChatState, conversationId = state.activeConve
       run.conversationId === conversationId && (run.status === 'queued' || run.status === 'running'),
   )
   return entry ? entry[0] : null
+}
+
+export function hasActiveRun(state: ChatState): boolean {
+  return Object.values(state.runs).some((run) => run.status === 'queued' || run.status === 'running')
+}
+
+export function isSendBlocked(state: ChatState): boolean {
+  const id = state.activeConversationId
+  const loading = id !== null && !state.loaded[id] && !state.errors[id]
+  return state.sending || loading || hasActiveRun(state)
 }
 
 export function isIncomplete(state: ChatState, message: Message): boolean {

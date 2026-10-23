@@ -1,3 +1,6 @@
+import hashlib
+import hmac
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +25,8 @@ NAMES = (
     "RENDER",
     "COOKIE_SECURE",
     "PROXY_HOPS",
+    "CLIENT_IP_SOURCE",
+    "LOG_FORWARDED_CHAIN",
     "ALLOWED_ORIGINS",
     "RENDER_EXTERNAL_URL",
     "APP_VERSION",
@@ -100,11 +105,44 @@ def test_version_prefers_app_version_then_render_commit(env):
     assert app_version() == "v-explicit"
 
 
-def request_with(forwarded: list[str], trust: bool = True, hops: int = 1) -> Request:
-    settings = Settings(trust_proxy_headers=trust, proxy_hops=hops)
+def request_with(
+    forwarded: list[str],
+    trust: bool = True,
+    hops: int = 1,
+    source: str = "xff_from_end",
+    extra: dict[str, str] | None = None,
+) -> Request:
+    settings = Settings(trust_proxy_headers=trust, proxy_hops=hops, client_ip_source=source)
     app = SimpleNamespace(state=SimpleNamespace(settings=settings))
     headers = [(b"x-forwarded-for", value.encode()) for value in forwarded]
+    headers += [(name.encode(), value.encode()) for name, value in (extra or {}).items()]
     return Request({"type": "http", "app": app, "headers": headers, "client": ("10.0.0.9", 5000)})
+
+
+def test_client_ip_source_defaults_to_proxy_hops_and_rejects_unknown_value(env):
+    assert load_settings().client_ip_source == "xff_from_end"
+    env(CLIENT_IP_SOURCE=" XFF_First ")
+    assert load_settings().client_ip_source == "xff_first"
+    env(CLIENT_IP_SOURCE="x-forwarded-host")
+    with pytest.raises(ConfigError, match="CLIENT_IP_SOURCE"):
+        load_settings()
+
+
+def test_client_ip_takes_first_forwarded_element():
+    assert client_ip(request_with(["203.0.113.5, 198.51.100.1, 10.0.0.1"], source="xff_first")) == "203.0.113.5"
+    assert client_ip(request_with(["203.0.113.5", "10.0.0.1"], source="xff_first")) == "203.0.113.5"
+    assert client_ip(request_with([], source="xff_first")) == "10.0.0.9"
+    assert client_ip(request_with(["not-an-ip, 203.0.113.5"], source="xff_first")) == "10.0.0.9"
+    assert client_ip(request_with(["203.0.113.5"], trust=False, source="xff_first")) == "10.0.0.9"
+
+
+@pytest.mark.parametrize("header", ["true-client-ip", "cf-connecting-ip", "x-real-ip"])
+def test_client_ip_takes_named_header(header):
+    request = request_with(["198.51.100.1, 192.0.2.7"], source=header, extra={header: " 203.0.113.5 "})
+    assert client_ip(request) == "203.0.113.5"
+    assert client_ip(request_with(["198.51.100.1"], source=header)) == "10.0.0.9"
+    assert client_ip(request_with([], source=header, extra={header: "unknown"})) == "10.0.0.9"
+    assert client_ip(request_with([], trust=False, source=header, extra={header: "203.0.113.5"})) == "10.0.0.9"
 
 
 def test_client_ip_ignores_forwarded_header_without_trust():
@@ -143,3 +181,56 @@ def test_spoofed_forwarded_prefix_does_not_change_session_source(db):
         )
     assert statuses == [201, 201, 429]
     assert other.status_code == 201
+
+
+def test_spoofed_forwarded_suffix_does_not_change_session_source_with_first_element(db):
+    app = make_app(db, trust_proxy_headers=True, client_ip_source="xff_first", sessions_per_hour=2)
+    with client_for(app) as client:
+        statuses = [
+            client.post(
+                "/api/demo-session",
+                json={"code": DEMO_CODE},
+                headers={"X-Forwarded-For": f"203.0.113.5, 198.51.100.{index}, 10.0.0.{index}"},
+            ).status_code
+            for index in range(3)
+        ]
+        other = client.post(
+            "/api/demo-session", json={"code": DEMO_CODE}, headers={"X-Forwarded-For": "203.0.113.6, 198.51.100.1"}
+        )
+    assert statuses == [201, 201, 429]
+    assert other.status_code == 201
+
+
+def test_forwarded_chain_is_not_logged_by_default(db, caplog):
+    caplog.set_level(logging.INFO)
+    with client_for(make_app(db, trust_proxy_headers=True)) as client:
+        client.post("/api/demo-session", json={"code": DEMO_CODE}, headers={"X-Forwarded-For": "203.0.113.5"})
+    assert not [record for record in caplog.records if "forwarded chain" in record.getMessage()]
+
+
+def test_forwarded_chain_log_has_hashes_without_addresses(db, caplog):
+    caplog.set_level(logging.INFO)
+    addresses = ("203.0.113.5", "198.51.100.7", "10.0.0.1", "192.0.2.44", "2001:db8::9")
+    app = make_app(db, trust_proxy_headers=True, log_forwarded_chain=True)
+    with client_for(app) as client:
+        response = client.post(
+            "/api/demo-session",
+            json={"code": DEMO_CODE},
+            headers=[
+                ("X-Forwarded-For", f"{addresses[0]}, {addresses[1]}"),
+                ("X-Forwarded-For", addresses[2]),
+                ("True-Client-IP", addresses[3]),
+                ("Forwarded", f'for="[{addresses[4]}]"'),
+            ],
+        )
+    assert response.status_code == 201
+    records = [record for record in caplog.records if "forwarded chain" in record.getMessage()]
+    assert len(records) == 1
+    assert records[0].levelno == logging.INFO
+    line = records[0].getMessage()
+    assert "count=3" in line
+    salt = app.state.settings.quota_salt.encode()
+    for address in addresses[:4]:
+        assert hmac.new(salt, address.encode(), hashlib.sha256).hexdigest()[:8] in line
+    assert "'true-client-ip'" in line and "'forwarded'" in line and "x-real-ip" not in line
+    assert all(address not in line for address in addresses)

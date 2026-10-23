@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import ipaddress
+import logging
 import secrets
 import time
 import uuid
@@ -16,6 +17,9 @@ from app.schemas import DemoSessionRequest, Session
 
 COOKIE = "vc_session"
 SESSION_DAYS = 7
+FORWARDED_HEADERS = ("x-forwarded-for", "x-real-ip", "true-client-ip", "cf-connecting-ip", "forwarded")
+
+log = logging.getLogger("uvicorn.error")
 
 router = APIRouter()
 
@@ -28,15 +32,23 @@ class CurrentUser:
     source_hash: str
 
 
+def forwarded_chain(request: Request) -> list[str]:
+    return [item.strip() for value in request.headers.getlist("x-forwarded-for") for item in value.split(",")]
+
+
 def client_ip(request: Request) -> str:
     settings = request.app.state.settings
     peer = request.client.host if request.client else "unknown"
     if not settings.trust_proxy_headers:
         return peer
-    chain = [item.strip() for value in request.headers.getlist("x-forwarded-for") for item in value.split(",")]
-    if len(chain) < settings.proxy_hops:
-        return peer
-    candidate = chain[-settings.proxy_hops]
+    source = settings.client_ip_source
+    chain = forwarded_chain(request)
+    if source == "xff_from_end":
+        candidate = chain[-settings.proxy_hops] if len(chain) >= settings.proxy_hops else ""
+    elif source == "xff_first":
+        candidate = chain[0] if chain else ""
+    else:
+        candidate = request.headers.get(source, "").strip()
     try:
         ipaddress.ip_address(candidate)
     except ValueError:
@@ -44,9 +56,27 @@ def client_ip(request: Request) -> str:
     return candidate
 
 
-def source_hash(request: Request) -> str:
+def keyed_hash(request: Request, value: str) -> str:
     salt = request.app.state.settings.quota_salt.encode()
-    return hmac.new(salt, client_ip(request).encode(), hashlib.sha256).hexdigest()
+    return hmac.new(salt, value.encode(), hashlib.sha256).hexdigest()
+
+
+def source_hash(request: Request) -> str:
+    return keyed_hash(request, client_ip(request))
+
+
+def log_forwarded_chain(request: Request, source: str) -> None:
+    chain = forwarded_chain(request)
+    present = [name for name in FORWARDED_HEADERS if name in request.headers]
+    singles = {name: keyed_hash(request, request.headers[name])[:8] for name in present if name != "x-forwarded-for"}
+    log.info(
+        "forwarded chain: count=%d xff=%s headers=%s values=%s source=%s",
+        len(chain),
+        [keyed_hash(request, item)[:8] for item in chain],
+        present,
+        singles,
+        source[:8],
+    )
 
 
 def token_hash(token: str) -> str:
@@ -102,6 +132,8 @@ async def create_session(body: DemoSessionRequest, request: Request, response: R
     check_origin(request)
     settings = request.app.state.settings
     source = source_hash(request)
+    if settings.log_forwarded_chain:
+        log_forwarded_chain(request, source)
     if not request.app.state.session_limiter.allow(source, settings.sessions_per_hour):
         raise AppError("rate_limited")
     expected = settings.demo_access_code

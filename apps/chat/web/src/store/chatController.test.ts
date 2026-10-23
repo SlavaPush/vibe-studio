@@ -3,7 +3,7 @@ import { ApiRequestError, createApiClient, type ApiClient } from '@/api/client'
 import type { ApiError, Conversation, CreateRunRequest, Message, MessageList, RunEvent } from '@/api/types'
 import { CONVERSATION_ID, switchedRunEvents, testRun, testState } from '@/test/fixtures'
 import { createChatController } from './chatController'
-import { createChatStore, initialChatState } from './conversations'
+import { createChatStore, initialChatState, NO_CONVERSATION } from './conversations'
 
 class FakeEventSource {
   static CLOSED = 2
@@ -69,6 +69,7 @@ describe('createChatController', () => {
     const { store, controller } = setup(fakeApi({ me: vi.fn().mockRejectedValue(error(401, 'unauthorized')) }))
     await controller.start()
     expect(store.getState().session).toBeNull()
+    expect(store.getState().sessionChecked).toBe(true)
   })
 
   it('после загрузки подписывается на активное задание и продолжает обновлять его диалог', async () => {
@@ -96,6 +97,37 @@ describe('createChatController', () => {
     expect(api.messages).toHaveBeenCalledTimes(2)
   })
 
+  it('не отправляет новый запрос, пока предыдущий отправляется или выполняется', async () => {
+    const { run } = testRun('run-busy')
+    const createRun = vi.fn().mockResolvedValue(run)
+    const { store, controller } = setup(fakeApi({ createRun }))
+    await controller.start()
+    await Promise.all([controller.send('Первый'), controller.send('Второй')])
+    await controller.send('Третий')
+    expect(createRun).toHaveBeenCalledTimes(1)
+    expect(store.getState().sending).toBe(false)
+  })
+
+  it('не отправляет запрос, если загруженная перед отправкой история содержит активное задание', async () => {
+    const { run, userMessage } = testRun('run-in-history')
+    let resolveHistory: (list: MessageList) => void = () => {}
+    const createRun = vi.fn()
+    const api = fakeApi({
+      conversations: vi.fn().mockResolvedValue({ items: [] }),
+      messages: vi.fn().mockReturnValue(new Promise<MessageList>((resolve) => (resolveHistory = resolve))),
+      createRun,
+    })
+    const { store, controller } = setup(api)
+    await controller.start()
+    store.setConversations([conversation])
+    const selecting = controller.selectConversation(CONVERSATION_ID)
+    const sending = controller.send('Новый вопрос')
+    resolveHistory({ items: [userMessage], active_run_id: run.id, runs: [{ ...run, status: 'running' }] })
+    await Promise.all([selecting, sending])
+    expect(createRun).not.toHaveBeenCalled()
+    expect(store.getState().sending).toBe(false)
+  })
+
   it('повторяет отправку после сетевой ошибки с тем же ключом идемпотентности', async () => {
     const { run } = testRun('run-sent')
     const createRun = vi
@@ -109,6 +141,32 @@ describe('createChatController', () => {
     expect(createRun.mock.calls[0][1].idempotency_key).toBe(createRun.mock.calls[1][1].idempotency_key)
     expect(store.getState().messages[CONVERSATION_ID].map((message) => message.text)).toEqual(['Расскажи о потоках'])
     expect(sources).toHaveLength(1)
+  })
+
+  it('сообщает о неудачной отправке при 429 и после исчерпания повтора сетевой ошибки', async () => {
+    const { run } = testRun('run-ok')
+    const createRun = vi
+      .fn()
+      .mockRejectedValueOnce(error(429, 'rate_limited'))
+      .mockRejectedValueOnce(error(0, 'service_unavailable'))
+      .mockRejectedValueOnce(error(0, 'service_unavailable'))
+      .mockResolvedValueOnce(run)
+    const { store, controller } = setup(fakeApi({ createRun }))
+    await controller.start()
+    expect(await controller.send('Первый')).toEqual({ sent: false, conversationId: CONVERSATION_ID })
+    expect(store.getState().errors[CONVERSATION_ID]?.code).toBe('rate_limited')
+    expect(await controller.send('Второй')).toEqual({ sent: false, conversationId: CONVERSATION_ID })
+    expect(store.getState().errors[CONVERSATION_ID]?.code).toBe('service_unavailable')
+    expect(await controller.send('Третий')).toEqual({ sent: true, conversationId: CONVERSATION_ID })
+    expect(createRun).toHaveBeenCalledTimes(4)
+  })
+
+  it('показывает ошибку, если диалог для первого сообщения не создан', async () => {
+    const createConversation = vi.fn().mockRejectedValue(error(0, 'service_unavailable'))
+    const { store, controller } = setup(fakeApi({ conversations: vi.fn().mockResolvedValue({ items: [] }), createConversation }))
+    await controller.start()
+    expect(await controller.send('Первый')).toEqual({ sent: false, conversationId: null })
+    expect(store.getState().errors[NO_CONVERSATION]?.code).toBe('service_unavailable')
   })
 
   it('повторяет отправку, если тело успешного ответа не прочитано', async () => {

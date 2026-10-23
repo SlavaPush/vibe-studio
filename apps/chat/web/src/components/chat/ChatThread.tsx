@@ -5,6 +5,7 @@ import {
   ThreadPrimitive,
   useAui,
   useAuiState,
+  type AssistantRuntime,
   type MessageState,
 } from '@assistant-ui/react'
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -12,12 +13,13 @@ import { ApiRequestError } from '@/api/client'
 import type { AssetRef, AssetUrl, Effort, ModelProfile, SystemMessageKind } from '@/api/types'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
+import { LoadingStatus } from '@/components/chat/Notices'
 import {
   readMessageCustom,
   useConversationRuntime,
   type ConversationActions,
 } from '@/store/assistantAdapter'
-import { useChatState, type ChatStore } from '@/store/conversations'
+import { isSendBlocked, useChatState, type ChatStore } from '@/store/conversations'
 import { draftKey, readLocal, writeLocal } from '@/store/drafts'
 import { cn } from 'cn'
 
@@ -46,18 +48,46 @@ export function ChatThread({ store, actions, loadAssetUrl }: ChatThreadProps) {
   const storageKey = useChatState(store, (state) =>
     draftKey(state.session?.user_id ?? '', state.activeConversationId),
   )
+  const runtimeRef = useRef<AssistantRuntime | null>(null)
   const threadActions = useMemo<ConversationActions>(
     () => ({
       ...actions,
-      send: (text) => {
-        writeLocal(storageKey, '')
-        actions.send(text)
+      send: async (text) => {
+        const userId = store.getState().session?.user_id ?? ''
+        let target = store.getState().activeConversationId
+        writeLocal(draftKey(userId, target), '')
+        let sent = false
+        try {
+          const result = (await actions.send(text)) ?? { sent: true, conversationId: target }
+          sent = result.sent
+          target = result.conversationId
+          return result
+        } finally {
+          if (!sent) {
+            const composer = runtimeRef.current?.thread.composer
+            if (composer && store.getState().activeConversationId === target) {
+              composer.setText(joinDraft(text, composer.getState().text))
+            } else {
+              const key = draftKey(userId, target)
+              writeLocal(key, joinDraft(text, readLocal(key)))
+            }
+          }
+        }
       },
     }),
-    [actions, storageKey],
+    [actions, store],
   )
   const runtime = useConversationRuntime(store, threadActions)
+  useEffect(() => {
+    runtimeRef.current = runtime
+  }, [runtime])
   const models = useChatState(store, (state) => state.models)
+  const sendBlocked = useChatState(store, isSendBlocked)
+  const historyStatus = useChatState(store, (state) => {
+    const id = state.activeConversationId
+    if (!id || state.loaded[id]) return 'ready'
+    return state.errors[id] ? 'failed' : 'loading'
+  })
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
@@ -68,11 +98,14 @@ export function ChatThread({ store, actions, loadAssetUrl }: ChatThreadProps) {
           aria-label="Сообщения диалога"
           className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 py-6"
         >
-          <AuiIf condition={(state) => state.thread.isEmpty}>
-            <p className="m-auto text-sm text-muted-foreground">
-              Сообщений пока нет. Напишите первый запрос.
-            </p>
-          </AuiIf>
+          {historyStatus === 'loading' && <LoadingStatus label="Загрузка сообщений…" />}
+          {historyStatus === 'ready' && (
+            <AuiIf condition={(state) => state.thread.isEmpty}>
+              <p className="m-auto text-sm text-muted-foreground">
+                Сообщений пока нет. Напишите первый запрос.
+              </p>
+            </AuiIf>
+          )}
           <ThreadPrimitive.Messages>
             {({ message }) => (
               <ChatMessage message={message} models={models} loadAssetUrl={loadAssetUrl} />
@@ -84,6 +117,11 @@ export function ChatThread({ store, actions, loadAssetUrl }: ChatThreadProps) {
             aria-label="Сообщение"
             placeholder="Напишите сообщение"
             rows={1}
+            onKeyDown={(event) => {
+              if (sendBlocked && event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                event.preventDefault()
+              }
+            }}
             className="min-h-9 flex-1 resize-none rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
           />
           <AuiIf condition={(state) => !state.thread.isRunning}>
@@ -100,6 +138,10 @@ export function ChatThread({ store, actions, loadAssetUrl }: ChatThreadProps) {
       </ThreadPrimitive.Root>
     </AssistantRuntimeProvider>
   )
+}
+
+function joinDraft(text: string, current: string): string {
+  return current ? `${text}\n${current}` : text
 }
 
 function ComposerDraft({ storageKey }: { storageKey: string }) {

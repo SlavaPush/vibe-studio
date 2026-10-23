@@ -3,10 +3,10 @@ import { ChatThread } from '@/components/chat/ChatThread'
 import { ConversationList } from '@/components/chat/ConversationList'
 import { LoginScreen } from '@/components/chat/LoginScreen'
 import { ModelSelector } from '@/components/chat/ModelSelector'
-import { RunErrorNotice, UpdateNotice } from '@/components/chat/Notices'
+import { LoadingStatus, RunErrorNotice, SessionErrorNotice, UpdateNotice } from '@/components/chat/Notices'
 import type { ConversationActions } from '@/store/assistantAdapter'
 import type { ChatController } from '@/store/chatController'
-import { useChatState, type ChatStore } from '@/store/conversations'
+import { NO_CONVERSATION, useChatState, type ChatStore } from '@/store/conversations'
 
 interface AppProps {
   store: ChatStore
@@ -16,16 +16,22 @@ interface AppProps {
 export default function App({ store, controller }: AppProps) {
   const state = useChatState(store, (current) => current)
   const active = state.conversations.find((item) => item.id === state.activeConversationId)
-  const error = state.activeConversationId ? state.errors[state.activeConversationId] : undefined
+  const error = state.errors[state.activeConversationId ?? NO_CONVERSATION]
   const actions = useMemo<ConversationActions>(
-    () => ({ send: (text) => void controller.send(text), cancel: () => void controller.cancel() }),
+    () => ({ send: (text) => controller.send(text), cancel: () => void controller.cancel() }),
     [controller],
   )
 
   return (
     <div className="flex h-dvh flex-col">
       {state.updateAvailable && <UpdateNotice />}
-      {state.session ? (
+      {!state.sessionChecked ? (
+        <main aria-busy="true" className="flex flex-1">
+          <LoadingStatus label="Загрузка…" />
+        </main>
+      ) : state.sessionError ? (
+        <SessionErrorNotice error={state.sessionError} onRetry={() => void controller.start()} />
+      ) : state.session ? (
         <div className="flex min-h-0 flex-1">
           <aside className="w-64 shrink-0 overflow-y-auto border-r">
             <ConversationList

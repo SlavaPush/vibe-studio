@@ -5,7 +5,7 @@ import {
 } from '@assistant-ui/react'
 import { useCallback } from 'react'
 import type { AssetRef, Effort, Message, ModelId, SystemMessageKind } from '@/api/types'
-import { activeRunId, useChatState, type ChatStore, type RunState } from './conversations'
+import { activeRunId, isSendBlocked, useChatState, type ChatStore, type RunState } from './conversations'
 
 export type MessageCustom = {
   kind: SystemMessageKind | null
@@ -15,8 +15,13 @@ export type MessageCustom = {
   incomplete: boolean
 }
 
+export interface SendResult {
+  sent: boolean
+  conversationId: string | null
+}
+
 export interface ConversationActions {
-  send: (text: string) => void
+  send: (text: string) => Promise<SendResult> | void
   cancel: () => void
 }
 
@@ -59,15 +64,17 @@ export function useConversationRuntime(store: ChatStore, actions: ConversationAc
   )
   const runs = useChatState(store, (state) => state.runs)
   const isRunning = useChatState(store, (state) => activeRunId(state) !== null)
+  const isSendDisabled = useChatState(store, isSendBlocked)
   const convertMessage = useCallback((message: Message) => toThreadMessage(message, runs), [runs])
 
   return useExternalStoreRuntime({
     messages,
     isRunning,
+    isSendDisabled,
     convertMessage,
     onNew: async (message) => {
       const text = messageText(message)
-      if (text) actions.send(text)
+      if (text) void actions.send(text)
     },
     onCancel: async () => actions.cancel(),
   })
