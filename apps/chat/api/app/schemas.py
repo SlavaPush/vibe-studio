@@ -17,6 +17,7 @@ ErrorCode = Literal[
     "quota_exceeded",
     "provider_unavailable",
     "provider_outcome_unknown",
+    "response_truncated",
     "storage_unavailable",
     "run_cancelled",
     "service_unavailable",
@@ -112,11 +113,6 @@ class Message(Schema):
     created_at: datetime
 
 
-class MessageList(Schema):
-    items: list[Message]
-    active_run_id: str | None
-
-
 class CreateRunRequest(Schema):
     text: str = Field(min_length=1, max_length=8000)
     model: ModelChoice
@@ -139,6 +135,12 @@ class Run(Schema):
     error: ApiError | None
     created_at: datetime
     updated_at: datetime
+
+
+class MessageList(Schema):
+    items: list[Message]
+    active_run_id: str | None
+    runs: list[Run]
 
 
 class AcceptedPayload(Schema):

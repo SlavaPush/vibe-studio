@@ -5,7 +5,9 @@ import {
   ThreadPrimitive,
   type MessageState,
 } from '@assistant-ui/react'
-import type { AssetRef, Effort, ModelProfile, SystemMessageKind } from '@/api/types'
+import { useEffect, useState } from 'react'
+import { ApiRequestError } from '@/api/client'
+import type { AssetRef, AssetUrl, Effort, ModelProfile, SystemMessageKind } from '@/api/types'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import {
@@ -29,13 +31,15 @@ const SYSTEM_TITLES: Record<SystemMessageKind, string> = {
   check_unavailable: 'Проверка недоступна',
 }
 
+export type LoadAssetUrl = (id: string) => Promise<AssetUrl>
+
 interface ChatThreadProps {
   store: ChatStore
   actions: ConversationActions
-  resolveAssetUrl: (asset: AssetRef) => string
+  loadAssetUrl: LoadAssetUrl
 }
 
-export function ChatThread({ store, actions, resolveAssetUrl }: ChatThreadProps) {
+export function ChatThread({ store, actions, loadAssetUrl }: ChatThreadProps) {
   const runtime = useConversationRuntime(store, actions)
   const models = useChatState(store, (state) => state.models)
 
@@ -54,7 +58,7 @@ export function ChatThread({ store, actions, resolveAssetUrl }: ChatThreadProps)
           </AuiIf>
           <ThreadPrimitive.Messages>
             {({ message }) => (
-              <ChatMessage message={message} models={models} resolveAssetUrl={resolveAssetUrl} />
+              <ChatMessage message={message} models={models} loadAssetUrl={loadAssetUrl} />
             )}
           </ThreadPrimitive.Messages>
         </ThreadPrimitive.Viewport>
@@ -84,10 +88,77 @@ export function ChatThread({ store, actions, resolveAssetUrl }: ChatThreadProps)
 interface ChatMessageProps {
   message: MessageState
   models: ModelProfile[]
-  resolveAssetUrl: (asset: AssetRef) => string
+  loadAssetUrl: LoadAssetUrl
 }
 
-function ChatMessage({ message, models, resolveAssetUrl }: ChatMessageProps) {
+function AssetImage({ asset, loadAssetUrl }: { asset: AssetRef; loadAssetUrl: LoadAssetUrl }) {
+  const [url, setUrl] = useState<AssetUrl | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [attempt, setAttempt] = useState(0)
+  const [reloaded, setReloaded] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    loadAssetUrl(asset.id)
+      .then((next) => {
+        if (!active) return
+        setUrl(next)
+        setError(null)
+      })
+      .catch((reason: unknown) => {
+        if (!active) return
+        setError(reason instanceof ApiRequestError ? reason.error.message : 'Не удалось загрузить изображение.')
+      })
+    return () => {
+      active = false
+    }
+  }, [asset.id, attempt, loadAssetUrl])
+
+  useEffect(() => {
+    if (!url) return
+    const delay = Math.max(new Date(url.expires_at).getTime() - Date.now() - 5000, 1000)
+    const timer = window.setTimeout(() => setAttempt((value) => value + 1), delay)
+    return () => window.clearTimeout(timer)
+  }, [url])
+
+  return (
+    <Card className="w-64 overflow-hidden py-0">
+      <CardContent className="p-0">
+        {error ? (
+          <div role="alert" className="flex flex-col gap-2 p-3 text-sm text-destructive">
+            <p>{error}</p>
+            <Button size="sm" variant="outline" onClick={() => setAttempt((value) => value + 1)}>
+              Повторить
+            </Button>
+          </div>
+        ) : url ? (
+          <img
+            src={url.url}
+            alt="Сгенерированное изображение"
+            width={asset.width ?? undefined}
+            height={asset.height ?? undefined}
+            className="h-auto w-full"
+            onLoad={() => setReloaded(false)}
+            onError={() => {
+              if (reloaded) {
+                setError('Не удалось загрузить изображение.')
+                return
+              }
+              setReloaded(true)
+              setAttempt((value) => value + 1)
+            }}
+          />
+        ) : (
+          <p role="status" className="p-3 text-sm text-muted-foreground">
+            Изображение загружается…
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function ChatMessage({ message, models, loadAssetUrl }: ChatMessageProps) {
   const custom = readMessageCustom(message.metadata.custom)
   const text = message.content.map((part) => (part.type === 'text' ? part.text : '')).join('')
 
@@ -123,21 +194,10 @@ function ChatMessage({ message, models, resolveAssetUrl }: ChatMessageProps) {
   const isPending = message.status?.type === 'running'
   return (
     <article aria-label="Ответ ассистента" className="flex max-w-[80%] flex-col gap-2 text-sm">
-      {custom.asset && (
-        <Card className="w-64 overflow-hidden py-0">
-          <CardContent className="p-0">
-            <img
-              src={resolveAssetUrl(custom.asset)}
-              alt="Сгенерированное изображение"
-              width={custom.asset.width ?? undefined}
-              height={custom.asset.height ?? undefined}
-              className="h-auto w-full"
-            />
-          </CardContent>
-        </Card>
-      )}
+      {custom.asset && <AssetImage asset={custom.asset} loadAssetUrl={loadAssetUrl} />}
       {text && <p className="whitespace-pre-wrap">{text}</p>}
-      {isPending && (
+      {custom.incomplete && <p className="text-xs text-destructive">Ответ не завершён</p>}
+      {isPending && !custom.incomplete && (
         <p role="status" className="text-muted-foreground">
           Ответ готовится…
         </p>

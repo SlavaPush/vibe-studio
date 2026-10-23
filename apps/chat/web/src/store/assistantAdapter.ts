@@ -3,14 +3,16 @@ import {
   type AppendMessage,
   type ThreadMessageLike,
 } from '@assistant-ui/react'
+import { useCallback } from 'react'
 import type { AssetRef, Effort, Message, ModelId, SystemMessageKind } from '@/api/types'
-import { activeRunId, useChatState, type ChatStore } from './conversations'
+import { activeRunId, useChatState, type ChatStore, type RunState } from './conversations'
 
 export type MessageCustom = {
   kind: SystemMessageKind | null
   effective_model: ModelId | null
   effort: Effort | null
   asset: AssetRef | null
+  incomplete: boolean
 }
 
 export interface ConversationActions {
@@ -20,12 +22,14 @@ export interface ConversationActions {
 
 const NO_MESSAGES: Message[] = []
 
-export function toThreadMessage(message: Message): ThreadMessageLike {
+export function toThreadMessage(message: Message, runs: Record<string, RunState> = {}): ThreadMessageLike {
+  const status = message.run_id ? runs[message.run_id]?.status : undefined
   const custom: MessageCustom = {
     kind: message.kind,
     effective_model: message.effective_model,
     effort: message.effort,
     asset: message.asset,
+    incomplete: message.role === 'assistant' && (status === 'failed' || status === 'cancelled'),
   }
   return {
     id: message.id,
@@ -53,12 +57,14 @@ export function useConversationRuntime(store: ChatStore, actions: ConversationAc
       ? (state.messages[state.activeConversationId] ?? NO_MESSAGES)
       : NO_MESSAGES,
   )
+  const runs = useChatState(store, (state) => state.runs)
   const isRunning = useChatState(store, (state) => activeRunId(state) !== null)
+  const convertMessage = useCallback((message: Message) => toThreadMessage(message, runs), [runs])
 
   return useExternalStoreRuntime({
     messages,
     isRunning,
-    convertMessage: toThreadMessage,
+    convertMessage,
     onNew: async (message) => {
       const text = messageText(message)
       if (text) actions.send(text)

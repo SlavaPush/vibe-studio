@@ -17,6 +17,7 @@ export function testState(): ChatState {
     ],
     activeConversationId: CONVERSATION_ID,
     messages: { [CONVERSATION_ID]: [] },
+    loaded: { [CONVERSATION_ID]: true },
     runs: {},
     errors: {},
     models: contractExamples.ModelCatalog[0].items,

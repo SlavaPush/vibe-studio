@@ -1,24 +1,32 @@
 import { useState, type FormEvent } from 'react'
+import { ApiRequestError } from '@/api/client'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 
 interface LoginScreenProps {
-  onSubmit: (code: string) => void
+  onSubmit: (code: string) => Promise<void>
 }
 
 export function LoginScreen({ onSubmit }: LoginScreenProps) {
   const [code, setCode] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [pending, setPending] = useState(false)
 
-  const submit = (event: FormEvent) => {
+  const submit = async (event: FormEvent) => {
     event.preventDefault()
     if (!code.trim()) {
       setError('Введите код доступа.')
       return
     }
-    onSubmit(code.trim())
+    setPending(true)
+    try {
+      await onSubmit(code.trim())
+    } catch (reason) {
+      setError(reason instanceof ApiRequestError ? reason.error.message : 'Не удалось войти. Повторите позже.')
+      setPending(false)
+    }
   }
 
   return (
@@ -49,7 +57,9 @@ export function LoginScreen({ onSubmit }: LoginScreenProps) {
                 {error}
               </p>
             )}
-            <Button type="submit">Войти</Button>
+            <Button type="submit" disabled={pending}>
+              Войти
+            </Button>
           </form>
         </CardContent>
       </Card>

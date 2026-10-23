@@ -1,26 +1,26 @@
-import type { AssetRef } from '@/api/types'
+import { useMemo } from 'react'
 import { ChatThread } from '@/components/chat/ChatThread'
 import { ConversationList } from '@/components/chat/ConversationList'
 import { LoginScreen } from '@/components/chat/LoginScreen'
 import { ModelSelector } from '@/components/chat/ModelSelector'
 import { RunErrorNotice, UpdateNotice } from '@/components/chat/Notices'
-import { ScenarioPanel } from '@/components/chat/ScenarioPanel'
 import type { ConversationActions } from '@/store/assistantAdapter'
+import type { ChatController } from '@/store/chatController'
 import { useChatState, type ChatStore } from '@/store/conversations'
-import type { Scenario } from '@/mocks/scenarios'
 
 interface AppProps {
   store: ChatStore
-  scenario: Scenario
-  actions: ConversationActions
-  onSignIn: (code: string) => void
-  resolveAssetUrl: (asset: AssetRef) => string
+  controller: ChatController
 }
 
-export default function App({ store, scenario, actions, onSignIn, resolveAssetUrl }: AppProps) {
+export default function App({ store, controller }: AppProps) {
   const state = useChatState(store, (current) => current)
   const active = state.conversations.find((item) => item.id === state.activeConversationId)
   const error = state.activeConversationId ? state.errors[state.activeConversationId] : undefined
+  const actions = useMemo<ConversationActions>(
+    () => ({ send: (text) => void controller.send(text), cancel: () => void controller.cancel() }),
+    [controller],
+  )
 
   return (
     <div className="flex h-dvh flex-col">
@@ -31,15 +31,9 @@ export default function App({ store, scenario, actions, onSignIn, resolveAssetUr
             <ConversationList
               conversations={state.conversations}
               activeId={state.activeConversationId}
-              onSelect={store.selectConversation}
-              onCreate={() =>
-                store.addConversation({
-                  id: crypto.randomUUID(),
-                  title: 'Новый диалог',
-                  created_at: new Date().toISOString(),
-                  updated_at: new Date().toISOString(),
-                })
-              }
+              onSelect={(id) => void controller.selectConversation(id)}
+              onCreate={() => void controller.createConversation()}
+              onRename={(id, title) => void controller.renameConversation(id, title)}
             />
           </aside>
           <main className="flex min-w-0 flex-1 flex-col">
@@ -51,14 +45,13 @@ export default function App({ store, scenario, actions, onSignIn, resolveAssetUr
                 onChange={store.selectModel}
               />
             </header>
-            <ChatThread store={store} actions={actions} resolveAssetUrl={resolveAssetUrl} />
+            <ChatThread store={store} actions={actions} loadAssetUrl={controller.loadAssetUrl} />
             {error && <RunErrorNotice error={error} />}
           </main>
         </div>
       ) : (
-        <LoginScreen onSubmit={onSignIn} />
+        <LoginScreen onSubmit={controller.signIn} />
       )}
-      <ScenarioPanel current={scenario} />
     </div>
   )
 }

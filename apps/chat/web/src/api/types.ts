@@ -10,6 +10,7 @@ export type ErrorCode =
   | 'quota_exceeded'
   | 'provider_unavailable'
   | 'provider_outcome_unknown'
+  | 'response_truncated'
   | 'storage_unavailable'
   | 'run_cancelled'
   | 'service_unavailable'
@@ -96,6 +97,7 @@ export interface Message {
 export interface MessageList {
   items: Message[]
   active_run_id: string | null
+  runs: Run[]
 }
 
 export interface CreateRunRequest {

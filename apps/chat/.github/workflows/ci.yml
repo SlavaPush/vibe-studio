@@ -11,6 +11,22 @@ jobs:
     defaults:
       run:
         working-directory: api
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: vibe
+          POSTGRES_PASSWORD: vibe
+          POSTGRES_DB: vibe
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vibe"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql://vibe:vibe@127.0.0.1:5432/vibe_test
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.3.2

@@ -3,6 +3,7 @@ import type {
   ApiError,
   Conversation,
   Message,
+  MessageList,
   ModelChoice,
   ModelProfile,
   Run,
@@ -22,6 +23,7 @@ export interface ChatState {
   conversations: Conversation[]
   activeConversationId: string | null
   messages: Record<string, Message[]>
+  loaded: Record<string, boolean>
   runs: Record<string, RunState>
   errors: Record<string, ApiError | undefined>
   models: ModelProfile[]
@@ -33,6 +35,23 @@ const TERMINAL_STATUS: Partial<Record<RunEvent['type'], RunStatus>> = {
   completed: 'completed',
   refusal: 'refused',
   check_unavailable: 'check_unavailable',
+}
+
+const FINISHED_SEQ = Number.MAX_SAFE_INTEGER
+
+export function initialChatState(): ChatState {
+  return {
+    session: null,
+    conversations: [],
+    activeConversationId: null,
+    messages: {},
+    loaded: {},
+    runs: {},
+    errors: {},
+    models: [],
+    selectedModel: 'auto',
+    updateAvailable: false,
+  }
 }
 
 function upsertMessage(messages: Message[], message: Message): Message[] {
@@ -135,7 +154,41 @@ export function applyRunEvent(state: ChatState, event: RunEvent): ChatState {
   }
 }
 
-export function createChatStore(initial: ChatState) {
+export function applyMessageList(state: ChatState, conversationId: string, list: MessageList): ChatState {
+  const runs = { ...state.runs }
+  for (const run of list.runs) {
+    runs[run.id] = {
+      conversationId,
+      status: run.status,
+      lastSeq: run.id === list.active_run_id ? 0 : FINISHED_SEQ,
+    }
+  }
+  const last = list.runs.at(-1)
+  const error =
+    last && (last.status === 'failed' || last.status === 'cancelled') ? (last.error ?? undefined) : undefined
+  return {
+    ...state,
+    messages: { ...state.messages, [conversationId]: list.items },
+    loaded: { ...state.loaded, [conversationId]: true },
+    runs,
+    errors: { ...state.errors, [conversationId]: error },
+  }
+}
+
+export function addRun(state: ChatState, run: Run, userMessage: Message): ChatState {
+  const messages = state.messages[run.conversation_id] ?? []
+  return {
+    ...state,
+    messages: { ...state.messages, [run.conversation_id]: upsertMessage(messages, userMessage) },
+    runs: {
+      ...state.runs,
+      [run.id]: state.runs[run.id] ?? { conversationId: run.conversation_id, status: run.status, lastSeq: 0 },
+    },
+    errors: { ...state.errors, [run.conversation_id]: undefined },
+  }
+}
+
+export function createChatStore(initial: ChatState = initialChatState()) {
   let state = initial
   const listeners = new Set<() => void>()
   const set = (next: ChatState) => {
@@ -154,8 +207,26 @@ export function createChatStore(initial: ChatState) {
     dispatch(event: RunEvent) {
       set(applyRunEvent(state, event))
     },
+    setModels(models: ModelProfile[]) {
+      set({ ...state, models })
+    },
     signIn(session: Session) {
       set({ ...state, session })
+    },
+    signOut() {
+      set({ ...initialChatState(), models: state.models, selectedModel: state.selectedModel })
+    },
+    setConversations(conversations: Conversation[]) {
+      set({ ...state, conversations })
+    },
+    upsertConversation(conversation: Conversation) {
+      const exists = state.conversations.some((item) => item.id === conversation.id)
+      set({
+        ...state,
+        conversations: exists
+          ? state.conversations.map((item) => (item.id === conversation.id ? conversation : item))
+          : [conversation, ...state.conversations],
+      })
     },
     selectConversation(id: string) {
       set({ ...state, activeConversationId: id })
@@ -169,24 +240,18 @@ export function createChatStore(initial: ChatState) {
         conversations: [conversation, ...state.conversations],
         activeConversationId: conversation.id,
         messages: { ...state.messages, [conversation.id]: [] },
+        loaded: { ...state.loaded, [conversation.id]: true },
       })
+    },
+    loadMessages(conversationId: string, list: MessageList) {
+      set(applyMessageList(state, conversationId, list))
     },
     startRun(run: Run, userMessage: Message) {
       set(addRun(state, run, userMessage))
     },
-  }
-}
-
-export function addRun(state: ChatState, run: Run, userMessage: Message): ChatState {
-  const messages = state.messages[run.conversation_id] ?? []
-  return {
-    ...state,
-    messages: { ...state.messages, [run.conversation_id]: [...messages, userMessage] },
-    runs: {
-      ...state.runs,
-      [run.id]: { conversationId: run.conversation_id, status: run.status, lastSeq: 0 },
+    setError(conversationId: string, error: ApiError | undefined) {
+      set({ ...state, errors: { ...state.errors, [conversationId]: error } })
     },
-    errors: { ...state.errors, [run.conversation_id]: undefined },
   }
 }
 
@@ -196,11 +261,16 @@ export function useChatState<T>(store: ChatStore, select: (state: ChatState) => 
   return useSyncExternalStore(store.subscribe, () => select(store.getState()))
 }
 
-export function activeRunId(state: ChatState): string | null {
+export function activeRunId(state: ChatState, conversationId = state.activeConversationId): string | null {
   const entry = Object.entries(state.runs).find(
     ([, run]) =>
-      run.conversationId === state.activeConversationId &&
-      (run.status === 'queued' || run.status === 'running'),
+      run.conversationId === conversationId && (run.status === 'queued' || run.status === 'running'),
   )
   return entry ? entry[0] : null
+}
+
+export function isIncomplete(state: ChatState, message: Message): boolean {
+  if (message.role !== 'assistant' || !message.run_id) return false
+  const status = state.runs[message.run_id]?.status
+  return status === 'failed' || status === 'cancelled'
 }
