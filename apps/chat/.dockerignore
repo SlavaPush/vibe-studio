@@ -1,0 +1,13 @@
+*
+!api/app/
+!api/pyproject.toml
+!api/uv.lock
+!contracts/api.md
+!web/
+web/node_modules/
+web/dist/
+web/src/mocks/contract-examples.ts
+**/__pycache__/
+**/*.pyc
+**/.env*
+**/.DS_Store

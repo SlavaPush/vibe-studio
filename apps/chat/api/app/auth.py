@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import ipaddress
 import secrets
 import time
 import uuid
@@ -28,12 +29,19 @@ class CurrentUser:
 
 
 def client_ip(request: Request) -> str:
-    if request.app.state.settings.trust_proxy_headers:
-        forwarded = request.headers.get("x-forwarded-for", "")
-        first = forwarded.split(",")[0].strip()
-        if first:
-            return first
-    return request.client.host if request.client else "unknown"
+    settings = request.app.state.settings
+    peer = request.client.host if request.client else "unknown"
+    if not settings.trust_proxy_headers:
+        return peer
+    chain = [item.strip() for value in request.headers.getlist("x-forwarded-for") for item in value.split(",")]
+    if len(chain) < settings.proxy_hops:
+        return peer
+    candidate = chain[-settings.proxy_hops]
+    try:
+        ipaddress.ip_address(candidate)
+    except ValueError:
+        return peer
+    return candidate
 
 
 def source_hash(request: Request) -> str:

@@ -231,7 +231,8 @@ class Executor:
         lease_seconds: float = 30,
         heartbeat_seconds: float = 10,
         poll_seconds: float = 1,
-        grace_seconds: float = 20,
+        grace_seconds: float = 15,
+        cancel_seconds: float = 5,
         max_runs: int = 8,
     ) -> None:
         self.pool = pool
@@ -243,6 +244,7 @@ class Executor:
         self.heartbeat_seconds = heartbeat_seconds
         self.poll_seconds = poll_seconds
         self.grace_seconds = grace_seconds
+        self.cancel_seconds = cancel_seconds
         self.max_runs = max_runs
         self.tasks: dict[str, tuple[asyncio.Task, RunContext]] = {}
         self.semaphores = {"anthropic": asyncio.Semaphore(2), "openai": asyncio.Semaphore(2)}
@@ -266,7 +268,8 @@ class Executor:
             _, pending = await asyncio.wait(tasks, timeout=self.grace_seconds)
             for task in pending:
                 task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            if pending:
+                await asyncio.wait(pending, timeout=self.cancel_seconds)
 
     def wake(self) -> None:
         self.wake_event.set()

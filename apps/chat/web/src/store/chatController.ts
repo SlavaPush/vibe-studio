@@ -1,6 +1,7 @@
 import { ApiRequestError, isNetworkError, type ApiClient } from '@/api/client'
 import type { Message, MessageList, Run, RunEvent, RunEventType } from '@/api/types'
 import { activeRunId, type ChatStore } from './conversations'
+import { activeConversationKey, readLocal, writeLocal } from './drafts'
 
 const EVENT_TYPES: RunEventType[] = [
   'accepted',
@@ -46,6 +47,11 @@ export function createChatController(
   function close(runId: string) {
     sources.get(runId)?.close()
     sources.delete(runId)
+  }
+
+  function rememberActive(id: string) {
+    const userId = store.getState().session?.user_id
+    if (userId) writeLocal(activeConversationKey(userId), id)
   }
 
   function signOut() {
@@ -132,7 +138,9 @@ export function createChatController(
     try {
       const list = await api.conversations()
       store.setConversations(list.items)
-      const id = store.getState().activeConversationId ?? list.items[0]?.id
+      const { activeConversationId, session } = store.getState()
+      const saved = session ? readLocal(activeConversationKey(session.user_id)) : ''
+      const id = activeConversationId ?? list.items.find((item) => item.id === saved)?.id ?? list.items[0]?.id
       if (id) {
         store.selectConversation(id)
         await loadConversation(id)
@@ -165,12 +173,15 @@ export function createChatController(
 
     async selectConversation(id: string) {
       store.selectConversation(id)
+      rememberActive(id)
       await loadConversation(id)
     },
 
     async createConversation() {
       try {
-        store.addConversation(await api.createConversation())
+        const conversation = await api.createConversation()
+        store.addConversation(conversation)
+        rememberActive(conversation.id)
       } catch (error) {
         handleError(error)
       }
@@ -190,6 +201,7 @@ export function createChatController(
         if (!conversationId) {
           const conversation = await api.createConversation()
           store.addConversation(conversation)
+          rememberActive(conversation.id)
           conversationId = conversation.id
         }
         await loadConversation(conversationId)

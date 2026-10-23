@@ -3,9 +3,11 @@ import {
   AuiIf,
   ComposerPrimitive,
   ThreadPrimitive,
+  useAui,
+  useAuiState,
   type MessageState,
 } from '@assistant-ui/react'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ApiRequestError } from '@/api/client'
 import type { AssetRef, AssetUrl, Effort, ModelProfile, SystemMessageKind } from '@/api/types'
 import { Button } from '@/components/ui/button'
@@ -16,6 +18,7 @@ import {
   type ConversationActions,
 } from '@/store/assistantAdapter'
 import { useChatState, type ChatStore } from '@/store/conversations'
+import { draftKey, readLocal, writeLocal } from '@/store/drafts'
 import { cn } from 'cn'
 
 const EFFORT_LABELS: Record<Effort, string> = {
@@ -40,11 +43,25 @@ interface ChatThreadProps {
 }
 
 export function ChatThread({ store, actions, loadAssetUrl }: ChatThreadProps) {
-  const runtime = useConversationRuntime(store, actions)
+  const storageKey = useChatState(store, (state) =>
+    draftKey(state.session?.user_id ?? '', state.activeConversationId),
+  )
+  const threadActions = useMemo<ConversationActions>(
+    () => ({
+      ...actions,
+      send: (text) => {
+        writeLocal(storageKey, '')
+        actions.send(text)
+      },
+    }),
+    [actions, storageKey],
+  )
+  const runtime = useConversationRuntime(store, threadActions)
   const models = useChatState(store, (state) => state.models)
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
+      <ComposerDraft storageKey={storageKey} />
       <ThreadPrimitive.Root className="flex min-h-0 flex-1 flex-col">
         <ThreadPrimitive.Viewport
           role="log"
@@ -83,6 +100,23 @@ export function ChatThread({ store, actions, loadAssetUrl }: ChatThreadProps) {
       </ThreadPrimitive.Root>
     </AssistantRuntimeProvider>
   )
+}
+
+function ComposerDraft({ storageKey }: { storageKey: string }) {
+  const aui = useAui()
+  const text = useAuiState((state) => state.composer.text)
+  const restoredKey = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (restoredKey.current !== storageKey) {
+      restoredKey.current = storageKey
+      aui.composer.setText(readLocal(storageKey))
+      return
+    }
+    writeLocal(storageKey, text)
+  }, [aui, storageKey, text])
+
+  return null
 }
 
 interface ChatMessageProps {

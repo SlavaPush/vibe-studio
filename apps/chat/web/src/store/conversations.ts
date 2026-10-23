@@ -214,7 +214,12 @@ export function createChatStore(initial: ChatState = initialChatState()) {
       set({ ...state, session })
     },
     signOut() {
-      set({ ...initialChatState(), models: state.models, selectedModel: state.selectedModel })
+      set({
+        ...initialChatState(),
+        models: state.models,
+        selectedModel: state.selectedModel,
+        updateAvailable: state.updateAvailable,
+      })
     },
     setConversations(conversations: Conversation[]) {
       set({ ...state, conversations })
@@ -251,6 +256,9 @@ export function createChatStore(initial: ChatState = initialChatState()) {
     },
     setError(conversationId: string, error: ApiError | undefined) {
       set({ ...state, errors: { ...state.errors, [conversationId]: error } })
+    },
+    showUpdate() {
+      set({ ...state, updateAvailable: true })
     },
   }
 }

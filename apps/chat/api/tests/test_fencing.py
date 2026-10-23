@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import pytest
 from conftest import FakeProviders, FakeStorage, HANG, seed_run, settings_for, sql
@@ -113,3 +114,60 @@ def test_shutdown_applies_recovery_to_interrupted_runs(db):
     assert sql(db, "SELECT status, error->>'code' FROM runs WHERE id = %s", (ids["run"],)) == [
         ("failed", "provider_outcome_unknown")
     ]
+
+
+class StubbornProviders(FakeProviders):
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+
+    async def stream_text(self, target, system, messages, on_delta):
+        self.calls.append(("text", target.model))
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            await self.release.wait()
+            raise
+
+
+def test_shutdown_is_bounded_and_next_instance_recovers_without_new_call(db):
+    ids = seed_run(db, status="queued", events=[])
+    stubborn = StubbornProviders()
+    fresh = FakeProviders()
+
+    async def scenario():
+        pool = await open_pool(db)
+        executor = Executor(
+            pool, settings_for(db), stubborn, FakeStorage(), EventBus(), grace_seconds=0.1, cancel_seconds=0.2
+        )
+        await executor.start()
+        executor.wake()
+        while not stubborn.count("text"):
+            await asyncio.sleep(0.01)
+        started = time.monotonic()
+        await executor.stop()
+        elapsed = time.monotonic() - started
+        stuck = [task for task, _ in executor.tasks.values()]
+        await pool.close()
+        stubborn.release.set()
+        await asyncio.gather(*stuck, return_exceptions=True)
+
+        assert elapsed < 1
+        assert stuck
+        assert sql(db, "SELECT status FROM runs WHERE id = %s", (ids["run"],)) == [("running",)]
+        expire(db, ids["run"])
+
+        pool = await open_pool(db)
+        try:
+            successor = Executor(pool, settings_for(db), fresh, FakeStorage(), EventBus())
+            await successor.start()
+            await successor.stop()
+        finally:
+            await pool.close()
+
+    run_async(scenario())
+    assert sql(db, "SELECT status, error->>'code' FROM runs WHERE id = %s", (ids["run"],)) == [
+        ("failed", "provider_outcome_unknown")
+    ]
+    assert stubborn.count("text") == 1
+    assert fresh.calls == []

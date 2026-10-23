@@ -4,6 +4,23 @@ from pathlib import Path
 
 ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 DEFAULT_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
+PUBLIC_REQUIRED = (
+    "DEMO_ACCESS_CODE",
+    "QUOTA_SALT",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "SUPABASE_URL",
+    "SUPABASE_SECRET_KEY",
+    "DATABASE_URL",
+)
+
+
+class ConfigError(Exception):
+    pass
+
+
+def app_version() -> str:
+    return os.getenv("APP_VERSION") or os.getenv("RENDER_GIT_COMMIT", "")[:7] or "dev"
 
 
 def load_env_file(path: Path) -> dict[str, str]:
@@ -41,6 +58,8 @@ class Settings:
     cookie_secure: bool = True
     quota_salt: str = ""
     trust_proxy_headers: bool = False
+    proxy_hops: int = 1
+    web_dist_dir: str = ""
     image_quality: str = "medium"
     user_limits: Limits = field(default_factory=lambda: Limits(60, 5, 1_000_000))
     source_limits: Limits = field(default_factory=lambda: Limits(300, 25, 5_000_000))
@@ -65,6 +84,20 @@ def load_settings() -> Settings:
             int(get(f"{prefix}_TOKENS_PER_DAY", str(tokens))),
         )
 
+    if _flag(get("RENDER")):
+        missing = [name for name in PUBLIC_REQUIRED if not get(name)]
+        if missing:
+            raise ConfigError(f"в публичном окружении не заданы переменные: {', '.join(missing)}")
+        if not _flag(get("COOKIE_SECURE", "true")):
+            raise ConfigError("в публичном окружении COOKIE_SECURE должна быть true")
+
+    hops = get("PROXY_HOPS", "1").strip()
+    if not hops.isdigit() or int(hops) < 1:
+        raise ConfigError("PROXY_HOPS должна быть целым числом не меньше 1")
+
+    render_url = get("RENDER_EXTERNAL_URL").rstrip("/")
+    origins = get("ALLOWED_ORIGINS", render_url or DEFAULT_ORIGINS)
+
     return Settings(
         database_url=get("DATABASE_URL", Settings.database_url),
         demo_access_code=get("DEMO_ACCESS_CODE"),
@@ -75,12 +108,12 @@ def load_settings() -> Settings:
         supabase_url=get("SUPABASE_URL"),
         supabase_secret_key=get("SUPABASE_SECRET_KEY"),
         storage_bucket=get("SUPABASE_STORAGE_BUCKET", Settings.storage_bucket),
-        allowed_origins=tuple(
-            origin.strip() for origin in get("ALLOWED_ORIGINS", DEFAULT_ORIGINS).split(",") if origin.strip()
-        ),
+        allowed_origins=tuple(origin.strip() for origin in origins.split(",") if origin.strip()),
         cookie_secure=_flag(get("COOKIE_SECURE", "true")),
         quota_salt=get("QUOTA_SALT"),
         trust_proxy_headers=_flag(get("TRUST_PROXY_HEADERS", "false")),
+        proxy_hops=int(hops),
+        web_dist_dir=get("WEB_DIST_DIR"),
         image_quality=get("IMAGE_QUALITY", Settings.image_quality),
         user_limits=limits("USER", 60, 5, 1_000_000),
         source_limits=limits("SOURCE", 300, 25, 5_000_000),

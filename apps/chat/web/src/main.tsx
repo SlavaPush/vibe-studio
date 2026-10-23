@@ -5,6 +5,7 @@ import App from './App.tsx'
 import { createApiClient } from './api/client.ts'
 import { createChatController } from './store/chatController.ts'
 import { createChatStore } from './store/conversations.ts'
+import { buildVersion, watchVersion } from './store/versionWatch.ts'
 
 const darkScheme = window.matchMedia('(prefers-color-scheme: dark)')
 const applyTheme = () => document.documentElement.classList.toggle('dark', darkScheme.matches)
@@ -14,6 +15,7 @@ darkScheme.addEventListener('change', applyTheme)
 const store = createChatStore()
 const controller = createChatController(store, createApiClient())
 void controller.start()
+watchVersion(buildVersion(), store.showUpdate)
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

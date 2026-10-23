@@ -1,7 +1,10 @@
-import { act, fireEvent, render, screen, within } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
-import { createChatStore } from '@/store/conversations'
-import { switchedRunEvents, testRun, testState } from '@/test/fixtures'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { StrictMode } from 'react'
+import { afterEach, describe, expect, it } from 'vitest'
+import type { ConversationActions } from '@/store/assistantAdapter'
+import { createChatStore, type ChatStore } from '@/store/conversations'
+import { draftKey } from '@/store/drafts'
+import { CONVERSATION_ID, switchedRunEvents, testRun, testState } from '@/test/fixtures'
 import { ChatThread } from './ChatThread'
 
 describe('ChatThread', () => {
@@ -99,5 +102,73 @@ describe('ChatThread', () => {
     expect(answers[0]).toHaveTextContent('Потоки')
     expect(within(answers[0]).getByText('Ответ не завершён')).toBeInTheDocument()
     expect(screen.getAllByText('Ответ не завершён')).toHaveLength(1)
+  })
+})
+
+describe('ChatThread: черновик сообщения', () => {
+  afterEach(() => window.localStorage.clear())
+
+  const noActions = { send: () => {}, cancel: () => {} }
+  const renderThread = (store: ChatStore, actions: ConversationActions = noActions) =>
+    render(
+      <StrictMode>
+        <ChatThread store={store} actions={actions} loadAssetUrl={() => new Promise(() => {})} />
+      </StrictMode>,
+    )
+  const composer = () => screen.getByRole('textbox', { name: 'Сообщение' })
+  const type = (value: string) => fireEvent.change(composer(), { target: { value } })
+
+  it('восстанавливает черновик до создания первого диалога после перезагрузки', async () => {
+    const empty = { ...testState(), conversations: [], activeConversationId: null, messages: {}, loaded: {} }
+    const first = renderThread(createChatStore(empty))
+    type('Черновик до диалога')
+    await waitFor(() =>
+      expect(window.localStorage.getItem(draftKey('test-user', null))).toBe('Черновик до диалога'),
+    )
+    first.unmount()
+
+    renderThread(createChatStore(empty))
+    await waitFor(() => expect(composer()).toHaveValue('Черновик до диалога'))
+  })
+
+  it('хранит отдельный черновик для каждого диалога', async () => {
+    const state = testState()
+    const other = { ...state.conversations[0], id: 'other-conversation', title: 'Другой' }
+    const store = createChatStore({
+      ...state,
+      conversations: [...state.conversations, other],
+      messages: { ...state.messages, [other.id]: [] },
+      loaded: { ...state.loaded, [other.id]: true },
+    })
+    renderThread(store)
+    type('Текст первого диалога')
+    act(() => store.selectConversation(other.id))
+    await waitFor(() => expect(composer()).toHaveValue(''))
+    type('Текст второго диалога')
+    act(() => store.selectConversation(CONVERSATION_ID))
+    await waitFor(() => expect(composer()).toHaveValue('Текст первого диалога'))
+    expect(window.localStorage.getItem(draftKey('test-user', other.id))).toBe('Текст второго диалога')
+  })
+
+  it('очищает черновик при отправке; диалог, созданный при отправке, начинается без черновика', async () => {
+    const empty = { ...testState(), conversations: [], activeConversationId: null, messages: {}, loaded: {} }
+    const store = createChatStore(empty)
+    const created = { ...testState().conversations[0], id: 'created-conversation' }
+    const sent: string[] = []
+    renderThread(store, {
+      send: (text) => {
+        sent.push(text)
+        store.addConversation(created)
+      },
+      cancel: () => {},
+    })
+    type('Первый запрос')
+    await waitFor(() => expect(window.localStorage.getItem(draftKey('test-user', null))).toBe('Первый запрос'))
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить' }))
+
+    await waitFor(() => expect(sent).toEqual(['Первый запрос']))
+    await waitFor(() => expect(composer()).toHaveValue(''))
+    expect(window.localStorage.getItem(draftKey('test-user', null))).toBeNull()
+    expect(window.localStorage.getItem(draftKey('test-user', created.id))).toBeNull()
   })
 })

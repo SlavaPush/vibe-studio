@@ -55,5 +55,36 @@ jobs:
 
   containers:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: vibe
+          POSTGRES_PASSWORD: vibe
+          POSTGRES_DB: vibe
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vibe"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
-      - run: docker run --rm hello-world
+      - uses: actions/checkout@v7
+      - run: docker build -f infra/Dockerfile -t vibe-chat:ci .
+      - run: >-
+          docker run -d --name vibe-chat --network host
+          -e PORT=10000 -e APP_VERSION=ci-check
+          -e DATABASE_URL=postgresql://vibe:vibe@127.0.0.1:5432/vibe
+          vibe-chat:ci
+      - run: |
+          for attempt in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:10000/healthz && break
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:10000/healthz | grep -q '"status":"ok"'
+          curl -fsS http://127.0.0.1:10000/ | grep -q '<meta name="app-version" content="ci-check"'
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:10000/api/unknown)" = "404"
+          test "$(docker run --rm vibe-chat:ci id -u)" != "0"
+      - if: failure()
+        run: docker logs vibe-chat
