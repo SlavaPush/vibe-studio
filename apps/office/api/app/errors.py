@@ -23,6 +23,7 @@ class ErrorCode(StrEnum):
     version_mismatch = "version_mismatch"
     decision_not_allowed = "decision_not_allowed"
     idempotency_conflict = "idempotency_conflict"
+    diff_too_large = "diff_too_large"
     validation_error = "validation_error"
     rate_limited = "rate_limited"
     internal_error = "internal_error"

@@ -21,3 +21,4 @@ dev = [
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+markers = ["docker: реальный Docker и образ sandbox, запуск с OFFICE_TEST_DOCKER=1"]

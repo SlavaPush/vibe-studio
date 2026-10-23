@@ -61,5 +61,16 @@ jobs:
         with:
           repository: SlavaPush/vibe-chat
           path: vibe-chat-src
-      - run: docker build -t back-office-sandbox docker/sandbox
-      - run: docker run --rm -v "$PWD/vibe-chat-src/web:/src:ro" back-office-sandbox sandbox-smoke /src
+      - run: docker build -t back-office-sandbox:p4 docker/sandbox
+      - run: docker run --rm -v "$PWD/vibe-chat-src/web:/src:ro" back-office-sandbox:p4 sandbox-smoke /src
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          enable-cache: true
+          working-directory: api
+      - run: uv sync --locked
+        working-directory: api
+      - run: uv run pytest -m docker
+        working-directory: api
+        env:
+          OFFICE_TEST_DOCKER: "1"
+          OFFICE_TEST_TARGET_REPO: https://github.com/SlavaPush/vibe-chat.git

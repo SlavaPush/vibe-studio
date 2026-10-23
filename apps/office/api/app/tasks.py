@@ -30,6 +30,8 @@ logger = logging.getLogger("office.tasks")
 MODEL_CALLS_LIMIT = 30
 SIGNAL_SLOT_ACQUIRED = "slot_acquired"
 SIGNAL_DECISION_RECORDED = "decision_recorded"
+SIGNAL_TASK_CLOSED = "task_closed"
+CLOSED_STATUSES = frozenset({TaskStatus.cancelled, TaskStatus.released})
 
 S = TaskStatus
 TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
@@ -247,7 +249,74 @@ class TaskStore:
             self._promote(conn)
         if to in SLOT_STATUSES and task.status not in SLOT_STATUSES:
             self.signal(conn, SIGNAL_SLOT_ACQUIRED, task_id)
+        if to in CLOSED_STATUSES:
+            self.signal(conn, SIGNAL_TASK_CLOSED, task_id)
         return self.load_task(conn, task_id)
+
+    def add_event(
+        self,
+        task_id: str,
+        event_type: TaskEventType,
+        payload: dict[str, Any],
+        *,
+        role: AgentRole | None = None,
+        tool: str | None = None,
+        artifact: str | None = None,
+    ) -> TaskEvent:
+        with self.db.locked_transaction() as conn:
+            return self.record_event(
+                conn, task_id, event_type, payload, role=role, tool=tool, artifact=artifact
+            )
+
+    def fail_task(self, task_id: str, *, tool: str, arguments: str, reason: str) -> None:
+        with self.db.locked_transaction() as conn:
+            task = self.load_task(conn, task_id)
+            if task is None or task.status not in SLOT_STATUSES:
+                return
+            self.record_event(
+                conn,
+                task_id,
+                TaskEventType.tool_called,
+                {"arguments": arguments, "result": "error", "reason": reason},
+                tool=tool,
+            )
+            self.transition(conn, task_id, TaskStatus.failed, expected_from=task.status)
+
+    def record_worktree(self, task_id: str, branch: str, base_sha: str, created: bool) -> bool:
+        with self.db.locked_transaction() as conn:
+            task = self.load_task(conn, task_id)
+            if task is None or task.status not in SLOT_STATUSES:
+                return False
+            if (task.branch, task.base_sha) != (branch, base_sha):
+                conn.execute(
+                    "UPDATE tasks SET branch = :branch, base_sha = :base_sha, version = version + 1, "
+                    "updated_at = :now WHERE id = :id",
+                    {"branch": branch, "base_sha": base_sha, "now": to_text(utcnow()), "id": task_id},
+                )
+            if created or (task.branch, task.base_sha) != (branch, base_sha):
+                self.record_event(
+                    conn,
+                    task_id,
+                    TaskEventType.tool_called,
+                    {"arguments": f"{branch} {base_sha}", "result": "ok"},
+                    tool="git_worktree",
+                )
+            return True
+
+    def record_commit(self, task_id: str, sha: str, changed_files: list[str]) -> Task:
+        with self.db.locked_transaction() as conn:
+            conn.execute(
+                "UPDATE tasks SET changed_files = :files, version = version + 1, updated_at = :now WHERE id = :id",
+                {"files": _json(changed_files), "now": to_text(utcnow()), "id": task_id},
+            )
+            self.record_event(
+                conn,
+                task_id,
+                TaskEventType.tool_called,
+                {"arguments": f"{sha} ({len(changed_files)} файлов)", "result": "ok"},
+                tool="git_commit",
+            )
+            return self.load_task(conn, task_id)
 
     def _promote(self, conn: Connection) -> list[str]:
         promoted: list[str] = []

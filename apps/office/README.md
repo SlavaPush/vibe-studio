@@ -16,7 +16,21 @@
 | `api/scripts/` | Smoke-проверки локальных моделей |
 | `workspace/` | Клон `vibe-chat` и worktree задач; в `.gitignore` |
 
-Статус: подэтап `P4.1` — API офиса на БД (SQLite локально, PostgreSQL при деплое): сеансы по коду доступа, проверка `Host` и `Origin`, права, фильтр приёма задач (детерминированные проверки, модерация OpenAI, классификатор), три слота и очередь `queued`, решения с версией и идемпотентностью, журнал событий и SSE, отчёты проверок и артефакты, решения по выпускам без деплоя. Рабочие копии, sandbox, граф ролей и переход панели на API — подэтапы `P4.2`–`P4.4`; панель пока работает на тестовых данных.
+Статус: подэтап `P4.1` — API офиса на БД (SQLite локально, PostgreSQL при деплое): сеансы по коду доступа, проверка `Host` и `Origin`, права, фильтр приёма задач (детерминированные проверки, модерация OpenAI, классификатор), три слота и очередь `queued`, решения с версией и идемпотентностью, журнал событий и SSE, отчёты проверок и артефакты, решения по выпускам без деплоя. Подэтап `P4.2` — рабочие копии и sandbox: клон `vibe-chat`, worktree на задачу, политика путей и команд, проверки в Docker, commit кодом офиса, `GET /api/tasks/{id}/diff`. Граф ролей и переход панели на API — подэтапы `P4.3`–`P4.4`; панель пока работает на тестовых данных.
+
+## Рабочая область и sandbox
+
+Офис держит клон `TARGET_REPO_URL` в `<WORKSPACE_DIR>/vibe-chat` (по умолчанию `workspace/` в корне репозитория). Задача, занявшая слот, получает worktree `<WORKSPACE_DIR>/wt/<task_id>` на ветке `office/<task_id>` от `origin/main`; `branch` и `base_sha` записываются в задачу. Отмена и выпуск удаляют worktree, ветка остаётся. При `failed` и `needs_attention` worktree сохраняется, `retry` использует его повторно. При старте API создаёт недостающие worktree задач в статусах слота и удаляет worktree отменённых и выпущенных задач. Без `TARGET_REPO_URL` API не запускается.
+
+`policies/paths.yaml` задаёт пути, которые роли читают и пишут: разработчик — `web/src/**`, `web/public/**`, `web/index.html`; QA — только `web/e2e/office/**/*.pw.ts`. Запреты общего списка действуют без учёта регистра. Symlink в любом компоненте пути, `..`, абсолютные пути, недопустимые расширения и файлы больше 200 КБ отклоняются. Каждый вызов инструмента пишет событие `tool_called`. Commit выполняет код офиса: каждый изменённый путь проверяется повторно, исполняемые файлы, symlink и submodule отклоняются.
+
+`policies/commands.yaml` задаёт шаги проверок `install`, `lint`, `test`, `build`, `e2e`, их таймауты, роли и пределы контейнера. Контейнер запускается от пользователя `10001` с `--cap-drop ALL`, `no-new-privileges`, корневой файловой системой только для чтения, пределами памяти, CPU и процессов и без сети (кроме `install`). Worktree монтируется только для чтения. Зависимости ставятся `npm ci` в том Docker `office-nm-<хеш lock-файла>`, общий для задач с одинаковым `web/package-lock.json`. Шаг `e2e` собирает приложение и запускает тесты QA `web/e2e/office/**/*.pw.ts` в Playwright. Одновременно работает не больше `OFFICE_SANDBOX_CONTAINERS` контейнеров. Журналы шагов, скриншоты и трассы доступны через `GET /api/tasks/{id}/artifacts/{name}`.
+
+Образ sandbox собирается вручную (без образа шаги завершаются ошибкой «Sandbox недоступен»):
+
+```bash
+docker build -t back-office-sandbox:p4 docker/sandbox
+```
 
 ## Контракты
 
@@ -94,6 +108,12 @@ docker run -d --rm --name office-pg-test -e POSTGRES_USER=office -e POSTGRES_PAS
 cd api && OFFICE_TEST_POSTGRES_URL=postgresql://office:office@127.0.0.1:55432/office uv run pytest
 ```
 
+Тесты рабочей области используют локальный bare-репозиторий и не обращаются к сети. Тесты с реальным Docker помечены `docker` и запускаются отдельно. Они требуют собранный образ `back-office-sandbox:p4` и клонируют `vibe-chat` из `OFFICE_TEST_TARGET_REPO` (по умолчанию `https://github.com/SlavaPush/vibe-chat.git`; подходит и путь к локальной копии):
+
+```bash
+cd api && OFFICE_TEST_DOCKER=1 uv run pytest -m docker
+```
+
 ```bash
 cd web && npm ci && npm run lint && npm run test && npm run build
 ```
@@ -107,11 +127,11 @@ cd api && uv run python scripts/smoke_ollama.py qwen3:8b
 Образ sandbox и сквозная проверка: сборка `vibe-chat/web` внутри контейнера и открытие собранного приложения в браузере Playwright. Каталог `web` репозитория `vibe-chat` монтируется только для чтения:
 
 ```bash
-docker build -t back-office-sandbox docker/sandbox
+docker build -t back-office-sandbox:p4 docker/sandbox
 ```
 
 ```bash
-docker run --rm -v "$PWD/../vibe-chat/web:/src:ro" back-office-sandbox sandbox-smoke /src
+docker run --rm -v "$PWD/../vibe-chat/web:/src:ro" back-office-sandbox:p4 sandbox-smoke /src
 ```
 
 ## Лицензия

@@ -13,10 +13,11 @@ from app.artifacts import artifact_response
 from app.config import Settings
 from app.db import Database
 from app.decisions import decide_release, decide_task
-from app.errors import ErrorCode, error_response, install_error_handlers
+from app.errors import ErrorCode, error_response, install_error_handlers, not_found
 from app.events import EventNotifier, parse_last_event_id, stream_events
 from app.intake import UNAVAILABLE, IntakeFilter
 from app.models_gateway import ModelsGateway
+from app.sandbox import Sandbox
 from app.schemas import (
     SLOTS_TOTAL,
     CheckReport,
@@ -32,6 +33,7 @@ from app.schemas import (
 )
 from app.sessions import COOKIE_NAME, SessionStore, unauthorized
 from app.tasks import IntakeOutcome, TaskStore
+from app.workspace import Workspace
 
 logger = logging.getLogger("office")
 
@@ -62,9 +64,14 @@ class OriginGuard:
 
 
 def create_app(
-    settings: Settings | None = None, *, gateway: ModelsGateway | None = None
+    settings: Settings | None = None,
+    *,
+    gateway: ModelsGateway | None = None,
+    workspace: bool = True,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
+    if workspace and not settings.target_repo_url:
+        raise ValueError("TARGET_REPO_URL не задан: офису нужен репозиторий для рабочих копий задач.")
     db = Database(settings.database_url)
     db.init_schema()
     notifier = EventNotifier()
@@ -73,10 +80,16 @@ def create_app(
     intake = IntakeFilter(gateway or ModelsGateway(settings), settings)
     store.clear_reservations()
     store.promote_queue()
+    office_workspace = Workspace(settings, store) if workspace else None
+    sandbox = Sandbox(settings, store, office_workspace) if office_workspace else None
+    if office_workspace is not None:
+        office_workspace.recover()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
+        if office_workspace is not None:
+            office_workspace.shutdown()
         db.close()
 
     app = FastAPI(title="back-office API", lifespan=lifespan)
@@ -84,6 +97,8 @@ def create_app(
     app.state.store = store
     app.state.sessions = sessions
     app.state.notifier = notifier
+    app.state.workspace = office_workspace
+    app.state.sandbox = sandbox
     install_error_handlers(app)
     app.add_middleware(OriginGuard, hosts=settings.allowed_hosts, origins=settings.allowed_origins)
 
@@ -178,6 +193,13 @@ def create_app(
             poll_seconds=settings.sse_poll_seconds,
         )
         return StreamingResponse(stream, media_type="text/event-stream", headers=SSE_HEADERS)
+
+    @app.get("/api/tasks/{task_id}/diff")
+    def task_diff(task_id: str, _: CurrentParticipant) -> Response:
+        task = store.get_task(task_id)
+        if office_workspace is None:
+            raise not_found("Рабочая копия задачи не найдена.")
+        return Response(office_workspace.diff(task), media_type="text/plain; charset=utf-8")
 
     @app.get("/api/tasks/{task_id}/checks")
     def task_checks(task_id: str, _: CurrentParticipant) -> CheckReport:
