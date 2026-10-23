@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 
 const contractUrl = new URL('../../contracts/api.md', import.meta.url)
 const outputUrl = new URL('../src/mocks/contract-examples.ts', import.meta.url)
@@ -51,4 +51,5 @@ ${enumLines.join('\n')}
 }
 `
 
+mkdirSync(new URL('.', outputUrl), { recursive: true })
 writeFileSync(outputUrl, output)
