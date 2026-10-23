@@ -1,0 +1,30 @@
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+npm-debug.log*
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Окружение и секреты
+.env
+.env.*
+!.env.example
+
+# Тесты и артефакты
+test-results/
+playwright-report/
+coverage/
+
+# Duet
+.duet/
+
+# macOS и редакторы
+.DS_Store
+.idea/
+.vscode/
