@@ -39,5 +39,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: SlavaPush/vibe-chat
+          path: vibe-chat-src
       - run: docker build -t back-office-sandbox docker/sandbox
-      - run: docker run --rm back-office-sandbox sh -c "id -u && node --version && npx playwright --version"
+      - run: docker run --rm -v "$PWD/vibe-chat-src/web:/src:ro" back-office-sandbox sandbox-smoke /src

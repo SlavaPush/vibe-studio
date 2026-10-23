@@ -8,20 +8,30 @@ capabilities:
     max_output_tokens: 4096
     verified: false
   anthropic/claude-haiku-5-5:
-    reasoning_parameter: effort
-    reasoning_values: [low, medium, high]
+    reasoning_parameter: output_config.effort
+    reasoning_values: [low, medium, high, xhigh, max]
+    reasoning_default: medium
+    context_tokens: 1000000
+    max_output_tokens: 128000
     verified: false
   anthropic/claude-sonnet-5-5:
-    reasoning_parameter: effort
-    reasoning_values: [low, medium, high]
+    reasoning_parameter: output_config.effort
+    reasoning_values: [low, medium, high, xhigh, max]
+    reasoning_default: high
+    context_tokens: 1000000
+    max_output_tokens: 128000
     verified: false
   openai/gpt-6-luna:
     reasoning_parameter: reasoning.effort
     reasoning_values: [low, medium, high]
+    context_tokens: null
+    max_output_tokens: null
     verified: false
   openai/gpt-6.1-sol:
     reasoning_parameter: reasoning.effort
     reasoning_values: [low, medium, high]
+    context_tokens: null
+    max_output_tokens: null
     verified: false
 
 profiles:

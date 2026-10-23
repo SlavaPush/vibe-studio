@@ -13,7 +13,7 @@
 | `contracts/` | Контракт API панели и описание интеграций с GitHub и Render (этап P1) |
 | `policies/` | Разрешённые пути и команды sandbox, профили моделей `models.yaml` |
 | `docker/sandbox/` | Образ для сборки и проверок изменяемого кода (Node 24 + Playwright) |
-| `scripts/` | Smoke-проверки окружения и моделей |
+| `api/scripts/` | Smoke-проверки локальных моделей |
 | `workspace/` | Клон `vibe-chat` и worktree задач; в `.gitignore` |
 
 Статус: этап `P0` — каркас репозитория, CI и проверки окружения. Граф ролей ещё не реализован.
@@ -22,7 +22,13 @@
 
 `policies/models.yaml` задаёт модель и уровень усилий для каждой роли в профилях `local` (Ollama), `cloud` (Anthropic с резервом OpenAI) и `hybrid` (локальная модель для коротких шагов, облачная для разработчика, критика и фильтра приёма). Раздел `capabilities` описывает параметр рассуждения каждой пары провайдер/модель; поле `verified` становится `true` после реального вызова. На этапе `P0` файл — черновик, код его ещё не читает.
 
-Локальные ограничения: одна загруженная модель Ollama (`OLLAMA_MAX_LOADED_MODELS=1`), основная модель `qwen3:8b`.
+Локальные ограничения: одна загруженная модель Ollama, основная модель `qwen3:8b`. Приложение Ollama на macOS читает переменные окружения через `launchctl`; после команды перезапустить Ollama:
+
+```bash
+launchctl setenv OLLAMA_MAX_LOADED_MODELS 1
+```
+
+Docker Desktop на машине владельца ограничен 8 GB памяти. Одновременно запускать не больше одного-двух контейнеров проверок при загруженной локальной модели.
 
 ## Запуск локально
 
@@ -54,12 +60,20 @@ cd web && npm ci && npm run dev
 cd api && uv run pytest
 ```
 
+Smoke-проверка локальной модели (ответ без рассуждения и с рассуждением, код возврата 0 только при двух завершённых ответах):
+
 ```bash
-python3 -I scripts/smoke_ollama.py qwen3:8b
+cd api && uv run python scripts/smoke_ollama.py qwen3:8b
 ```
+
+Образ sandbox и сквозная проверка: сборка `vibe-chat/web` внутри контейнера и открытие собранного приложения в браузере Playwright. Каталог `web` репозитория `vibe-chat` монтируется только для чтения:
 
 ```bash
 docker build -t back-office-sandbox docker/sandbox
+```
+
+```bash
+docker run --rm -v "$PWD/../vibe-chat/web:/src:ro" back-office-sandbox sandbox-smoke /src
 ```
 
 ## Лицензия
