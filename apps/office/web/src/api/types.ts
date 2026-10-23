@@ -149,9 +149,9 @@ export interface CheckResult {
 
 export interface CheckReport {
   task_id: string
-  commit_sha: string
-  spec_hash: string
-  suite_hash: string
+  commit_sha: string | null
+  spec_hash: string | null
+  suite_hash: string | null
   checks: CheckResult[]
 }
 

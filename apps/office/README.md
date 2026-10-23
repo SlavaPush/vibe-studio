@@ -16,7 +16,7 @@
 | `api/scripts/` | Smoke-проверки локальных моделей |
 | `workspace/` | Клон `vibe-chat` и worktree задач; в `.gitignore` |
 
-Статус: этап `P1` — контракты `contracts/api.md` и `contracts/integrations.md`, Pydantic-схемы, тестовые данные API и панель на тестовых данных. Граф ролей, запись решений, SSE и серверная проверка прав ещё не реализованы (этап `P4`).
+Статус: подэтап `P4.1` — API офиса на БД (SQLite локально, PostgreSQL при деплое): сеансы по коду доступа, проверка `Host` и `Origin`, права, фильтр приёма задач (детерминированные проверки, модерация OpenAI, классификатор), три слота и очередь `queued`, решения с версией и идемпотентностью, журнал событий и SSE, отчёты проверок и артефакты, решения по выпускам без деплоя. Рабочие копии, sandbox, граф ролей и переход панели на API — подэтапы `P4.2`–`P4.4`; панель пока работает на тестовых данных.
 
 ## Контракты
 
@@ -64,11 +64,13 @@ cp .env.example .env
 ollama pull qwen3:8b
 ```
 
-API:
+API офиса на `127.0.0.1:8001` (переменные читаются из `../.env`; без `OFFICE_ACCESS_CODE` и `OFFICE_ADMIN_CODE` вход запрещён):
 
 ```bash
-cd api && uv sync && uv run uvicorn app.main:app --reload --port 8100
+cd api && uv sync && uv run --env-file ../.env uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8001
 ```
+
+Состояние офиса хранится в `OFFICE_DATABASE_URL` (по умолчанию `api/office.sqlite`). Схема `api/app/schema.sql` применяется при старте. Фильтр приёма читает `policies/intake.yaml` (запрещённые пути и команды) и профиль `intake_filter` из `policies/models.yaml`.
 
 Панель:
 
@@ -80,6 +82,16 @@ cd web && npm ci && npm run dev
 
 ```bash
 cd api && uv run pytest
+```
+
+Тесты БД выполняются на SQLite и, при заданной `OFFICE_TEST_POSTGRES_URL`, на PostgreSQL. Каждый тест получает отдельную схему PostgreSQL. Локальная PostgreSQL в Docker:
+
+```bash
+docker run -d --rm --name office-pg-test -e POSTGRES_USER=office -e POSTGRES_PASSWORD=office -e POSTGRES_DB=office -p 127.0.0.1:55432:5432 postgres:17
+```
+
+```bash
+cd api && OFFICE_TEST_POSTGRES_URL=postgresql://office:office@127.0.0.1:55432/office uv run pytest
 ```
 
 ```bash

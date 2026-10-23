@@ -2,7 +2,7 @@
 
 Документ описывает HTTP API между панелью `web/` и API офиса `api/`. Серверные схемы находятся в `api/app/schemas.py`, типы панели — в `web/src/api/types.ts`. Имена полей и значения перечислений в обоих местах совпадают с этим документом.
 
-На этапе `P1` API отдаёт тестовые данные только для `GET /api/me`, `GET /api/tasks`, `GET /api/tasks/{id}`, `GET /api/slots` и `GET /api/releases`. Остальные операции, проверка сеанса и прав на сервере реализуются на этапе `P4`.
+С подэтапа `P4.1` API работает с БД офиса и проверяет сеанс и права на сервере. `GET /api/tasks/{id}/diff` реализуется на подэтапе `P4.2`. Панель переходит на этот API на подэтапе `P4.4`.
 
 ## Общие правила
 
@@ -83,7 +83,7 @@
 | --- | --- | --- |
 | `rejected` | Фильтр приёма отклонил задачу; причина в `rejection_reason` | нет |
 | `queued` | Задача принята и ждёт свободного слота | нет |
-| `awaiting_spec_approval` | Требования готовы, ждут решения владельца `approve_spec` | да |
+| `awaiting_spec_approval` | Задача заняла слот. Пока `spec = null`, Supervisor готовит требования; после этого требования ждут решения владельца `approve_spec` | да |
 | `developing` | Разработчик изменяет код в worktree задачи | да |
 | `reviewing` | QA и критик проверяют зафиксированную версию | да |
 | `awaiting_integration` | PR в `vibe-chat` открыт, ждёт слияния человеком | да |
@@ -114,6 +114,7 @@
 | 401 | `invalid_access_code` | false | Неверный код доступа офиса |
 | 403 | `forbidden_not_owner` | false | Решение по задаче принимает не её владелец |
 | 403 | `forbidden_role` | false | Действие выпуска запрашивает участник без роли `admin` |
+| 403 | `forbidden_origin` | false | Заголовок `Host` любого запроса или `Origin` изменяющего запроса (`POST`, `PUT`, `PATCH`, `DELETE`) не входит в разрешённый список; отсутствующий `Origin` и `Origin: null` у изменяющего запроса также отклоняются |
 | 404 | `not_found` | false | Объект не существует или артефакт не принадлежит задаче |
 | 409 | `version_mismatch` | false | `expected_version` не совпадает с текущей версией объекта |
 | 409 | `decision_not_allowed` | false | Решение недопустимо в текущем статусе объекта |
@@ -145,11 +146,13 @@
 
 Решения по задаче доступны в статусах:
 
-| Решение | Допустимые статусы задачи |
-| --- | --- |
-| `approve_spec` | `awaiting_spec_approval` |
-| `cancel` | `queued`, `awaiting_spec_approval`, `developing`, `reviewing`, `awaiting_integration`, `needs_attention` |
-| `retry` | `failed`, `needs_attention` |
+| Решение | Допустимые статусы задачи | Дополнительное условие |
+| --- | --- | --- |
+| `approve_spec` | `awaiting_spec_approval` | Требования готовы: `spec` не равно `null` |
+| `cancel` | `queued`, `awaiting_spec_approval`, `developing`, `reviewing`, `awaiting_integration`, `needs_attention` | — |
+| `retry` | `failed`, `needs_attention` | Бюджет обращений не исчерпан: `usage.model_calls` меньше `usage.model_calls_limit` |
+
+`retry` возвращает задачу в `queued`; задача заново проходит очередь слотов. `usage` и `fix_cycles` при этом сохраняются: пределы относятся к задаче, а не к попытке.
 
 Решения по выпуску доступны в статусах:
 
@@ -158,7 +161,7 @@
 | `approve_release` | Кандидат в статусе `pending` |
 | `rollback` | Кандидат в статусе `released` и `is_published = true`; создаётся кандидат вида `rollback` на версию `expected_previous_sha` этого выпуска |
 
-Решение в другом статусе получает `409 decision_not_allowed`.
+Решение в другом статусе или при невыполненном дополнительном условии получает `409 decision_not_allowed`.
 
 ## Модели
 
@@ -231,9 +234,9 @@
 | Поле | Тип | Описание |
 | --- | --- | --- |
 | `task_id` | string | Задача |
-| `commit_sha` | string | Проверенная версия кода |
-| `spec_hash` | string | Хеш требований, по которым выполнялись проверки |
-| `suite_hash` | string | Хеш набора проверок |
+| `commit_sha` | string или `null` | Проверенная версия кода; `null`, пока проверок не было и `base_sha` задачи равен `null` |
+| `spec_hash` | string или `null` | Хеш требований, по которым выполнялись проверки; `null`, пока проверок не было |
+| `suite_hash` | string или `null` | Хеш набора проверок; `null`, пока проверок не было |
 | `checks` | `CheckResult[]` | Результаты команд |
 
 `CheckResult`: `command` (string), `exit_code` (integer), `duration_ms` (integer), `artifact_urls` (string[] — адреса `GET /api/tasks/{id}/artifacts/{name}`).
@@ -798,11 +801,32 @@ new file mode 100644
 }
 ```
 
-Если проверки ещё не запускались, `checks` пуст, а `commit_sha` равен `base_sha` задачи. Ошибки: `401 unauthorized`; `404 not_found`.
+Если проверки ещё не запускались, `checks` пуст, `commit_sha` равен `base_sha` задачи (`null`, пока worktree не создан), `spec_hash` и `suite_hash` равны `null`. Сервер не подставляет фиктивные значения.
+
+<!-- example: CheckReport -->
+```json
+{
+  "task_id": "tsk_104",
+  "commit_sha": null,
+  "spec_hash": null,
+  "suite_hash": null,
+  "checks": []
+}
+```
+
+Ошибки: `401 unauthorized`; `404 not_found`.
 
 ### `GET /api/tasks/{id}/artifacts/{name}`
 
 Возвращает файл артефакта задачи с исходным `Content-Type` и заголовком `Content-Disposition: attachment` для архивов. Сервер нормализует имя и проверяет, что файл принадлежит задаче `{id}`. Артефакт другой задачи возвращается как `404 not_found`.
+
+Артефакт — недоверенное содержимое. Каждый ответ артефакта содержит заголовки:
+
+- `Content-Security-Policy: sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'` — скрипты HTML и SVG не выполняются, документ получает уникальный origin и не отправляет запросы с cookie офиса;
+- `X-Content-Type-Options: nosniff`;
+- `Cross-Origin-Resource-Policy: same-origin`.
+
+HTML-отчёт Playwright с этими заголовками не работает интерактивно; трасса и скриншоты доступны как файлы.
 
 Ошибки: `401 unauthorized`; `400 invalid_artifact_name`; `404 not_found`.
 

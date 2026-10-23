@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import type { Participant, Task } from '@/api/types'
 import { ReleaseQueue } from '@/components/office/ReleaseQueue'
@@ -40,6 +40,40 @@ describe('TaskCard', () => {
   it('владелец может отменить задачу', () => {
     renderCard(byId('prt_maria'))
     expect(screen.getByRole('button', { name: 'Отменить задачу' })).toBeEnabled()
+  })
+
+  it('отчёт без проверок и хешей показывает отсутствие проверок', () => {
+    render(
+      <TaskCard
+        task={developing}
+        participant={byId('prt_maria')}
+        events={[]}
+        report={{ task_id: developing.id, commit_sha: null, spec_hash: null, suite_hash: null, checks: [] }}
+        diff={undefined}
+      />,
+    )
+    fireEvent.mouseDown(screen.getByRole('tab', { name: 'Проверки' }), { button: 0 })
+    expect(screen.getByText('Проверки ещё не запускались.', { exact: true })).toBeInTheDocument()
+  })
+
+  it('отчёт с проверками показывает отсутствующие хеши как «нет данных»', () => {
+    render(
+      <TaskCard
+        task={developing}
+        participant={byId('prt_maria')}
+        events={[]}
+        report={{
+          task_id: developing.id,
+          commit_sha: 'e7f8a9b0',
+          spec_hash: null,
+          suite_hash: null,
+          checks: [{ command: 'npm run build', exit_code: 0, duration_ms: 1000, artifact_urls: [] }],
+        }}
+        diff={undefined}
+      />,
+    )
+    fireEvent.mouseDown(screen.getByRole('tab', { name: 'Проверки' }), { button: 0 })
+    expect(screen.getAllByText('нет данных', { exact: true })).toHaveLength(2)
   })
 
   it('другой участник видит заблокированное действие с пояснением', () => {

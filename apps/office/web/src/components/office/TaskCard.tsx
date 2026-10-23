@@ -30,6 +30,7 @@ interface TaskCardProps {
 }
 
 const panelClass = 'rounded-md focus-visible:ring-[3px] focus-visible:ring-ring/50'
+const MISSING = 'нет данных'
 
 export function TaskCard({ task, participant, events, report, diff }: TaskCardProps) {
   const [notice, setNotice] = useState<string | null>(null)
@@ -159,11 +160,11 @@ export function TaskCard({ task, participant, events, report, diff }: TaskCardPr
               <>
                 <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
                   <dt className="text-muted-foreground">Commit</dt>
-                  <dd className="font-mono break-all">{report.commit_sha}</dd>
+                  <dd className="font-mono break-all">{report.commit_sha ?? MISSING}</dd>
                   <dt className="text-muted-foreground">Хеш требований</dt>
-                  <dd className="font-mono">{report.spec_hash}</dd>
+                  <dd className="font-mono">{report.spec_hash ?? MISSING}</dd>
                   <dt className="text-muted-foreground">Хеш проверок</dt>
-                  <dd className="font-mono">{report.suite_hash}</dd>
+                  <dd className="font-mono">{report.suite_hash ?? MISSING}</dd>
                 </dl>
                 <div className="overflow-x-auto">
                   <table className="w-full text-left text-sm">

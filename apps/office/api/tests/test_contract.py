@@ -3,11 +3,11 @@ import re
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
 from pydantic import TypeAdapter
 
 from app import schemas
-from app.main import app
+from app.errors import ErrorCode
+from conftest import CONTRACT_CODES, classification
 
 CONTRACT = Path(__file__).resolve().parents[2] / "contracts" / "api.md"
 EXAMPLE = re.compile(r"<!-- example: (\S+) -->\s*```json\n(.*?)\n```", re.DOTALL)
@@ -94,33 +94,44 @@ def test_unknown_fields_are_rejected():
         schemas.TaskDecisionRequest.model_validate(request)
 
 
-def test_fixture_routes_follow_schemas():
-    client = TestClient(app)
+def test_error_codes_match_contract_table():
+    assert set(CONTRACT_CODES) == {code.value for code in ErrorCode} | {"diff_too_large"}
+    assert CONTRACT_CODES["forbidden_origin"] == 403
 
-    me = schemas.Participant.model_validate(client.get("/api/me").json())
-    assert me.role == schemas.Role.admin
+
+def test_check_report_example_allows_missing_hashes():
+    reports = [schemas.CheckReport.model_validate(value) for value in examples_of("CheckReport")]
+    assert any(report.commit_sha is None and report.spec_hash is None for report in reports)
+
+
+def test_routes_follow_schemas(office):
+    client, me = office.login("Вячеслав", admin=True)
+    assert schemas.Participant.model_validate(client.get("/api/me").json()).id == me["id"]
+
+    created = office.post_task(client)
+    assert created.status_code == 201
+    office.anthropic.answer = classification(False, "out_of_scope")
+    office.post_task(client, "Перевести backend vibe-chat на другую базу данных PostgreSQL.")
+    office.add_candidate(created.json()["id"])
 
     tasks = TypeAdapter(list[schemas.Task]).validate_python(client.get("/api/tasks").json())
     assert [task.status for task in tasks] == [
         schemas.TaskStatus.rejected,
-        schemas.TaskStatus.developing,
-        schemas.TaskStatus.awaiting_release_approval,
+        schemas.TaskStatus.awaiting_spec_approval,
     ]
-
-    task = schemas.Task.model_validate(client.get("/api/tasks/tsk_101").json())
-    assert task.id == "tsk_101"
-
+    task = schemas.Task.model_validate(client.get(f"/api/tasks/{tasks[1].id}").json())
+    assert task.owner_name == "Вячеслав"
+    schemas.Slots.model_validate(client.get("/api/slots").json())
+    schemas.CheckReport.model_validate(client.get(f"/api/tasks/{task.id}/checks").json())
     releases = TypeAdapter(list[schemas.ReleaseCandidate]).validate_python(
         client.get("/api/releases").json()
     )
-    assert {release.status for release in releases} == {
-        schemas.ReleaseStatus.pending,
-        schemas.ReleaseStatus.released,
-    }
+    assert [release.status for release in releases] == [schemas.ReleaseStatus.pending]
 
 
-def test_unknown_task_returns_api_error():
-    response = TestClient(app).get("/api/tasks/tsk_missing")
+def test_unknown_task_returns_api_error(office):
+    client, _ = office.login()
+    response = client.get("/api/tasks/tsk_missing")
     assert response.status_code == 404
     error = schemas.ApiError.model_validate(response.json())
     assert error.code == "not_found"

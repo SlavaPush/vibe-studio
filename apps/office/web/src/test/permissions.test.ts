@@ -38,4 +38,25 @@ describe('canAct', () => {
   it('запрещает откат неопубликованного кандидата', () => {
     expect(canAct(admin, pending, 'rollback').allowed).toBe(false)
   })
+
+  it('разрешает утвердить требования только после их подготовки', () => {
+    const preparing: Task = { ...developing, status: 'awaiting_spec_approval', spec: null }
+    expect(canAct(owner, preparing, 'approve_spec')).toEqual({
+      allowed: false,
+      reason: 'Требования ещё не подготовлены.',
+    })
+    expect(canAct(owner, { ...preparing, spec: developing.spec }, 'approve_spec')).toEqual({
+      allowed: true,
+    })
+  })
+
+  it('запрещает повтор при исчерпанном бюджете обращений', () => {
+    const failed: Task = { ...developing, status: 'failed' }
+    expect(canAct(owner, failed, 'retry')).toEqual({ allowed: true })
+    const exhausted: Task = { ...failed, usage: { ...failed.usage, model_calls: 30 } }
+    expect(canAct(owner, exhausted, 'retry')).toEqual({
+      allowed: false,
+      reason: 'Бюджет обращений к моделям исчерпан. Повтор недоступен.',
+    })
+  })
 })

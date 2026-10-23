@@ -11,6 +11,22 @@ jobs:
     defaults:
       run:
         working-directory: api
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: office
+          POSTGRES_PASSWORD: office
+          POSTGRES_DB: office
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U office"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      OFFICE_TEST_POSTGRES_URL: postgresql://office:office@127.0.0.1:5432/office
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.3.2

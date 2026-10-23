@@ -43,6 +43,12 @@ export function canAct(
     if (!TASK_DECISION_STATUSES[action as TaskDecision].includes(target.status)) {
       return { allowed: false, reason: `Недоступно в статусе «${STATUS_LABELS[target.status]}».` }
     }
+    if (action === 'approve_spec' && target.spec === null) {
+      return { allowed: false, reason: 'Требования ещё не подготовлены.' }
+    }
+    if (action === 'retry' && target.usage.model_calls >= target.usage.model_calls_limit) {
+      return { allowed: false, reason: 'Бюджет обращений к моделям исчерпан. Повтор недоступен.' }
+    }
     return ALLOWED
   }
 

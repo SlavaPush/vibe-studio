@@ -177,9 +177,9 @@ class CheckResult(ContractModel):
 
 class CheckReport(ContractModel):
     task_id: str
-    commit_sha: str
-    spec_hash: str
-    suite_hash: str
+    commit_sha: str | None
+    spec_hash: str | None
+    suite_hash: str | None
     checks: list[CheckResult]
 
 
