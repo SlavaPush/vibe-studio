@@ -17,6 +17,7 @@ from app.errors import ErrorCode, error_response, install_error_handlers, not_fo
 from app.events import EventNotifier, parse_last_event_id, stream_events
 from app.intake import UNAVAILABLE, IntakeFilter
 from app.models_gateway import ModelsGateway
+from app.runner import Checkpoints, Runner
 from app.sandbox import Sandbox
 from app.schemas import (
     SLOTS_TOTAL,
@@ -68,6 +69,7 @@ def create_app(
     *,
     gateway: ModelsGateway | None = None,
     workspace: bool = True,
+    runner: bool = True,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     if workspace and not settings.target_repo_url:
@@ -77,17 +79,25 @@ def create_app(
     notifier = EventNotifier()
     store = TaskStore(db, notifier.notify)
     sessions = SessionStore(db, settings)
-    intake = IntakeFilter(gateway or ModelsGateway(settings), settings)
+    models = gateway or ModelsGateway(settings)
+    intake = IntakeFilter(models, settings)
     store.clear_reservations()
     store.promote_queue()
     office_workspace = Workspace(settings, store) if workspace else None
     sandbox = Sandbox(settings, store, office_workspace) if office_workspace else None
+    office_runner = None
+    if runner and office_workspace is not None and sandbox is not None:
+        office_runner = Runner(settings, store, office_workspace, sandbox, models, Checkpoints(settings.database_url))
     if office_workspace is not None:
         office_workspace.recover()
+    if office_runner is not None:
+        office_runner.recover()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
+        if office_runner is not None:
+            office_runner.shutdown()
         if office_workspace is not None:
             office_workspace.shutdown()
         db.close()
@@ -99,6 +109,7 @@ def create_app(
     app.state.notifier = notifier
     app.state.workspace = office_workspace
     app.state.sandbox = sandbox
+    app.state.runner = office_runner
     install_error_handlers(app)
     app.add_middleware(OriginGuard, hosts=settings.allowed_hosts, origins=settings.allowed_origins)
 

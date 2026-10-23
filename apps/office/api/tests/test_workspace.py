@@ -210,7 +210,7 @@ def test_default_factory_reads_environment(origin, tmp_path, monkeypatch):
     monkeypatch.setenv("OFFICE_ARTIFACTS_DIR", str(tmp_path / "env-artifacts"))
     apps = []
     try:
-        apps.append(create_app())
+        apps.append(create_app(runner=False))
         store = apps[0].state.store
         with store.db.transaction() as conn:
             conn.execute(
@@ -225,7 +225,7 @@ def test_default_factory_reads_environment(origin, tmp_path, monkeypatch):
         assert head_branch(path) == f"office/{task_id}"
         apps[0].state.workspace.shutdown()
         shutil.rmtree(path)
-        apps.append(create_app())
+        apps.append(create_app(runner=False))
         apps[1].state.workspace.wait_idle()
         assert head_branch(path) == f"office/{task_id}"
         monkeypatch.delenv("TARGET_REPO_URL")

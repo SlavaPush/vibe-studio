@@ -25,4 +25,7 @@ for entry in /deps/node_modules/* /deps/node_modules/.[!.]*; do
 done
 
 cd /work/app/web
+if [ "$STEP" = e2e ]; then
+  npm run build || exit 90
+fi
 exec sh -c "$COMMAND"

@@ -4,7 +4,7 @@ import math
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from functools import partial
 from typing import Any
 
@@ -31,6 +31,7 @@ MODEL_CALLS_LIMIT = 30
 SIGNAL_SLOT_ACQUIRED = "slot_acquired"
 SIGNAL_DECISION_RECORDED = "decision_recorded"
 SIGNAL_TASK_CLOSED = "task_closed"
+SIGNAL_SLOT_RELEASED = "slot_released"
 CLOSED_STATUSES = frozenset({TaskStatus.cancelled, TaskStatus.released})
 
 S = TaskStatus
@@ -62,6 +63,10 @@ SignalHandler = Callable[[str, str], None]
 
 
 class TransitionError(Exception):
+    pass
+
+
+class BudgetExceeded(Exception):
     pass
 
 
@@ -246,6 +251,7 @@ class TaskStore:
             conn, task_id, TaskEventType.status_changed, {"from": task.status.value, "to": to.value}
         )
         if task.status in SLOT_STATUSES and to not in SLOT_STATUSES:
+            self.signal(conn, SIGNAL_SLOT_RELEASED, task_id)
             self._promote(conn)
         if to in SLOT_STATUSES and task.status not in SLOT_STATUSES:
             self.signal(conn, SIGNAL_SLOT_ACQUIRED, task_id)
@@ -303,7 +309,9 @@ class TaskStore:
                 )
             return True
 
-    def record_commit(self, task_id: str, sha: str, changed_files: list[str]) -> Task:
+    def record_commit(
+        self, task_id: str, sha: str, changed_files: list[str], role: AgentRole | None = None
+    ) -> Task:
         with self.db.locked_transaction() as conn:
             conn.execute(
                 "UPDATE tasks SET changed_files = :files, version = version + 1, updated_at = :now WHERE id = :id",
@@ -314,9 +322,189 @@ class TaskStore:
                 task_id,
                 TaskEventType.tool_called,
                 {"arguments": f"{sha} ({len(changed_files)} файлов)", "result": "ok"},
+                role=role,
                 tool="git_commit",
             )
             return self.load_task(conn, task_id)
+
+    def reserve_model_call(self, task_id: str, role: AgentRole, step: str, target: str) -> None:
+        with self.db.locked_transaction() as conn:
+            task = self.load_task(conn, task_id)
+            if task is None:
+                raise not_found("Задача не найдена.")
+            if task.usage.model_calls >= task.usage.model_calls_limit:
+                raise BudgetExceeded(f"{task_id}: {task.usage.model_calls_limit} model calls used")
+            conn.execute(
+                "UPDATE tasks SET model_calls = model_calls + 1, version = version + 1, updated_at = :now "
+                "WHERE id = :id",
+                {"now": to_text(utcnow()), "id": task_id},
+            )
+            self.record_event(
+                conn,
+                task_id,
+                TaskEventType.tool_called,
+                {"arguments": f"{role.value}/{step} {target}", "result": "ok"},
+                role=role,
+                tool="model",
+            )
+
+    def record_usage(self, task_id: str, input_tokens: int, output_tokens: int) -> None:
+        with self.db.locked_transaction() as conn:
+            conn.execute(
+                "UPDATE tasks SET input_tokens = input_tokens + :input, output_tokens = output_tokens + :output, "
+                "version = version + 1, updated_at = :now WHERE id = :id",
+                {
+                    "input": max(0, int(input_tokens)),
+                    "output": max(0, int(output_tokens)),
+                    "now": to_text(utcnow()),
+                    "id": task_id,
+                },
+            )
+
+    def attempt(self, task_id: str) -> int:
+        with self.db.connection() as conn:
+            row = conn.fetchone(
+                "SELECT COUNT(*) AS retries FROM decisions WHERE operation = 'task_decision' "
+                "AND object_id = :id AND decision = 'retry'",
+                {"id": task_id},
+            )
+        return row["retries"]
+
+    def _attempt_events(self, conn: Connection, task_id: str) -> list[dict[str, Any]]:
+        rows = conn.fetchall(
+            "SELECT seq, type, occurred_at, payload FROM task_events WHERE task_id = :id "
+            "AND type IN ('decision_recorded', 'decision_required', 'status_changed') ORDER BY seq",
+            {"id": task_id},
+        )
+        start = 0
+        for row in rows:
+            row["payload"] = json.loads(row["payload"])
+            if row["type"] == TaskEventType.decision_recorded and row["payload"].get("decision") == "retry":
+                start = row["seq"]
+        return [row for row in rows if row["seq"] > start]
+
+    def published_version(self, task_id: str) -> int | None:
+        with self.db.connection() as conn:
+            task = self.load_task(conn, task_id)
+            if task is None or task.spec is None:
+                return None
+            found = [
+                row["payload"]["expected_version"]
+                for row in self._attempt_events(conn, task_id)
+                if row["type"] == TaskEventType.decision_required
+                and row["payload"].get("decision") == "approve_spec"
+            ]
+        return found[-1] if found else None
+
+    def attempt_approval(self, task_id: str) -> int | None:
+        with self.db.connection() as conn:
+            found = [
+                row["payload"]["decision_id"]
+                for row in self._attempt_events(conn, task_id)
+                if row["type"] == TaskEventType.decision_recorded
+                and row["payload"].get("decision") == "approve_spec"
+            ]
+            if not found:
+                return None
+            row = conn.fetchone("SELECT expected_version FROM decisions WHERE id = :id", {"id": found[-1]})
+        return None if row is None else row["expected_version"]
+
+    def attempt_started_at(self, task_id: str) -> datetime | None:
+        with self.db.connection() as conn:
+            for row in self._attempt_events(conn, task_id):
+                if row["type"] == TaskEventType.status_changed and row["payload"].get("to") == "developing":
+                    return from_text(row["occurred_at"])
+        return None
+
+    def publish_spec(
+        self, task_id: str, spec: dict[str, Any] | None, artifact: tuple[str, int] | None
+    ) -> int | None:
+        with self.db.locked_transaction() as conn:
+            task = self.load_task(conn, task_id)
+            if task is None or task.status != TaskStatus.awaiting_spec_approval:
+                return None
+            if spec is not None:
+                conn.execute(
+                    "UPDATE tasks SET spec = :spec, version = version + 1, updated_at = :now WHERE id = :id",
+                    {"spec": _json(spec), "now": to_text(utcnow()), "id": task_id},
+                )
+            if artifact is not None:
+                name, size = artifact
+                self.record_event(
+                    conn,
+                    task_id,
+                    TaskEventType.artifact_ready,
+                    {"name": name, "size_bytes": size},
+                    role=AgentRole.supervisor,
+                    artifact=name,
+                )
+            version = self.load_task(conn, task_id).version
+            self.record_event(
+                conn,
+                task_id,
+                TaskEventType.decision_required,
+                {"decision": "approve_spec", "expected_version": version},
+            )
+            return version
+
+    def spec_approval(self, task_id: str, expected_version: int | None) -> str | None:
+        if expected_version is None:
+            return None
+        with self.db.connection() as conn:
+            task = self.load_task(conn, task_id)
+            if task is None or task.status != TaskStatus.developing:
+                return None
+            row = conn.fetchone(
+                "SELECT id FROM decisions WHERE operation = 'task_decision' AND object_id = :id "
+                "AND decision = 'approve_spec' AND expected_version = :version ORDER BY recorded_at DESC",
+                {"id": task_id, "version": expected_version},
+            )
+        return None if row is None else row["id"]
+
+    def ensure_status(
+        self, task_id: str, source: TaskStatus, target: TaskStatus, *, fix_cycles: int | None = None
+    ) -> bool:
+        with self.db.locked_transaction() as conn:
+            task = self.load_task(conn, task_id)
+            if task is None:
+                return False
+            if task.status == target and (fix_cycles is None or task.fix_cycles == fix_cycles):
+                return True
+            if task.status != source:
+                return False
+            if fix_cycles is not None:
+                if fix_cycles != task.fix_cycles + 1:
+                    return False
+                conn.execute(
+                    "UPDATE tasks SET fix_cycles = :cycles WHERE id = :id", {"cycles": fix_cycles, "id": task_id}
+                )
+            self.transition(conn, task_id, target, expected_from=source)
+            return True
+
+    def halt(
+        self,
+        task_id: str,
+        target: TaskStatus,
+        *,
+        statuses: frozenset[TaskStatus],
+        role: AgentRole | None,
+        step: str,
+        reason: str,
+    ) -> bool:
+        with self.db.locked_transaction() as conn:
+            task = self.load_task(conn, task_id)
+            if task is None or task.status not in statuses:
+                return False
+            outcome = "blocked" if target == TaskStatus.needs_attention else "error"
+            self.record_event(
+                conn,
+                task_id,
+                TaskEventType.role_finished,
+                {"step": step, "outcome": outcome, "summary": reason[:300]},
+                role=role,
+            )
+            self.transition(conn, task_id, target, expected_from=task.status)
+            return True
 
     def _promote(self, conn: Connection) -> list[str]:
         promoted: list[str] = []

@@ -6,12 +6,25 @@ import threading
 import time
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+
+import json
 
 import pytest
-from conftest import git
+from conftest import git, wait_for
 
-from app.sandbox import MARKER, UNAVAILABLE, CappedLog, Sandbox, SandboxError, StepDenied, run_process
-from app.schemas import AgentRole
+from app.sandbox import (
+    MARKER,
+    UNAVAILABLE,
+    CappedLog,
+    Sandbox,
+    SandboxCancelled,
+    SandboxError,
+    StepDenied,
+    parse_playwright,
+    run_process,
+)
+from app.schemas import AgentRole, CheckReport, CheckResult
 
 
 def git_head(path):
@@ -42,10 +55,12 @@ class FakeDocker:
         self.marker = True
         self.output = b""
         self.hooks = {}
+        self.created = {}
+        self.on_create = None
         self.lock = threading.Lock()
 
     def runs(self, step=None):
-        found = [args for args in self.calls if args[:2] == ["docker", "run"] and "sandbox-step" in args]
+        found = [args for args in self.calls if args[:2] == ["docker", "create"] and "sandbox-step" in args]
         return [args for args in found if step is None or args[args.index("sandbox-step") + 1] == step]
 
     def __call__(self, args, timeout, log):
@@ -61,6 +76,22 @@ class FakeDocker:
             return 0
         if args[1] == "kill":
             return 0
+        if command == ["rm", "-f"]:
+            self.created.pop(args[3], None)
+            return 0
+        if args[1] == "ps":
+            label = args[-1].removeprefix("label=")
+            log.write("".join(f"{name}\n" for name, created in self.created.items() if label in created).encode())
+            return 0
+        if args[1] == "create":
+            name = args[args.index("--name") + 1]
+            self.created[name] = list(args)
+            if self.on_create is not None:
+                self.on_create(name)
+            return 0
+        if command != ["start", "--attach"] or args[3] not in self.created:
+            return 1
+        args = self.created.pop(args[3])
         volume = mounts(args)["/deps"][1]
         self.volumes.setdefault(volume, False)
         if args[-3:] == ["test", "-f", MARKER]:
@@ -118,9 +149,10 @@ def ready(docker, sandbox, app, task_id):
     return volume
 
 
-def expected_args(name, step, command, *, src, volume, out, network, deps_readonly=True, qa=None):
+def expected_args(name, step, command, *, label, src, volume, out, network, deps_readonly=True, qa=None):
     args = [
-        "docker", "run", "--rm", "--pull", "never", "--name", name,
+        "docker", "create", "--rm", "--pull", "never", "--name", name,
+        "--label", label,
         "--log-driver", "none",
         "--user", "10001:10001",
         "--cap-drop", "ALL",
@@ -158,13 +190,15 @@ def test_docker_arguments_for_install_and_check(setup, monkeypatch):
     [lint] = docker.runs("lint")
     volume = mounts(install)["/deps"][1]
     assert volume.startswith("office-nm-") and len(volume) == len("office-nm-") + 16
+    label = sandbox.label
+    assert label.startswith("back-office.workspace=") and len(label) == len("back-office.workspace=") + 16
     assert install == expected_args(
         f"office-{task_id}-install-1", "install", "npm ci --no-audit --no-fund",
-        src=src, volume=volume, out=None, network=True, deps_readonly=False,
+        label=label, src=src, volume=volume, out=None, network=True, deps_readonly=False,
     )
     assert lint == expected_args(
         f"office-{task_id}-lint-1", "lint", "npm run lint",
-        src=src, volume=volume, out=mounts(lint)["/out"][1], network=False,
+        label=label, src=src, volume=volume, out=mounts(lint)["/out"][1], network=False,
     )
     for args in docker.calls:
         text = " ".join(args)
@@ -323,7 +357,7 @@ def test_suite_runs_same_qa_on_base_and_task_commit(setup):
     assert first_qa == docker.qa_files == {"web/e2e/office/feature.pw.ts": "test('feature')\n"}
     assert before.commit_sha == base and after.commit_sha == commit
     assert before.suite_hash == after.suite_hash
-    assert [check.command for check in after.checks][-1].startswith("npm run build && playwright test")
+    assert [check.command for check in after.checks][-1].startswith("playwright test")
     assert not any(path.name.startswith(".suite-") for path in workspace.root.iterdir())
 
     names = [url.rsplit("/", 1)[1] for url in after.checks[-1].artifact_urls]
@@ -414,3 +448,175 @@ def test_empty_qa_set_is_error_for_e2e_step(setup):
     with pytest.raises(SandboxError, match="QA"):
         sandbox.run_step(task_id, "e2e", AgentRole.qa)
     assert docker.runs("e2e") == []
+
+
+def test_cancel_during_suite_removes_container_and_skips_next_steps(setup):
+    app, _, docker, make, start = setup
+    sandbox = make()
+    [task_id] = start()
+    ready(docker, sandbox, app, task_id)
+    docker.hooks = {"lint": lambda args: sandbox.cancel_task(task_id)}
+    base = app.state.store.get_task(task_id).base_sha
+    with pytest.raises(SandboxCancelled):
+        sandbox.run_suite(task_id, base, base)
+    assert ["docker", "rm", "-f", f"office-{task_id}-lint-1"] in docker.calls
+    assert docker.runs("test") == [] and docker.runs("build") == []
+    assert not sandbox.has_containers(task_id)
+    with pytest.raises(SandboxCancelled):
+        sandbox.run_step(task_id, "lint", AgentRole.developer)
+    sandbox.reset_task(task_id)
+    docker.hooks = {}
+    assert sandbox.run_step(task_id, "lint", AgentRole.developer).exit_code == 0
+
+
+def test_cancel_while_waiting_for_container_slot(setup):
+    app, _, docker, make, start = setup
+    sandbox = make(sandbox_containers=1)
+    first, second = start(2)
+    ready(docker, sandbox, app, first)
+    running = threading.Event()
+    release = threading.Event()
+
+    def hold(args):
+        running.set()
+        release.wait(10)
+
+    docker.hooks = {"lint": hold}
+    errors = []
+
+    def run(task_id):
+        try:
+            sandbox.run_step(task_id, "lint", AgentRole.developer)
+        except SandboxCancelled as error:
+            errors.append((task_id, error))
+
+    threads = [threading.Thread(target=run, args=(first,))]
+    threads[0].start()
+    assert running.wait(10)
+    threads.append(threading.Thread(target=run, args=(second,)))
+    threads[1].start()
+    time.sleep(0.2)
+    sandbox.cancel_task(second)
+    mark = len(docker.calls)
+    release.set()
+    for thread in threads:
+        thread.join()
+    assert [task_id for task_id, _ in errors] == [second]
+    assert [args for args in docker.calls[mark:] if args[1] == "create"] == []
+    assert [args[args.index("--name") + 1] for args in docker.runs("lint")] == [f"office-{first}-lint-1"]
+
+
+def test_cancel_during_create_removes_container_without_start(setup):
+    app, _, docker, make, start = setup
+    sandbox = make()
+    [task_id] = start()
+    ready(docker, sandbox, app, task_id)
+    name = f"office-{task_id}-lint-1"
+    threads = []
+
+    def on_create(created):
+        if created == name:
+            thread = threading.Thread(target=sandbox.cancel_task, args=(task_id,))
+            thread.start()
+            threads.append(thread)
+            wait_for(lambda: sandbox.cancelled(task_id), 10, "cancel flag")
+
+    docker.on_create = on_create
+    with pytest.raises(SandboxCancelled):
+        sandbox.run_step(task_id, "lint", AgentRole.developer)
+    for thread in threads:
+        thread.join()
+    assert ["docker", "start", "--attach", name] not in docker.calls
+    assert ["docker", "rm", "-f", name] in docker.calls
+    assert name not in docker.created
+    assert not sandbox.has_containers(task_id)
+
+
+def test_stale_containers_of_this_workspace_are_removed(setup):
+    app, _, docker, make, _ = setup
+    sandbox = make()
+    other = Sandbox(app.state.settings, app.state.store, SimpleNamespace(root=Path("/elsewhere")), runner=docker)
+    docker.created = {
+        "office-tsk_old-lint-1": ["docker", "create", "--label", sandbox.label],
+        "office-probe-0001": ["docker", "create", "--label", sandbox.label],
+        "office-pg-test": ["docker", "create"],
+    }
+    sandbox.remove_stale()
+    assert ["docker", "ps", "-aq", "--filter", f"label={sandbox.label}"] in docker.calls
+    assert set(docker.created) == {"office-pg-test"}
+    assert other.label != sandbox.label
+
+
+QA_FILE = "web/e2e/office/tsk_1.pw.ts"
+
+
+def report(*tests, errors=(), file=QA_FILE):
+    return {
+        "errors": list(errors),
+        "suites": [{"title": file, "file": file, "specs": [], "suites": [
+            {"title": "group", "file": file, "specs": [{"title": "t", "file": file, "tests": list(tests)}]}
+        ]}],
+    }
+
+
+def result(status, *errors):
+    return {"status": "expected" if status == "passed" else "unexpected", "results": [{"status": status, "errors": list(errors)}]}
+
+
+FAILURE = {"message": "\x1b[31mError: expect(locator).toBeVisible() failed\x1b[39m", "location": {"file": f"/qa/{QA_FILE}", "line": 12, "column": 5}}
+TIMEOUT = {"message": "Test timeout of 30000ms exceeded."}
+
+
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        (None, "no_evidence"),
+        (report(result("passed"), errors=[{"message": "webServer exited"}]), "no_evidence"),
+        (report(result("failed", FAILURE), file="web/e2e/office/other.pw.ts"), "no_evidence"),
+        (report(), "no_evidence"),
+        (report(result("passed"), {"status": "skipped", "results": [{"status": "skipped", "errors": []}]}), "no_evidence"),
+        (report(result("interrupted")), "no_evidence"),
+        (report(result("failed")), "no_evidence"),
+        (report(result("passed"), result("passed")), "passed"),
+        (report(result("failed", FAILURE)), "failed"),
+        (report(result("failed", {"message": "Error: expect(received).toBe(expected) // Object.is equality"})), "failed"),
+        (report(result("failed", {"message": "Error: Timed out 5000ms waiting for expect(locator).toHaveText(expected)"})), "failed"),
+        (report(result("timedOut", TIMEOUT, FAILURE)), "failed"),
+        (report(result("timedOut", TIMEOUT)), "no_evidence"),
+        (report(result("failed", {"message": "Error: browserType.launch: Executable doesn't exist at /ms-playwright/chromium"})), "no_evidence"),
+        (report(result("failed", {"message": "Error: page.goto: net::ERR_CONNECTION_REFUSED at http://127.0.0.1:4173/"})), "no_evidence"),
+        (report(result("failed", {"message": "Error: Fixture \"page\" timeout of 30000ms exceeded during setup."})), "no_evidence"),
+        (report(result("failed", FAILURE), result("failed", {"message": "Error: page.goto: net::ERR_ABORTED"})), "no_evidence"),
+    ],
+)
+def test_playwright_report_parsing(data, expected):
+    assert parse_playwright(data, QA_FILE).status == expected
+
+
+def test_playwright_failure_details():
+    parsed = parse_playwright(report(result("passed"), result("failed", FAILURE)), QA_FILE)
+    assert (parsed.status, parsed.line) == ("failed", 12)
+    assert parsed.message == "Error: expect(locator).toBeVisible() failed"
+
+
+def test_e2e_result_reads_report_artifact(setup):
+    app, _, _, make, start = setup
+    sandbox = make()
+    [task_id] = start()
+    command = sandbox.policy.steps["e2e"].command
+    directory = app.state.settings.artifacts_dir / task_id
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "e2e-1-0-playwright-report.json").write_text(json.dumps(report(result("failed", FAILURE))))
+    urls = [f"/api/tasks/{task_id}/artifacts/e2e-1.log", f"/api/tasks/{task_id}/artifacts/e2e-1-0-playwright-report.json"]
+
+    def outcome(exit_code, artifact_urls=urls):
+        check = CheckResult(command=command, exit_code=exit_code, duration_ms=1, artifact_urls=artifact_urls)
+        suite = CheckReport(task_id=task_id, commit_sha="a" * 40, spec_hash=None, suite_hash=None, checks=[check])
+        return sandbox.e2e_result(task_id, suite, QA_FILE)
+
+    assert (outcome(1).status, outcome(1).line) == ("failed", 12)
+    assert outcome(90).status == "no_evidence" and "Сборка" in outcome(90).reason
+    assert outcome(124).status == "no_evidence"
+    assert outcome(1, urls[:1]).status == "no_evidence"
+    empty = CheckReport(task_id=task_id, commit_sha=None, spec_hash=None, suite_hash=None, checks=[])
+    assert sandbox.e2e_result(task_id, empty, QA_FILE).status == "no_evidence"

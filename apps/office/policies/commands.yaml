@@ -28,7 +28,7 @@ steps:
     timeout_seconds: 600
     roles: [developer]
   e2e:
-    command: npm run build && playwright test --config /office-e2e/playwright.config.ts
+    command: playwright test --config /office-e2e/playwright.config.ts
     network: false
     timeout_seconds: 900
     roles: [qa]

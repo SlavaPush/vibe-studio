@@ -4,7 +4,7 @@ export default defineConfig({
   testDir: "/qa",
   testMatch: "**/*.pw.ts",
   outputDir: "/out/test-results",
-  reporter: "list",
+  reporter: [["line"], ["json", { outputFile: "/out/playwright-report.json" }]],
   forbidOnly: true,
   retries: 0,
   workers: 1,

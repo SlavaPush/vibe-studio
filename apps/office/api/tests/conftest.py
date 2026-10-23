@@ -2,8 +2,10 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,8 +18,10 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
-from app.models_gateway import ModelsGateway
-from app.schemas import ApiError, ModelProfile, ReleaseCandidate, ReleaseKind
+from app.models_gateway import ModelCall, ModelsGateway, ProviderReply
+from app.runner import Checkpoints, Runner
+from app.sandbox import E2EResult, SandboxCancelled
+from app.schemas import ApiError, CheckReport, CheckResult, ModelProfile, ReleaseCandidate, ReleaseKind
 from app.tasks import IntakeOutcome, TaskStore
 
 PG_URL = os.environ.get("OFFICE_TEST_POSTGRES_URL")
@@ -124,6 +128,7 @@ class FakeOpenAI:
         self.moderation_delay = 0.0
         self.answer = classification()
         self.status = "completed"
+        self.incomplete_details: Any = None
         self.error: Exception | None = None
         self.delay = 0.0
         self.moderation_calls: list[dict[str, Any]] = []
@@ -147,9 +152,156 @@ class FakeOpenAI:
             raise self.error
         return SimpleNamespace(
             status=self.status,
+            incomplete_details=self.incomplete_details,
             output_text=self.answer,
             usage=SimpleNamespace(input_tokens=200, output_tokens=40),
         )
+
+
+QA_FILE = re.compile(r"web/e2e/office/tsk_[0-9a-f]+\.pw\.ts")
+QA_TEST = 'import { test, expect } from "@playwright/test";\n\ntest("feature", async ({ page }) => {\n  await page.goto("/");\n});\n'
+SPEC_ANSWER = {
+    "summary": "Под ответом ассистента появляется кнопка копирования.",
+    "acceptance_criteria": ["Кнопка копирования видна под ответом.", "Нажатие копирует текст ответа."],
+    "needs_research": False,
+    "research_questions": [],
+}
+
+
+def developer_answer(content: str, path: str = "web/src/App.tsx", done: bool = True) -> dict[str, Any]:
+    return {
+        "actions": [{"kind": "write_file", "path": path, "content": content, "step": None}],
+        "done": done,
+        "summary": "Кнопка копирования ответа",
+    }
+
+
+def qa_answer(call: ModelCall, criteria: list[int] | None = None, findings: list | None = None) -> dict[str, Any]:
+    path = QA_FILE.search(call.user).group(0)
+    return {
+        "actions": [{"kind": "write_file", "path": path, "content": QA_TEST, "step": None}],
+        "done": True,
+        "summary": "Тест кнопки копирования",
+        "criteria_covered": [1] if criteria is None else criteria,
+        "findings": findings or [],
+    }
+
+
+class ScriptedGateway(ModelsGateway):
+    def __init__(self, settings: Settings) -> None:
+        super().__init__(settings, anthropic_client=FakeAnthropic(), openai_client=FakeOpenAI())
+        self.calls: list[ModelCall] = []
+        self.lock = threading.Lock()
+        self.versions = 0
+        self.handlers: dict[str, Callable[[ModelCall], Any]] = {
+            "supervisor": lambda call: SPEC_ANSWER,
+            "researcher": lambda call: {"urls": []},
+            "developer": self.next_version,
+            "qa": qa_answer,
+            "critic": lambda call: {"verdict": "pass", "findings": []},
+        }
+
+    def next_version(self, call: ModelCall) -> dict[str, Any]:
+        with self.lock:
+            self.versions += 1
+            number = self.versions
+        return developer_answer(f"export function App() {{\n  return 'v{number}'\n}}\n")
+
+    def call_provider(self, call: ModelCall) -> ProviderReply:
+        with self.lock:
+            self.calls.append(call)
+        answer = self.handlers[call.role.value](call)
+        if isinstance(answer, ProviderReply):
+            return answer
+        return ProviderReply(json.dumps(answer, ensure_ascii=False), 100, 20, True)
+
+    def role_calls(self, role: str, task_id: str | None = None) -> list[ModelCall]:
+        with self.lock:
+            return [
+                call for call in self.calls
+                if call.role.value == role and (task_id is None or call.task_id == task_id)
+            ]
+
+
+SUITE_COMMANDS = {
+    "lint": "npm run lint",
+    "test": "npm run test",
+    "build": "npm run build",
+    "e2e": "playwright test --config /office-e2e/playwright.config.ts",
+}
+
+
+class FakeSuite:
+    def __init__(self, store: TaskStore) -> None:
+        self.store = store
+        self.calls: list[tuple[str, str, str, bool]] = []
+        self.exits: Callable[[str, str, str, bool], dict[str, int]] = lambda task_id, app, qa, e2e: {}
+        self.e2e: Callable[[str, str, str], E2EResult] = self.default_e2e
+        self.on_suite: Callable[[str, str, str, bool], None] | None = None
+        self.cancelled: set[str] = set()
+        self.stale_removed = 0
+        self.lock = threading.Lock()
+
+    def remove_stale(self) -> None:
+        self.stale_removed += 1
+
+    def default_e2e(self, task_id: str, app_sha: str, test_file: str) -> E2EResult:
+        if app_sha == self.store.get_task(task_id).base_sha:
+            return E2EResult("failed", line=4, message="expect(locator).toBeVisible() failed")
+        return E2EResult("passed")
+
+    def check_cancelled(self, task_id: str) -> None:
+        if task_id in self.cancelled:
+            raise SandboxCancelled("cancelled")
+
+    def run_suite(self, task_id: str, app_sha: str, qa_sha: str, *, require_e2e: bool = False) -> CheckReport:
+        self.check_cancelled(task_id)
+        with self.lock:
+            self.calls.append((task_id, app_sha, qa_sha, require_e2e))
+        if self.on_suite is not None:
+            self.on_suite(task_id, app_sha, qa_sha, require_e2e)
+        exits = self.exits(task_id, app_sha, qa_sha, require_e2e)
+        steps = ["lint", "test", "build"] + (["e2e"] if require_e2e else [])
+        task = self.store.get_task(task_id)
+        report = CheckReport(
+            task_id=task_id,
+            commit_sha=app_sha,
+            spec_hash=task.spec.spec_hash if task.spec else None,
+            suite_hash="sha256:fake",
+            checks=[
+                CheckResult(command=SUITE_COMMANDS[step], exit_code=exits.get(step, 0), duration_ms=1, artifact_urls=[])
+                for step in steps
+            ],
+        )
+        self.store.add_check_report(report)
+        return report
+
+    def e2e_result(self, task_id: str, report: CheckReport, test_file: str) -> E2EResult:
+        return self.e2e(task_id, report.commit_sha, test_file)
+
+    def run_step(self, task_id: str, step: str, role: Any) -> CheckResult:
+        self.check_cancelled(task_id)
+        return CheckResult(command=SUITE_COMMANDS.get(step, step), exit_code=0, duration_ms=1, artifact_urls=[])
+
+    def cancel_task(self, task_id: str) -> None:
+        self.cancelled.add(task_id)
+
+    def reset_task(self, task_id: str) -> None:
+        self.cancelled.discard(task_id)
+
+    def has_containers(self, task_id: str) -> bool:
+        return False
+
+
+def wait_for(predicate: Callable[[], Any], timeout: float = 30.0, message: str = "condition") -> Any:
+    deadline = time.monotonic() + timeout
+    while True:
+        value = predicate()
+        if value:
+            return value
+        if time.monotonic() > deadline:
+            raise AssertionError(f"timeout waiting for {message}")
+        time.sleep(0.02)
 
 
 def check_error_body(response: Any) -> None:
@@ -179,10 +331,18 @@ class Office:
         self.apps: list[FastAPI] = []
         self.app = self.new_app()
 
-    def new_app(self, *, workspace: bool = False, **overrides: Any) -> FastAPI:
+    def new_app(
+        self,
+        *,
+        workspace: bool = False,
+        runner: bool = False,
+        gateway: ModelsGateway | None = None,
+        **overrides: Any,
+    ) -> FastAPI:
         settings = replace(self.settings, **overrides)
-        gateway = ModelsGateway(settings, anthropic_client=self.anthropic, openai_client=self.openai)
-        app = create_app(settings, gateway=gateway, workspace=workspace)
+        if gateway is None:
+            gateway = ModelsGateway(settings, anthropic_client=self.anthropic, openai_client=self.openai)
+        app = create_app(settings, gateway=gateway, workspace=workspace, runner=runner)
         self.apps.append(app)
         return app
 
@@ -233,6 +393,36 @@ class Office:
     def workspace_app(self, origin: "Origin", tmp_path: Path) -> FastAPI:
         return self.new_app(workspace=True, target_repo_url=origin.url, workspace_dir=tmp_path / "workspace")
 
+    def graph_app(
+        self,
+        origin: "Origin",
+        tmp_path: Path,
+        *,
+        gateway: ScriptedGateway | None = None,
+        suite: Any = None,
+        **overrides: Any,
+    ) -> FastAPI:
+        app = self.new_app(
+            workspace=True, target_repo_url=origin.url, workspace_dir=tmp_path / "workspace", **overrides
+        )
+        settings = app.state.settings
+        app.state.gateway = gateway or ScriptedGateway(settings)
+        app.state.suite = suite or FakeSuite(app.state.store)
+        app.state.runner = Runner(
+            settings,
+            app.state.store,
+            app.state.workspace,
+            app.state.suite,
+            app.state.gateway,
+            Checkpoints(settings.database_url),
+        )
+        app.state.runner.recover()
+        return app
+
+    def stop_app(self, app: FastAPI, timeout: float = 10) -> None:
+        app.state.runner.shutdown(timeout=timeout)
+        app.state.workspace.shutdown()
+
     def start_tasks(self, app: FastAPI, owner_id: str, count: int = 1) -> list[str]:
         store: TaskStore = app.state.store
         ids = [
@@ -245,6 +435,8 @@ class Office:
 
     def close(self) -> None:
         for app in self.apps:
+            if app.state.runner is not None:
+                app.state.runner.shutdown(timeout=10)
             if app.state.workspace is not None:
                 app.state.workspace.shutdown()
             app.state.store.db.close()

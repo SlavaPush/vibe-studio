@@ -15,7 +15,7 @@ from pathlib import Path
 from app.config import Settings
 from app.errors import ErrorCode, OfficeError, not_found
 from app.paths import PathDenied, PathPolicy
-from app.schemas import SLOT_STATUSES, Task, TaskEventType
+from app.schemas import SLOT_STATUSES, AgentRole, Task, TaskEventType
 from app.tasks import CLOSED_STATUSES, SIGNAL_SLOT_ACQUIRED, SIGNAL_TASK_CLOSED, TaskStore
 
 logger = logging.getLogger("office.workspace")
@@ -109,6 +109,7 @@ class Workspace:
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="workspace")
         self._pending = 0
         self._idle = threading.Condition()
+        self.wait_stopped: Callable[[str], bool] | None = None
         store.signal_handlers.append(self.on_signal)
 
     def submit(self, job: Callable[..., None], *args: str) -> None:
@@ -141,7 +142,22 @@ class Workspace:
         if name == SIGNAL_SLOT_ACQUIRED:
             self.submit(self.ensure_worktree, task_id)
         elif name == SIGNAL_TASK_CLOSED:
-            self.submit(self.remove_worktree, task_id)
+            self.submit(self.remove_closed, task_id)
+
+    def remove_closed(self, task_id: str) -> None:
+        if self.wait_stopped is not None and not self.wait_stopped(task_id):
+            self.store.add_event(
+                task_id,
+                TaskEventType.tool_called,
+                {
+                    "arguments": branch_name(task_id),
+                    "result": "error",
+                    "reason": "Удаление рабочей копии отложено до следующего запуска: выполнение задачи не остановилось.",
+                },
+                tool="git_worktree",
+            )
+            return
+        self.remove_worktree(task_id)
 
     def recover(self) -> None:
         self.submit(self._recover)
@@ -282,7 +298,7 @@ class Workspace:
         size = int(self.git("cat-file", "-s", change.new_sha, cwd=path, env=env))
         self.paths.check_any_writer(change.path, size)
 
-    def commit(self, task_id: str, message: str) -> str | None:
+    def commit(self, task_id: str, message: str, role: AgentRole | None = None) -> str | None:
         task = self.store.get_task(task_id)
         if not task.base_sha:
             raise WorkspaceError("base_sha задачи не записан.")
@@ -303,6 +319,7 @@ class Workspace:
                         task_id,
                         TaskEventType.tool_called,
                         {"arguments": change.path[:200], "result": "denied", "reason": str(error)},
+                        role=role,
                         tool="git_commit",
                     )
                     raise
@@ -312,8 +329,24 @@ class Workspace:
             sha = self.git("rev-parse", "HEAD", cwd=path)
             names = run_git("diff", "--name-only", "-z", task.base_sha, sha, cwd=path)
         changed = [name for name in names.decode("utf-8").split("\0") if name]
-        self.store.record_commit(task_id, sha, changed)
+        self.store.record_commit(task_id, sha, changed, role)
         return sha
+
+    def head(self, task_id: str) -> str:
+        return self.git("rev-parse", "HEAD", cwd=self.task_worktree(task_id))
+
+    def trailer(self, task_id: str, sha: str, key: str) -> str:
+        path = self.task_worktree(task_id)
+        return self.git("log", "-1", f"--format=%(trailers:key={key},valueonly)", sha, cwd=path)
+
+    def diff_range(self, task_id: str, base: str, sha: str, limit: int) -> str:
+        output = run_git(
+            "diff", "--no-color", "--no-ext-diff", "--no-textconv", base, sha, cwd=self.task_worktree(task_id)
+        )
+        text = output[:limit].decode("utf-8", "replace")
+        if len(output) > limit:
+            text += f"\n[обрезано: diff, {len(output)} байтов]\n"
+        return text
 
     def diff(self, task: Task) -> bytes:
         path = self.worktree_path(task.id)

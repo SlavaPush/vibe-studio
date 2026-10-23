@@ -1,4 +1,6 @@
 import hashlib
+import io
+import json
 import logging
 import os
 import re
@@ -8,10 +10,10 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO, Literal
 
 import yaml
 
@@ -27,6 +29,11 @@ logger = logging.getLogger("office.sandbox")
 INSTALL = "install"
 SUITE = ("lint", "test", "build", "e2e")
 TIMEOUT_EXIT = 124
+BUILD_EXIT = 90
+LABEL = "back-office.workspace"
+REPORT_NAME = "playwright-report.json"
+ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+ASSERTION = re.compile(r"^(Error: )?(expect(\.soft)?\(|Timed out \d+ms waiting for expect\()")
 SANDBOX_USER = "10001:10001"
 MARKER = "/deps/.office-complete"
 UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -85,6 +92,68 @@ class SandboxError(Exception):
 
 class StepDenied(SandboxError):
     pass
+
+
+class SandboxCancelled(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class E2EResult:
+    status: Literal["passed", "failed", "no_evidence"]
+    reason: str = ""
+    line: int | None = None
+    message: str = ""
+
+
+def _specs(suite: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    yield from suite.get("specs") or []
+    for child in suite.get("suites") or []:
+        yield from _specs(child)
+
+
+def is_assertion(error: Any) -> bool:
+    if not isinstance(error, dict):
+        return False
+    lines = ANSI.sub("", str(error.get("message") or "")).strip().splitlines()
+    return bool(lines) and ASSERTION.match(lines[0]) is not None
+
+
+def parse_playwright(report: Any, test_file: str) -> E2EResult:
+    if not isinstance(report, dict):
+        return E2EResult("no_evidence", "Нет отчёта Playwright.")
+    if report.get("errors"):
+        return E2EResult("no_evidence", "Playwright завершился с глобальной ошибкой: сервер или браузер не запустились.")
+    tests = [
+        test
+        for suite in report.get("suites") or []
+        for spec in _specs(suite)
+        if str(spec.get("file", "")).endswith(test_file)
+        for test in spec.get("tests") or []
+    ]
+    if not tests:
+        return E2EResult("no_evidence", "Отчёт не содержит тестов QA.")
+    failure: dict[str, Any] | None = None
+    for test in tests:
+        results = test.get("results") or []
+        status = results[-1].get("status") if results else None
+        if test.get("status") == "skipped" or status not in ("passed", "failed", "timedOut"):
+            return E2EResult("no_evidence", "Тест QA пропущен или прерван.")
+        if status == "passed":
+            continue
+        assertions = [error for error in results[-1].get("errors") or [] if is_assertion(error)]
+        if not assertions:
+            return E2EResult("no_evidence", "Тест QA завершился ошибкой без проверки утверждения.")
+        failure = failure or assertions[0]
+    if failure is None:
+        return E2EResult("passed")
+    location = failure.get("location") or {}
+    line = location.get("line")
+    return E2EResult(
+        "failed",
+        line=line if isinstance(line, int) and line >= 1 else None,
+        message=ANSI.sub("", str(failure.get("message") or "")).strip()[:1000],
+    )
 
 
 @dataclass(frozen=True)
@@ -162,11 +231,30 @@ class Sandbox:
         self.slots = threading.BoundedSemaphore(settings.sandbox_containers)
         self._guard = threading.Lock()
         self._install_locks: dict[str, threading.Lock] = {}
+        self._task_locks: dict[str, threading.Lock] = {}
+        self._containers: dict[str, set[str]] = {}
+        self._cancelled: set[str] = set()
+        digest = hashlib.sha256(str(workspace.root).encode("utf-8")).hexdigest()[:16]
+        self.label = f"{LABEL}={digest}"
+
+    def remove_stale(self) -> None:
+        output = io.BytesIO()
+        log = CappedLog(output, 1024 * 1024)
+        try:
+            code = self.runner(["docker", "ps", "-aq", "--filter", f"label={self.label}"], 60, log)
+        except (OSError, subprocess.TimeoutExpired):
+            logger.exception("docker ps failed")
+            return
+        if code != 0:
+            return
+        for container in output.getvalue().decode("utf-8", "replace").split():
+            self._docker("rm", "-f", container, timeout=30)
 
     def base_args(self, name: str, *, network: bool) -> list[str]:
         limits = self.policy
         args = [
-            "docker", "run", "--rm", "--pull", "never", "--name", name,
+            "docker", "create", "--rm", "--pull", "never", "--name", name,
+            "--label", self.label,
             "--log-driver", "none",
             "--user", SANDBOX_USER,
             "--cap-drop", "ALL",
@@ -203,26 +291,74 @@ class Sandbox:
             logger.exception("docker %s failed", args[0])
             return -1
 
-    def _container(self, name: str, args: list[str], timeout: float, log: CappedLog | None) -> int:
+    def _task_lock(self, task_id: str) -> threading.Lock:
+        with self._guard:
+            return self._task_locks.setdefault(task_id, threading.Lock())
+
+    def cancelled(self, task_id: str) -> bool:
+        with self._guard:
+            return task_id in self._cancelled
+
+    def check_cancelled(self, task_id: str) -> None:
+        if self.cancelled(task_id):
+            raise SandboxCancelled("Выполнение задачи отменено.")
+
+    def cancel_task(self, task_id: str) -> None:
+        with self._guard:
+            self._cancelled.add(task_id)
+        with self._task_lock(task_id):
+            names = sorted(self._containers.get(task_id, ()))
+        for name in names:
+            self._docker("rm", "-f", name, timeout=30)
+
+    def reset_task(self, task_id: str) -> None:
+        with self._guard:
+            self._cancelled.discard(task_id)
+
+    def has_containers(self, task_id: str) -> bool:
+        with self._task_lock(task_id):
+            return bool(self._containers.get(task_id))
+
+    def _container(
+        self, task_id: str, name: str, args: list[str], timeout: float, log: CappedLog | None
+    ) -> int:
         with self.slots:
+            lock = self._task_lock(task_id)
+            with lock:
+                self.check_cancelled(task_id)
+                created = self._docker(*args[1:], timeout=60)
+                if created != 0:
+                    self._docker("rm", "-f", name, timeout=30)
+                    return created
+                self._containers.setdefault(task_id, set()).add(name)
+                if self.cancelled(task_id):
+                    self._docker("rm", "-f", name, timeout=30)
+                    self._containers[task_id].discard(name)
+                    raise SandboxCancelled("Выполнение задачи отменено.")
             try:
-                return self.runner(args, timeout, log)
-            except subprocess.TimeoutExpired:
-                self._docker("kill", name, timeout=30)
-                return TIMEOUT_EXIT
+                try:
+                    exit_code = self.runner(["docker", "start", "--attach", name], timeout, log)
+                except subprocess.TimeoutExpired:
+                    self._docker("kill", name, timeout=30)
+                    exit_code = TIMEOUT_EXIT
+            finally:
+                with lock:
+                    self._containers[task_id].discard(name)
+            self.check_cancelled(task_id)
+            return exit_code
 
     def require_image(self) -> None:
         if self._docker("image", "inspect", self.image) != 0:
             raise SandboxError(UNAVAILABLE)
 
-    def volume_ready(self, volume: str) -> bool:
+    def volume_ready(self, task_id: str, volume: str) -> bool:
         if self._docker("volume", "inspect", volume) != 0:
             return False
         name = f"office-probe-{os.urandom(4).hex()}"
         args = self.base_args(name, network=False)
         args += mount("volume", volume, "/deps", readonly=True)
         args += [self.image, "test", "-f", MARKER]
-        return self._container(name, args, 60, None) == 0
+        return self._container(task_id, name, args, 60, None) == 0
 
     def _install_lock(self, key: str) -> threading.Lock:
         with self._guard:
@@ -277,7 +413,7 @@ class Sandbox:
             started = time.monotonic()
             with open(task_dir / log_name, "wb") as file:
                 log = CappedLog(file, self.policy.log_bytes)
-                exit_code = self._container(name, args, step.timeout, log)
+                exit_code = self._container(task_id, name, args, step.timeout, log)
                 if log.truncated:
                     file.write("\n[журнал обрезан]\n".encode())
             duration_ms = int((time.monotonic() - started) * 1000)
@@ -309,13 +445,13 @@ class Sandbox:
             raise SandboxError("В рабочей копии нет web/package-lock.json.")
         volume = self.volume_prefix + hashlib.sha256(lock_file.read_bytes()).hexdigest()[:16]
         with self._install_lock(volume):
-            if self.volume_ready(volume):
+            if self.volume_ready(task_id, volume):
                 return volume, None
             self._docker("volume", "rm", "-f", volume)
             result = self._run(task_id, self.policy.steps[INSTALL], src=src, volume=volume, context=context)
             if result.exit_code != 0:
                 self._docker("volume", "rm", "-f", volume)
-            elif not self.volume_ready(volume):
+            elif not self.volume_ready(task_id, volume):
                 self._docker("volume", "rm", "-f", volume)
                 raise SandboxError("Установка зависимостей не подтвердила готовность тома.")
             return volume, result
@@ -336,6 +472,7 @@ class Sandbox:
             raise self.deny(task_id, step_name, role, "Шага нет в политике команд.")
         if role is not None and role not in step.roles:
             raise self.deny(task_id, step_name, role, "Шаг недоступен этой роли.")
+        self.check_cancelled(task_id)
         self.require_image()
         src = self.workspace.task_worktree(task_id)
         volume, install = self.ensure_deps(task_id, src)
@@ -386,6 +523,7 @@ class Sandbox:
         return f"sha256:{digest.hexdigest()}"
 
     def run_suite(self, task_id: str, app_sha: str, qa_sha: str, *, require_e2e: bool = False) -> CheckReport:
+        self.check_cancelled(task_id)
         self.require_image()
         task = self.store.get_task(task_id)
         checks: list[CheckResult] = []
@@ -409,6 +547,7 @@ class Sandbox:
                 for name in SUITE:
                     if name == "e2e" and not qa_files:
                         continue
+                    self.check_cancelled(task_id)
                     checks.append(
                         self._run(
                             task_id,
@@ -428,3 +567,24 @@ class Sandbox:
         )
         self.store.add_check_report(report)
         return report
+
+    def e2e_result(self, task_id: str, report: CheckReport, test_file: str) -> E2EResult:
+        command = self.policy.steps["e2e"].command
+        checks = [check for check in report.checks if check.command == command]
+        if not checks:
+            return E2EResult("no_evidence", "Шаг e2e не выполнялся.")
+        check = checks[-1]
+        if check.exit_code == BUILD_EXIT:
+            return E2EResult("no_evidence", "Сборка приложения для e2e не прошла.")
+        if check.exit_code == TIMEOUT_EXIT:
+            return E2EResult("no_evidence", "Превышено время шага e2e.")
+        data = None
+        for url in check.artifact_urls:
+            name = url.rsplit("/", 1)[-1]
+            if name.endswith(REPORT_NAME):
+                try:
+                    data = json.loads((self.artifacts_dir / task_id / name).read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    data = None
+                break
+        return parse_playwright(data, test_file)

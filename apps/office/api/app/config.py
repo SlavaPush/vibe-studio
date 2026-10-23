@@ -46,6 +46,9 @@ class Settings:
     commands_policy: Path = POLICIES_DIR / "commands.yaml"
     sandbox_image: str = "back-office-sandbox:p4"
     sandbox_containers: int = 2
+    ollama_url: str = "http://127.0.0.1:11434"
+    model_timeout_seconds: float | None = None
+    task_time_limit_minutes: float = 60.0
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -64,4 +67,11 @@ class Settings:
             workspace_dir=Path(env.get("WORKSPACE_DIR") or "../workspace"),
             sandbox_image=env.get("OFFICE_SANDBOX_IMAGE") or cls.sandbox_image,
             sandbox_containers=int(env.get("OFFICE_SANDBOX_CONTAINERS") or cls.sandbox_containers),
+            ollama_url=env.get("OLLAMA_URL") or cls.ollama_url,
+            model_timeout_seconds=float(env["OFFICE_MODEL_TIMEOUT_SECONDS"])
+            if env.get("OFFICE_MODEL_TIMEOUT_SECONDS")
+            else None,
+            task_time_limit_minutes=float(
+                env.get("OFFICE_TASK_TIME_LIMIT_MINUTES") or cls.task_time_limit_minutes
+            ),
         )
