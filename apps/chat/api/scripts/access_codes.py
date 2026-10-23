@@ -32,7 +32,7 @@ ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
 CODE_LENGTH = 12
 
 LIST_SQL = """
-SELECT c.label, c.created_at, c.revoked_at,
+SELECT c.label, c.created_at, c.used_at, c.revoked_at,
     (SELECT count(*) FROM users u WHERE u.access_code_id = c.id) AS users,
     (SELECT count(*) FROM sessions s JOIN users u ON u.id = s.user_id
         WHERE u.access_code_id = c.id AND s.expires_at > now() AND c.revoked_at IS NULL) AS active_sessions,

@@ -382,4 +382,15 @@ describe('App', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Неверный код доступа.')
     expect(signIn).toHaveBeenCalledWith('wrong')
   })
+
+  it('экран входа объясняет одноразовые коды доступа', () => {
+    const store = createChatStore({ ...testState(), session: null })
+    render(<App store={store} controller={fakeController()} />)
+    const info = screen.getByRole('region', { name: 'Как работает доступ' })
+    expect(info).toHaveTextContent('демонстрационный проект')
+    expect(info).toHaveTextContent('одноразовые коды доступа')
+    expect(info).toHaveTextContent('Код действует для одного входа.')
+    expect(info).toHaveTextContent('нужен новый код')
+    expect(info).toHaveTextContent('Прежняя история будет недоступна.')
+  })
 })

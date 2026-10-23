@@ -157,7 +157,11 @@ async def create_session(body: DemoSessionRequest, request: Request, response: R
     async with request.app.state.pool.connection() as conn:
         code = await fetch_one(
             conn,
-            "SELECT id FROM access_codes WHERE code_hash = %s AND revoked_at IS NULL",
+            """
+            UPDATE access_codes SET used_at = now()
+            WHERE code_hash = %s AND revoked_at IS NULL AND used_at IS NULL
+            RETURNING id
+            """,
             (access_code_hash(body.code),),
         )
         if code is None:

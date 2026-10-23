@@ -4,7 +4,7 @@ import logging
 from types import SimpleNamespace
 
 import pytest
-from conftest import DEMO_CODE, client_for, make_app
+from conftest import DEMO_CODE, add_code, client_for, make_app
 from starlette.requests import Request
 
 from app import config
@@ -190,36 +190,45 @@ def test_client_ip_falls_back_to_connection_address():
     assert client_ip(request_with([""])) == "10.0.0.9"
 
 
+def fresh_codes(db) -> list[str]:
+    codes = [f"code-{index}" for index in range(4)]
+    for code in codes:
+        add_code(db, code, code)
+    return codes
+
+
 def test_spoofed_forwarded_prefix_does_not_change_session_source(db):
+    codes = fresh_codes(db)
     with client_for(make_app(db, trust_proxy_headers=True, sessions_per_hour=2)) as client:
         statuses = [
             client.post(
                 "/api/demo-session",
-                json={"code": DEMO_CODE},
+                json={"code": codes[index]},
                 headers={"X-Forwarded-For": f"198.51.100.{index}, 203.0.113.5"},
             ).status_code
             for index in range(3)
         ]
         other = client.post(
-            "/api/demo-session", json={"code": DEMO_CODE}, headers={"X-Forwarded-For": "203.0.113.6"}
+            "/api/demo-session", json={"code": codes[3]}, headers={"X-Forwarded-For": "203.0.113.6"}
         )
     assert statuses == [201, 201, 429]
     assert other.status_code == 201
 
 
 def test_spoofed_forwarded_suffix_does_not_change_session_source_with_first_element(db):
+    codes = fresh_codes(db)
     app = make_app(db, trust_proxy_headers=True, client_ip_source="xff_first", sessions_per_hour=2)
     with client_for(app) as client:
         statuses = [
             client.post(
                 "/api/demo-session",
-                json={"code": DEMO_CODE},
+                json={"code": codes[index]},
                 headers={"X-Forwarded-For": f"203.0.113.5, 198.51.100.{index}, 10.0.0.{index}"},
             ).status_code
             for index in range(3)
         ]
         other = client.post(
-            "/api/demo-session", json={"code": DEMO_CODE}, headers={"X-Forwarded-For": "203.0.113.6, 198.51.100.1"}
+            "/api/demo-session", json={"code": codes[3]}, headers={"X-Forwarded-For": "203.0.113.6, 198.51.100.1"}
         )
     assert statuses == [201, 201, 429]
     assert other.status_code == 201

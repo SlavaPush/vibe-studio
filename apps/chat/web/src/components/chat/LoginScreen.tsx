@@ -36,10 +36,7 @@ export function LoginScreen({ onSubmit }: LoginScreenProps) {
           <CardTitle>
             <h1>Вход в vibe-chat</h1>
           </CardTitle>
-          <CardDescription>
-            Код доступа выдаёт организатор. История диалогов сохраняется в этом браузере. После удаления cookie или на другом
-            устройстве она будет недоступна.
-          </CardDescription>
+          <CardDescription>Введите код доступа от организатора.</CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={submit} noValidate className="flex flex-col gap-3">
@@ -61,6 +58,20 @@ export function LoginScreen({ onSubmit }: LoginScreenProps) {
               Войти
             </Button>
           </form>
+          <section aria-labelledby="access-info-title" className="mt-6 flex flex-col gap-2 text-sm text-muted-foreground">
+            <h2 id="access-info-title" className="font-medium text-foreground">
+              Как работает доступ
+            </h2>
+            <p>
+              Это демонстрационный проект. Вместо регистрации и паролей здесь используются одноразовые коды доступа. Так
+              ограничивается круг участников и расход на запросы к моделям.
+            </p>
+            <p>Код выдаёт организатор. Код действует для одного входа.</p>
+            <p>
+              История диалогов хранится в этом браузере. После удаления cookie, закрытия окна инкогнито или на другом
+              устройстве нужен новый код. Прежняя история будет недоступна.
+            </p>
+          </section>
         </CardContent>
       </Card>
     </main>

@@ -14,6 +14,7 @@ from conftest import (
     SCHEMA,
     FakeProviders,
     FakeStorage,
+    User,
     add_code,
     client_for,
     login,
@@ -37,6 +38,50 @@ def wait_for(condition, timeout: float = 10) -> None:
     while not condition():
         assert time.monotonic() < deadline, "условие не выполнилось"
         time.sleep(0.02)
+
+
+def earlier_user(client, db, label: str) -> User:
+    user_id, token = str(uuid.uuid4()), uuid.uuid4().hex
+    sql(
+        db,
+        "INSERT INTO users (id, source_hash, access_code_id) SELECT %s, 'earlier', id FROM access_codes WHERE label = %s",
+        (user_id, label),
+    )
+    sql(
+        db,
+        "INSERT INTO sessions (token_hash, user_id, csrf_token, expires_at) VALUES (encode(sha256(%s::bytea), 'hex'), %s, 'csrf', now() + interval '1 day')",
+        (token, user_id),
+    )
+    return User(client, token, "csrf", user_id)
+
+
+def test_code_is_single_use_and_first_session_keeps_working(db):
+    add_code(db, "a", CODE_A)
+    add_code(db, "b", CODE_B)
+    revoke(db, "b")
+    with client_for(make_app(db)) as client:
+        first = login(client, CODE_A)
+        for code in (CODE_A, "AAAA BBBB CCCC", CODE_B):
+            response = client.post("/api/demo-session", json={"code": code})
+            assert response.status_code == 401
+            assert response.json()["code"] == "invalid_demo_code"
+        assert first.get("/api/me").status_code == 200
+        assert first.ask("Привет")["status"] == "completed"
+    assert sql(db, "SELECT label, used_at IS NOT NULL FROM access_codes WHERE label IN ('a', 'b') ORDER BY label") == [
+        ("a", True),
+        ("b", False),
+    ]
+    assert sql(db, "SELECT count(*) FROM users") == [(1,)]
+
+
+def test_parallel_logins_with_one_code_create_one_session(db):
+    add_code(db, "a", CODE_A)
+    with client_for(make_app(db)) as client:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            responses = list(pool.map(lambda _: client.post("/api/demo-session", json={"code": CODE_A}), range(8)))
+    assert sorted(response.status_code for response in responses) == [201] + [401] * 7
+    assert sql(db, "SELECT count(*) FROM users") == [(1,)]
+    assert sql(db, "SELECT count(*) FROM sessions") == [(1,)]
 
 
 def test_login_accepts_active_code_in_any_format_and_rejects_unknown_or_revoked(db):
@@ -125,12 +170,12 @@ def test_participant_quota_follows_code_across_sessions_and_restart(db):
     settings = dict(user_limits=Limits(1, 5, 10_000_000))
     with client_for(make_app(db, **settings)) as client:
         login(client, CODE_A).ask("Привет")
-        second = login(client, CODE_A)
+        second = earlier_user(client, db, "a")
         response = second.send(second.conversation(), "Привет")
         assert response.status_code == 429
         assert response.json()["code"] == "quota_exceeded"
     with client_for(make_app(db, **settings)) as client:
-        third = login(client, CODE_A)
+        third = earlier_user(client, db, "a")
         assert third.send(third.conversation(), "Привет").status_code == 429
         other = login(client, CODE_B)
         assert other.send(other.conversation(), "Привет").status_code == 202
@@ -139,7 +184,7 @@ def test_participant_quota_follows_code_across_sessions_and_restart(db):
 def test_parallel_sessions_of_one_code_do_not_exceed_participant_limit(db):
     add_code(db, "a", CODE_A)
     with client_for(make_app(db, user_limits=Limits(3, 5, 10_000_000))) as client:
-        users = [login(client, CODE_A) for _ in range(6)]
+        users = [login(client, CODE_A)] + [earlier_user(client, db, "a") for _ in range(5)]
         conversations = [user.conversation() for user in users]
         with ThreadPoolExecutor(max_workers=6) as pool:
             responses = list(pool.map(lambda pair: pair[0].send(pair[1], "Привет"), zip(users, conversations)))
@@ -155,7 +200,7 @@ def test_executor_images_and_tokens_count_toward_code(db):
     add_code(db, "a", CODE_A)
     with client_for(make_app(db, user_limits=Limits(60, 1, 10_000_000))) as client:
         assert login(client, CODE_A).ask("Нарисуй кота")["status"] == "completed"
-        run = login(client, CODE_A).ask("Нарисуй собаку")
+        run = earlier_user(client, db, "a").ask("Нарисуй собаку")
         assert run["status"] == "failed"
         assert run["error"]["code"] == "quota_exceeded"
 
@@ -165,7 +210,7 @@ def test_executor_images_and_tokens_count_toward_code(db):
     )[0][0]
     providers = FakeProviders()
     with client_for(make_app(db, providers, user_limits=Limits(60, 5, used + 10))) as client:
-        run = login(client, CODE_A).ask("Привет")
+        run = earlier_user(client, db, "a").ask("Привет")
         assert run["status"] == "failed"
         assert run["error"]["code"] == "quota_exceeded"
         assert providers.count("classifier") == 0
@@ -215,6 +260,41 @@ def test_schema_upgrades_p3_database_without_data_loss(db):
             conn.execute("DROP SCHEMA upgrade CASCADE")
 
 
+def test_schema_marks_codes_with_users_as_used(db):
+    params = "-c search_path=upgrade"
+    with psycopg.connect(db, autocommit=True) as conn:
+        conn.execute("DROP SCHEMA IF EXISTS upgrade CASCADE")
+        conn.execute("CREATE SCHEMA upgrade")
+    try:
+        with psycopg.connect(db, autocommit=True, options=params) as conn:
+            conn.execute(SCHEMA.read_text(encoding="utf-8"))
+            conn.execute("ALTER TABLE access_codes DROP COLUMN used_at")
+            codes = {label: str(uuid.uuid4()) for label in ("a", "b")}
+            for label, code_id in codes.items():
+                conn.execute(
+                    "INSERT INTO access_codes (id, label, code_hash) VALUES (%s, %s, %s)", (code_id, label, label)
+                )
+            for created_at in ("2026-10-24 10:00+00", "2026-10-24 09:00+00"):
+                conn.execute(
+                    "INSERT INTO users (id, source_hash, access_code_id, created_at) VALUES (%s, 'p4', %s, %s)",
+                    (str(uuid.uuid4()), codes["a"], created_at),
+                )
+            conn.execute("SET TIME ZONE 'UTC'")
+            used = "SELECT label, used_at::text FROM access_codes ORDER BY label"
+            expected = [("a", "2026-10-24 09:00:00+00"), ("b", None)]
+            conn.execute(SCHEMA.read_text(encoding="utf-8"))
+            assert conn.execute(used).fetchall() == expected
+            conn.execute(
+                "INSERT INTO users (id, source_hash, access_code_id, created_at) VALUES (%s, 'p4', %s, '2026-10-24 08:00+00')",
+                (str(uuid.uuid4()), codes["a"]),
+            )
+            conn.execute(SCHEMA.read_text(encoding="utf-8"))
+            assert conn.execute(used).fetchall() == expected
+    finally:
+        with psycopg.connect(db, autocommit=True) as conn:
+            conn.execute("DROP SCHEMA upgrade CASCADE")
+
+
 def manage(db, *args: str) -> tuple[int, list[dict], str]:
     env = {**os.environ, "DATABASE_URL": db}
     result = subprocess.run(
@@ -232,7 +312,7 @@ def test_management_script_adds_lists_and_revokes_codes(db):
     assert manage(db, "add", "alice")[0] == 1
 
     with client_for(make_app(db)) as client:
-        alice, other = login(client, issued), login(client)
+        alice, other = login(client, issued), login(client, DEMO_CODE)
         code, lines, output = manage(db, "list")
         assert code == 0
         assert issued not in output and issued.replace("-", "") not in output
@@ -241,6 +321,8 @@ def test_management_script_adds_lists_and_revokes_codes(db):
         assert listed["alice"]["users"] == 1
         assert listed["alice"]["active_sessions"] == 1
         assert listed["alice"]["revoked_at"] is None
+        assert listed["alice"]["used_at"] is not None
+        assert listed["demo"]["used_at"] is not None
 
         code, lines, output = manage(db, "revoke", "alice")
         assert code == 0 and lines[0]["revoked_at"]

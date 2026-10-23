@@ -275,7 +275,10 @@ class User:
         ]
 
 
-def login(client: TestClient, code: str = DEMO_CODE) -> User:
+def login(client: TestClient, code: str | None = None) -> User:
+    if code is None:
+        code = uuid.uuid4().hex
+        add_code(client.app.state.settings.database_url, code, code)
     response = client.post("/api/demo-session", json={"code": code})
     assert response.status_code == 201, response.text
     token = response.cookies.get("vc_session")

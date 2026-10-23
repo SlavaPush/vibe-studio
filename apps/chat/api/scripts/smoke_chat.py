@@ -1,7 +1,8 @@
 """Сквозная smoke-проверка чата через HTTP к запущенному API (реальные платные вызовы моделей).
 
-Запуск из каталога api: uv run python scripts/smoke_chat.py [--base-url http://127.0.0.1:8001] [--origin http://localhost:5173] [--code КОД]
-Код доступа участника берётся из --code, переменной окружения VIBE_ACCESS_CODE или ../.env (VIBE_ACCESS_CODE); код создаётся скриптом access_codes.py. Значение --origin должно входить в ALLOWED_ORIGINS сервера.
+Запуск из каталога api: uv run python scripts/smoke_chat.py [--base-url http://127.0.0.1:8001] [--origin http://localhost:5173] [--code КОД] [--second-code КОД]
+Коды одноразовые, нужны два неиспользованных кода: --code (VIBE_ACCESS_CODE) и --second-code (VIBE_ACCESS_CODE_2), из параметров,
+окружения или ../.env; коды создаются скриптом access_codes.py. Значение --origin должно входить в ALLOWED_ORIGINS сервера.
 Cookie сеанса читается из Set-Cookie и передаётся заголовком Cookie, поэтому Secure cookie работает и по http://127.0.0.1.
 Код возврата: 0 — все проверки прошли; 1 — есть ошибки.
 """
@@ -91,11 +92,13 @@ def main() -> int:
     parser.add_argument("--origin", default="http://localhost:5173")
     parser.add_argument("--timeout", type=float, default=240)
     parser.add_argument("--code")
+    parser.add_argument("--second-code")
     args = parser.parse_args()
     env = load_env(Path(__file__).resolve().parents[2] / ".env")
     code = args.code or os.environ.get("VIBE_ACCESS_CODE") or env.get("VIBE_ACCESS_CODE")
-    if not code:
-        report(ok=None, skipped="код доступа не задан (--code или VIBE_ACCESS_CODE)")
+    second_code = args.second_code or os.environ.get("VIBE_ACCESS_CODE_2") or env.get("VIBE_ACCESS_CODE_2")
+    if not code or not second_code:
+        report(ok=None, skipped="коды доступа не заданы (--code и --second-code или VIBE_ACCESS_CODE и VIBE_ACCESS_CODE_2)")
         return 1
 
     results: list[bool] = []
@@ -108,6 +111,8 @@ def main() -> int:
         alice = Session(client, args.origin, code)
         me = alice.get("/api/me")
         check("session", me.status_code == 200 and me.json()["user_id"] == alice.user_id, status=me.status_code)
+        again = client.post("/api/demo-session", json={"code": code}, headers={"Origin": args.origin})
+        check("single_use", again.status_code == 401, status=again.status_code)
 
         conversation_id = alice.conversation()
         scenarios = [
@@ -167,7 +172,7 @@ def main() -> int:
             else:
                 check("image_url", False, error="asset missing")
 
-        bob = Session(client, args.origin, code)
+        bob = Session(client, args.origin, second_code)
         foreign = [bob.get(f"/api/conversations/{conversation_id}/messages")]
         for run in runs.values():
             foreign += [bob.get(f"/api/runs/{run['id']}"), bob.get(f"/api/runs/{run['id']}/events")]

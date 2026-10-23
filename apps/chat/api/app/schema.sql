@@ -15,6 +15,11 @@ CREATE TABLE IF NOT EXISTS users (
 ALTER TABLE users ADD COLUMN IF NOT EXISTS access_code_id uuid REFERENCES access_codes (id);
 CREATE INDEX IF NOT EXISTS users_access_code ON users (access_code_id);
 
+ALTER TABLE access_codes ADD COLUMN IF NOT EXISTS used_at timestamptz;
+UPDATE access_codes c SET used_at = u.created_at
+FROM (SELECT access_code_id, min(created_at) AS created_at FROM users GROUP BY access_code_id) u
+WHERE u.access_code_id = c.id AND c.used_at IS NULL;
+
 CREATE TABLE IF NOT EXISTS sessions (
     token_hash text PRIMARY KEY,
     user_id uuid NOT NULL REFERENCES users (id),

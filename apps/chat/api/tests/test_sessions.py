@@ -1,4 +1,4 @@
-from conftest import DEMO_CODE, client_for, login, make_app, sql
+from conftest import DEMO_CODE, add_code, client_for, login, make_app, sql
 
 
 def test_demo_session_sets_secure_cookie_and_me_returns_session(db):
@@ -67,10 +67,12 @@ def test_expired_session_is_rejected(db):
 
 
 def test_session_creation_is_rate_limited_per_source(db):
+    add_code(db, "b", "code-b")
+    add_code(db, "c", "code-c")
     with client_for(make_app(db, sessions_per_hour=2)) as client:
         assert client.post("/api/demo-session", json={"code": DEMO_CODE}).status_code == 201
-        assert client.post("/api/demo-session", json={"code": DEMO_CODE}).status_code == 201
-        limited = client.post("/api/demo-session", json={"code": DEMO_CODE})
+        assert client.post("/api/demo-session", json={"code": "code-b"}).status_code == 201
+        limited = client.post("/api/demo-session", json={"code": "code-c"})
         assert limited.status_code == 429
         assert limited.json()["code"] == "rate_limited"
         assert limited.json()["retryable"] is True
