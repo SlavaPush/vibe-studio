@@ -1,0 +1,52 @@
+status: draft-p0
+
+capabilities:
+  ollama/qwen3:8b:
+    reasoning_parameter: think
+    reasoning_values: [false, true]
+    context_tokens: 32768
+    max_output_tokens: 4096
+    verified: false
+  anthropic/claude-haiku-5-5:
+    reasoning_parameter: effort
+    reasoning_values: [low, medium, high]
+    verified: false
+  anthropic/claude-sonnet-5-5:
+    reasoning_parameter: effort
+    reasoning_values: [low, medium, high]
+    verified: false
+  openai/gpt-6-luna:
+    reasoning_parameter: reasoning.effort
+    reasoning_values: [low, medium, high]
+    verified: false
+  openai/gpt-6.1-sol:
+    reasoning_parameter: reasoning.effort
+    reasoning_values: [low, medium, high]
+    verified: false
+
+profiles:
+  local:
+    supervisor: {provider: ollama, model: qwen3:8b, effort: off}
+    researcher: {provider: ollama, model: qwen3:8b, effort: off}
+    developer: {provider: ollama, model: qwen3:8b, effort: on}
+    qa: {provider: ollama, model: qwen3:8b, effort: off}
+    critic: {provider: ollama, model: qwen3:8b, effort: on}
+    intake_filter: {provider: anthropic, model: claude-haiku-5-5, effort: low, fallback: openai/gpt-6-luna}
+  cloud:
+    supervisor: {provider: anthropic, model: claude-haiku-5-5, effort: low, fallback: openai/gpt-6-luna}
+    researcher: {provider: anthropic, model: claude-haiku-5-5, effort: low, fallback: openai/gpt-6-luna}
+    developer: {provider: anthropic, model: claude-sonnet-5-5, effort: high, fallback: openai/gpt-6.1-sol}
+    qa: {provider: anthropic, model: claude-haiku-5-5, effort: low, fallback: openai/gpt-6-luna}
+    critic: {provider: anthropic, model: claude-sonnet-5-5, effort: high, fallback: openai/gpt-6.1-sol}
+    intake_filter: {provider: anthropic, model: claude-haiku-5-5, effort: low, fallback: openai/gpt-6-luna}
+  hybrid:
+    supervisor: {provider: ollama, model: qwen3:8b, effort: off}
+    researcher: {provider: ollama, model: qwen3:8b, effort: off}
+    developer: {provider: anthropic, model: claude-sonnet-5-5, effort: high, fallback: openai/gpt-6.1-sol}
+    qa: {provider: ollama, model: qwen3:8b, effort: off}
+    critic: {provider: anthropic, model: claude-sonnet-5-5, effort: high, fallback: openai/gpt-6.1-sol}
+    intake_filter: {provider: anthropic, model: claude-haiku-5-5, effort: low, fallback: openai/gpt-6-luna}
+
+local_limits:
+  ollama_max_loaded_models: 1
+  ollama_num_parallel: 1
