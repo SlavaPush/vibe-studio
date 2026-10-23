@@ -38,3 +38,18 @@ describe('типы панели и contracts/api.md', () => {
     expect(new Set(tasks.map((task) => task.status)).size).toBe(3)
   })
 })
+
+describe('рабочий код панели', () => {
+  it('не импортирует тестовые данные', () => {
+    const sources = import.meta.glob<string>(['../**/*.{ts,tsx}', '!../test/**', '!../mocks/**'], {
+      query: '?raw',
+      import: 'default',
+      eager: true,
+    })
+    expect(Object.keys(sources)).toContain('../App.tsx')
+    const offenders = Object.entries(sources)
+      .filter(([, source]) => /from\s+['"](@\/mocks|\.{1,2}\/(?:\.\.\/)*mocks)/.test(source))
+      .map(([path]) => path)
+    expect(offenders).toEqual([])
+  })
+})

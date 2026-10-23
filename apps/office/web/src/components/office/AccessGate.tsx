@@ -1,34 +1,74 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
+import { ApiRequestError, NETWORK_MESSAGE, login, me } from '@/api/client'
 import type { Participant } from '@/api/types'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { ACCESS_CODES } from '@/mocks/data'
 
-export function AccessGate({ onLogin }: { onLogin: (participant: Participant) => void }) {
+export const COOKIE_MISSING = 'Сеанс не создан, проверьте настройки браузера: панель должна быть открыта по http://localhost:5173, cookie должны быть разрешены.'
+
+interface AccessGateProps {
+  notice: string | null
+  onLogin: (participant: Participant) => void
+}
+
+function describe(error: unknown): { text: string; pause: number } {
+  if (!(error instanceof ApiRequestError)) return { text: NETWORK_MESSAGE, pause: 0 }
+  if (error.status === 429) {
+    const seconds = error.retryAfter ?? 60
+    return { text: `${error.message} Повторить можно через ${seconds} с.`, pause: seconds }
+  }
+  return { text: error.message, pause: 0 }
+}
+
+export function AccessGate({ notice, onLogin }: AccessGateProps) {
   const [code, setCode] = useState('')
   const [name, setName] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [pending, setPending] = useState(false)
+  const [pause, setPause] = useState(0)
+  const message = error ?? notice
 
-  const submit = (event: FormEvent<HTMLFormElement>) => {
+  useEffect(() => {
+    if (pause <= 0) return
+    const timer = setTimeout(() => setPause(0), pause * 1000)
+    return () => clearTimeout(timer)
+  }, [pause])
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    if (pending || pause > 0) return
     const displayName = name.trim()
-    const role = ACCESS_CODES[code.trim()]
+    if (!code.trim()) {
+      setError('Введите код доступа офиса.')
+      return
+    }
     if (!displayName || displayName.length > 40) {
       setError('Укажите имя длиной от 1 до 40 символов.')
       return
     }
-    if (!role) {
-      setError('Неверный код доступа офиса.')
+    setPending(true)
+    setError(null)
+    try {
+      await login({ access_code: code.trim(), display_name: displayName })
+    } catch (failure) {
+      const { text, pause: seconds } = describe(failure)
+      setError(text)
+      setPause(seconds)
+      setPending(false)
       return
     }
-    onLogin({
-      id: 'prt_session',
-      display_name: displayName,
-      role,
-      expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-    })
+    try {
+      onLogin(await me())
+    } catch (failure) {
+      setError(
+        failure instanceof ApiRequestError && failure.status === 401
+          ? COOKIE_MISSING
+          : describe(failure).text,
+      )
+      setPending(false)
+    }
   }
 
   return (
@@ -38,13 +78,10 @@ export function AccessGate({ onLogin }: { onLogin: (participant: Participant) =>
           <CardTitle>
             <h1>Вход в панель офиса</h1>
           </CardTitle>
-          <CardDescription>
-            Тестовый режим: код участника <code>OFFICE-2026</code>, код администратора{' '}
-            <code>ADMIN-2026</code>.
-          </CardDescription>
+          <CardDescription>Введите код доступа офиса и имя, которое увидят другие участники.</CardDescription>
         </CardHeader>
         <CardContent>
-          <form className="grid gap-4" onSubmit={submit} noValidate>
+          <form className="grid gap-4" onSubmit={submit} aria-busy={pending} noValidate>
             <div className="grid gap-2">
               <Label htmlFor="access-code">Код доступа</Label>
               <Input
@@ -53,7 +90,7 @@ export function AccessGate({ onLogin }: { onLogin: (participant: Participant) =>
                 onChange={(event) => setCode(event.target.value)}
                 autoComplete="off"
                 aria-invalid={error !== null}
-                aria-describedby={error ? 'access-error' : undefined}
+                aria-describedby={message ? 'access-error' : undefined}
                 required
               />
             </div>
@@ -66,16 +103,18 @@ export function AccessGate({ onLogin }: { onLogin: (participant: Participant) =>
                 autoComplete="nickname"
                 maxLength={40}
                 aria-invalid={error !== null}
-                aria-describedby={error ? 'access-error' : undefined}
+                aria-describedby={message ? 'access-error' : undefined}
                 required
               />
             </div>
-            {error && (
+            {message && (
               <p id="access-error" role="alert" className="text-sm text-destructive">
-                {error}
+                {message}
               </p>
             )}
-            <Button type="submit">Войти</Button>
+            <Button type="submit" disabled={pending || pause > 0}>
+              {pending ? 'Входим…' : 'Войти'}
+            </Button>
           </form>
         </CardContent>
       </Card>

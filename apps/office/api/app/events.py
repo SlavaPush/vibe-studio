@@ -57,6 +57,7 @@ async def stream_events(
     cursor = after
     next_ping = time.monotonic() + ping_seconds
     try:
+        yield ": ping\n\n"
         while True:
             waiter[1].clear()
             events = await asyncio.to_thread(store.events_after, task_id, cursor, BATCH)

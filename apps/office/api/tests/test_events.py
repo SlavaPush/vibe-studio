@@ -1,20 +1,21 @@
 import json
 import threading
+import time
 
 import pytest
 
 from app.schemas import TaskEvent, TaskEventType, TaskStatus
 
 
-def read_messages(response, count):
+def read_messages(response, count, comments=False):
     messages, current = [], {}
     for line in response.iter_lines():
         if line == "":
-            if current:
+            if current and (comments or "comment" not in current):
                 messages.append(current)
-                current = {}
                 if len(messages) == count:
                     return messages
+            current = {}
             continue
         if line.startswith(":"):
             current = {"comment": line[1:].strip()}
@@ -128,8 +129,24 @@ def test_stream_sends_ping(office):
     app = office.new_app(sse_ping_seconds=0.2)
     client, _ = office.login(app=app)
     with client.stream("GET", "/api/events") as response:
-        messages = read_messages(response, 1)
-    assert messages == [{"comment": "ping"}]
+        started = time.monotonic()
+        messages = read_messages(response, 2, comments=True)
+        elapsed = time.monotonic() - started
+    assert messages == [{"comment": "ping"}, {"comment": "ping"}]
+    assert elapsed >= 0.15
+
+
+@pytest.mark.parametrize("path", ["/api/events", "task"])
+def test_stream_starts_with_ping(office, path):
+    client, me = office.login()
+    task_id = office.queued_task(me["id"])
+    url = f"/api/tasks/{task_id}/events" if path == "task" else path
+    with client.stream("GET", url) as response:
+        started = time.monotonic()
+        first = next(response.iter_text())
+        elapsed = time.monotonic() - started
+    assert first == ": ping\n\n"
+    assert elapsed < 5
 
 
 def test_stream_of_missing_task_is_json_error(office):

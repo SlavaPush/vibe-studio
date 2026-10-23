@@ -1,31 +1,39 @@
-import { useState } from 'react'
+import { decideRelease, type Run } from '@/api/client'
 import type { Participant, ReleaseCandidate, ReleaseDecision, ReleaseStatus } from '@/api/types'
+import { ConfirmButton, DecisionMessage } from '@/components/office/DecisionControls'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { DECISION_LABELS, RELEASE_STATUS_LABELS, formatDateTime } from '@/lib/labels'
 import { canAct } from '@/lib/permissions'
+import { newDecision, useDecision } from '@/lib/use-decision'
 
 const QUEUE_STATUSES: readonly ReleaseStatus[] = ['pending', 'approved', 'deploying']
 
 interface ReleaseQueueProps {
   releases: ReleaseCandidate[]
   participant: Participant
+  run: Run
+  onRefresh: (release: ReleaseCandidate) => void
 }
 
-export function ReleaseQueue({ releases, participant }: ReleaseQueueProps) {
-  const [notice, setNotice] = useState<string | null>(null)
-  const queue = releases.filter((release) => QUEUE_STATUSES.includes(release.status))
-  const history = releases.filter((release) => !QUEUE_STATUSES.includes(release.status))
-  const isAdmin = participant.role === 'admin'
+interface ReleaseItemProps {
+  release: ReleaseCandidate
+  action: ReleaseDecision
+  participant: Participant
+  run: Run
+  onRefresh: (release: ReleaseCandidate) => void
+}
 
-  const decide = (action: ReleaseDecision, release: ReleaseCandidate) =>
-    setNotice(
-      `Тестовый режим: решение «${DECISION_LABELS[action]}» для ${release.id} не отправляется на сервер.`,
-    )
+function ReleaseItem({ release, action, participant, run, onRefresh }: ReleaseItemProps) {
+  const decision = useDecision<ReleaseDecision>(
+    (body) => run(() => decideRelease(release.id, body)),
+    () => onRefresh(release),
+  )
+  const start = () => void decision.submit(newDecision(action, release.version))
 
-  const renderRelease = (release: ReleaseCandidate, action: ReleaseDecision) => (
-    <li key={release.id} className="grid gap-2 rounded-md border p-3 text-sm">
+  return (
+    <li className="grid gap-2 rounded-md border p-3 text-sm">
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-medium">{release.id}</span>
         <Badge variant={release.status === 'failed' ? 'destructive' : 'secondary'}>
@@ -68,16 +76,43 @@ export function ReleaseQueue({ releases, participant }: ReleaseQueueProps) {
       </dl>
       {canAct(participant, release, action).allowed && (
         <div>
-          <Button
-            type="button"
-            variant={action === 'rollback' ? 'outline' : 'default'}
-            onClick={() => decide(action, release)}
-          >
-            {DECISION_LABELS[action]}
-          </Button>
+          {action === 'rollback' ? (
+            <ConfirmButton
+              label={DECISION_LABELS[action]}
+              title={`Откатить выпуск ${release.id}?`}
+              description={`В очередь встанет кандидат отката на версию ${release.expected_previous_sha}.`}
+              disabled={decision.pending}
+              onConfirm={start}
+            />
+          ) : (
+            <Button type="button" disabled={decision.pending} onClick={start}>
+              {DECISION_LABELS[action]}
+            </Button>
+          )}
         </div>
       )}
+      <DecisionMessage
+        notice={decision.notice}
+        pending={decision.pending}
+        onRetry={(body) => void decision.submit(body)}
+      />
     </li>
+  )
+}
+
+export function ReleaseQueue({ releases, participant, run, onRefresh }: ReleaseQueueProps) {
+  const queue = releases.filter((release) => QUEUE_STATUSES.includes(release.status))
+  const history = releases.filter((release) => !QUEUE_STATUSES.includes(release.status))
+  const isAdmin = participant.role === 'admin'
+  const item = (release: ReleaseCandidate, action: ReleaseDecision) => (
+    <ReleaseItem
+      key={release.id}
+      release={release}
+      action={action}
+      participant={participant}
+      run={run}
+      onRefresh={onRefresh}
+    />
   )
 
   return (
@@ -93,11 +128,6 @@ export function ReleaseQueue({ releases, participant }: ReleaseQueueProps) {
             Подтверждение выпуска и откат доступны только администратору.
           </p>
         )}
-        {notice && (
-          <p role="status" className="text-sm text-muted-foreground">
-            {notice}
-          </p>
-        )}
         <section aria-labelledby="release-queue-heading" className="grid gap-2">
           <h3 id="release-queue-heading" className="font-medium">
             Очередь выпуска
@@ -105,9 +135,7 @@ export function ReleaseQueue({ releases, participant }: ReleaseQueueProps) {
           {queue.length === 0 ? (
             <p className="text-sm text-muted-foreground">Очередь пуста.</p>
           ) : (
-            <ul className="grid gap-2">
-              {queue.map((release) => renderRelease(release, 'approve_release'))}
-            </ul>
+            <ul className="grid gap-2">{queue.map((release) => item(release, 'approve_release'))}</ul>
           )}
         </section>
         <section aria-labelledby="release-history-heading" className="grid gap-2">
@@ -117,9 +145,7 @@ export function ReleaseQueue({ releases, participant }: ReleaseQueueProps) {
           {history.length === 0 ? (
             <p className="text-sm text-muted-foreground">Выпусков ещё не было.</p>
           ) : (
-            <ul className="grid gap-2">
-              {history.map((release) => renderRelease(release, 'rollback'))}
-            </ul>
+            <ul className="grid gap-2">{history.map((release) => item(release, 'rollback'))}</ul>
           )}
         </section>
       </CardContent>
