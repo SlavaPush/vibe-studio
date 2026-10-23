@@ -1,4 +1,4 @@
-status: draft-p0
+status: p0-smoke-verified
 
 capabilities:
   ollama/qwen3:8b:
@@ -6,33 +6,47 @@ capabilities:
     reasoning_values: [false, true]
     context_tokens: 32768
     max_output_tokens: 4096
-    verified: false
+    verified: true
+    verified_on: 2026-10-23
+    verified_values: [false, true]
   anthropic/claude-haiku-5-5:
     reasoning_parameter: output_config.effort
     reasoning_values: [low, medium, high, xhigh, max]
     reasoning_default: medium
     context_tokens: 1000000
     max_output_tokens: 128000
-    verified: false
+    verified: true
+    verified_on: 2026-10-23
+    verified_values: [low]
   anthropic/claude-sonnet-5-5:
     reasoning_parameter: output_config.effort
     reasoning_values: [low, medium, high, xhigh, max]
     reasoning_default: high
     context_tokens: 1000000
     max_output_tokens: 128000
-    verified: false
+    verified: true
+    verified_on: 2026-10-23
+    verified_values: [high]
   openai/gpt-6-luna:
     reasoning_parameter: reasoning.effort
-    reasoning_values: [low, medium, high]
-    context_tokens: null
-    max_output_tokens: null
-    verified: false
+    reasoning_values: [none, low, medium, high, xhigh, max]
+    reasoning_default: medium
+    context_tokens: 1050000
+    max_input_tokens: 922000
+    max_output_tokens: 128000
+    verified: true
+    verified_on: 2026-10-23
+    verified_values: [low]
   openai/gpt-6.1-sol:
     reasoning_parameter: reasoning.effort
-    reasoning_values: [low, medium, high]
-    context_tokens: null
-    max_output_tokens: null
-    verified: false
+    reasoning_values: [low, medium, high, xhigh, max]
+    reasoning_default: medium
+    context_tokens: 1050000
+    max_input_tokens: 922000
+    max_output_tokens: 128000
+    verified: true
+    verified_on: 2026-10-23
+    verified_values: [medium]
 
 profiles:
   local:
