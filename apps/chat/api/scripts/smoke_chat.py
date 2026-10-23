@@ -1,7 +1,7 @@
 """Сквозная smoke-проверка чата через HTTP к запущенному API (реальные платные вызовы моделей).
 
-Запуск из каталога api: uv run python scripts/smoke_chat.py [--base-url http://127.0.0.1:8001] [--origin http://localhost:5173]
-Код демодоступа читается из ../.env (DEMO_ACCESS_CODE) или из окружения. Значение --origin должно входить в ALLOWED_ORIGINS сервера.
+Запуск из каталога api: uv run python scripts/smoke_chat.py [--base-url http://127.0.0.1:8001] [--origin http://localhost:5173] [--code КОД]
+Код доступа участника берётся из --code, переменной окружения VIBE_ACCESS_CODE или ../.env (VIBE_ACCESS_CODE); код создаётся скриптом access_codes.py. Значение --origin должно входить в ALLOWED_ORIGINS сервера.
 Cookie сеанса читается из Set-Cookie и передаётся заголовком Cookie, поэтому Secure cookie работает и по http://127.0.0.1.
 Код возврата: 0 — все проверки прошли; 1 — есть ошибки.
 """
@@ -90,11 +90,12 @@ def main() -> int:
     parser.add_argument("--base-url", default="http://127.0.0.1:8001")
     parser.add_argument("--origin", default="http://localhost:5173")
     parser.add_argument("--timeout", type=float, default=240)
+    parser.add_argument("--code")
     args = parser.parse_args()
     env = load_env(Path(__file__).resolve().parents[2] / ".env")
-    code = env.get("DEMO_ACCESS_CODE") or os.environ.get("DEMO_ACCESS_CODE")
+    code = args.code or os.environ.get("VIBE_ACCESS_CODE") or env.get("VIBE_ACCESS_CODE")
     if not code:
-        report(ok=None, skipped="DEMO_ACCESS_CODE не задан")
+        report(ok=None, skipped="код доступа не задан (--code или VIBE_ACCESS_CODE)")
         return 1
 
     results: list[bool] = []

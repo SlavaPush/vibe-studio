@@ -12,7 +12,6 @@ from app.auth import client_ip
 from app.config import ConfigError, Settings, app_version, load_settings
 
 SECRETS = {
-    "DEMO_ACCESS_CODE": "secret-demo-value",
     "QUOTA_SALT": "secret-salt-value",
     "ANTHROPIC_API_KEY": "secret-anthropic-value",
     "OPENAI_API_KEY": "secret-openai-value",
@@ -52,7 +51,32 @@ def test_public_environment_starts_with_all_secrets(env):
     env(RENDER="true", **SECRETS)
     settings = load_settings()
     assert settings.cookie_secure is True
-    assert settings.demo_access_code == SECRETS["DEMO_ACCESS_CODE"]
+    assert settings.database_url == SECRETS["DATABASE_URL"]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql://user:secret-db-value@localhost:5432/postgres",
+        "postgresql://user:secret-db-value@127.0.0.1:5432/postgres",
+        "postgresql://user:secret-db-value@[::1]:5432/postgres",
+        "postgresql://user:secret-db-value@pooler.test,LOCALHOST:5432/postgres",
+        "host=127.0.0.1 password=secret-db-value dbname=postgres",
+        "postgresql://user:secret-db-value@/postgres",
+        "secret-db-value",
+    ],
+)
+def test_public_environment_rejects_local_database(env, url):
+    env(RENDER="true", **{**SECRETS, "DATABASE_URL": url})
+    with pytest.raises(ConfigError) as error:
+        load_settings()
+    assert "DATABASE_URL" in str(error.value)
+    assert "secret-db-value" not in str(error.value)
+
+
+def test_local_environment_allows_local_database(env):
+    env(DATABASE_URL="postgresql://vibe:vibe@127.0.0.1:5432/vibe")
+    assert load_settings().database_url == "postgresql://vibe:vibe@127.0.0.1:5432/vibe"
 
 
 @pytest.mark.parametrize("missing", list(SECRETS))

@@ -8,7 +8,7 @@ from datetime import timezone
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
-from app.auth import CurrentUser, current_user
+from app.auth import COOKIE, CurrentUser, active_session, current_user
 from app.conversations import ACTIVE_STATUSES
 from app.db import fetch_all, fetch_one
 from app.errors import AppError
@@ -74,12 +74,15 @@ async def run_events(
     if run is None:
         raise AppError("not_found")
     last = start_seq(request, after_seq)
+    token = request.cookies.get(COOKIE)
 
     async def stream():
         nonlocal last
         idle_since = time.monotonic()
         while True:
             async with pool.connection() as conn:
+                if await active_session(conn, token) is None:
+                    return
                 status = await fetch_one(conn, "SELECT status FROM runs WHERE id = %s", (run_id,))
                 rows = await fetch_all(
                     conn,

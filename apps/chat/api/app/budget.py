@@ -16,6 +16,9 @@ SELECT
 FROM budget_reservations
 WHERE created_at > now() - interval '24 hours' AND {condition}
 """
+PARTICIPANT_CONDITION = """user_id IN (
+    SELECT id FROM users WHERE id = %s OR access_code_id = (SELECT access_code_id FROM users WHERE id = %s)
+)"""
 
 
 class QuotaExceeded(Exception):
@@ -50,7 +53,7 @@ async def reserve(
 ) -> None:
     await conn.execute("SELECT name FROM quota_locks WHERE name = 'service' FOR UPDATE")
     subjects = (
-        ("user_id = %s", (user_id,), settings.user_limits),
+        (PARTICIPANT_CONDITION, (user_id, user_id), settings.user_limits),
         ("source_hash = %s", (source_hash,), settings.source_limits),
         ("true", (), settings.service_limits),
     )

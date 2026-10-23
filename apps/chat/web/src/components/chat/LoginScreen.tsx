@@ -37,7 +37,7 @@ export function LoginScreen({ onSubmit }: LoginScreenProps) {
             <h1>Вход в vibe-chat</h1>
           </CardTitle>
           <CardDescription>
-            История диалогов сохраняется в этом браузере. После удаления cookie или на другом
+            Код доступа выдаёт организатор. История диалогов сохраняется в этом браузере. После удаления cookie или на другом
             устройстве она будет недоступна.
           </CardDescription>
         </CardHeader>

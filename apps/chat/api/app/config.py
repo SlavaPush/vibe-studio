@@ -2,10 +2,12 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from psycopg.conninfo import conninfo_to_dict
+
 ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 DEFAULT_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 PUBLIC_REQUIRED = (
-    "DEMO_ACCESS_CODE",
     "QUOTA_SALT",
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
@@ -47,7 +49,6 @@ class Limits:
 @dataclass(frozen=True)
 class Settings:
     database_url: str = "postgresql://vibe:vibe@127.0.0.1:5432/vibe"
-    demo_access_code: str = ""
     anthropic_api_key: str = ""
     anthropic_base_url: str = "https://api.anthropic.com"
     openai_api_key: str = ""
@@ -68,6 +69,16 @@ class Settings:
     source_limits: Limits = field(default_factory=lambda: Limits(300, 25, 5_000_000))
     service_limits: Limits = field(default_factory=lambda: Limits(1500, 100, 20_000_000))
     sessions_per_hour: int = 20
+
+
+def public_database_host(url: str) -> bool:
+    try:
+        params = conninfo_to_dict(url)
+    except Exception:
+        return False
+    hosts = [host.strip() for key in ("host", "hostaddr") for host in (params.get(key) or "").split(",")]
+    hosts = [host for host in hosts if host]
+    return bool(hosts) and not any(host.lower() in LOCAL_HOSTS for host in hosts)
 
 
 def _flag(value: str) -> bool:
@@ -93,6 +104,8 @@ def load_settings() -> Settings:
             raise ConfigError(f"в публичном окружении не заданы переменные: {', '.join(missing)}")
         if not _flag(get("COOKIE_SECURE", "true")):
             raise ConfigError("в публичном окружении COOKIE_SECURE должна быть true")
+        if not public_database_host(get("DATABASE_URL")):
+            raise ConfigError("в публичном окружении DATABASE_URL должна указывать на внешний хост, а не на localhost")
 
     hops = get("PROXY_HOPS", "1").strip()
     if not hops.isdigit() or int(hops) < 1:
@@ -107,7 +120,6 @@ def load_settings() -> Settings:
 
     return Settings(
         database_url=get("DATABASE_URL", Settings.database_url),
-        demo_access_code=get("DEMO_ACCESS_CODE"),
         anthropic_api_key=get("ANTHROPIC_API_KEY"),
         anthropic_base_url=file_values.get("ANTHROPIC_BASE_URL") or Settings.anthropic_base_url,
         openai_api_key=get("OPENAI_API_KEY"),

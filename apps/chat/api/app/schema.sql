@@ -1,8 +1,19 @@
+CREATE TABLE IF NOT EXISTS access_codes (
+    id uuid PRIMARY KEY,
+    label text NOT NULL UNIQUE,
+    code_hash text NOT NULL UNIQUE,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    revoked_at timestamptz
+);
+
 CREATE TABLE IF NOT EXISTS users (
     id uuid PRIMARY KEY,
     source_hash text NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now()
 );
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS access_code_id uuid REFERENCES access_codes (id);
+CREATE INDEX IF NOT EXISTS users_access_code ON users (access_code_id);
 
 CREATE TABLE IF NOT EXISTS sessions (
     token_hash text PRIMARY KEY,
@@ -141,6 +152,7 @@ CREATE TABLE IF NOT EXISTS quota_locks (
 
 INSERT INTO quota_locks (name) VALUES ('service') ON CONFLICT DO NOTHING;
 
+ALTER TABLE access_codes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;

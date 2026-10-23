@@ -15,6 +15,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.types.json import Jsonb
 
 from app import retry
+from app.auth import access_code_hash
 from app.config import Settings
 from app.main import create_app
 from app.providers import Classification, TextResult, Usage
@@ -24,8 +25,9 @@ TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "postgresql://vibe:vibe@
 SCHEMA = Path(__file__).resolve().parents[1] / "app" / "schema.sql"
 ORIGIN = "https://testserver"
 DEMO_CODE = "test-demo-code"
+DEMO_LABEL = "demo"
 PNG = b"\x89PNG\r\n\x1a\nfake-image"
-TABLES = "budget_reservations, run_events, attempts, messages, assets, runs, conversations, sessions, users"
+TABLES = "budget_reservations, run_events, attempts, messages, assets, runs, conversations, sessions, users, access_codes"
 TERMINAL = {"completed", "refused", "check_unavailable", "failed", "cancelled"}
 
 
@@ -54,7 +56,16 @@ def db(database_url, monkeypatch) -> str:
     monkeypatch.setattr(retry, "BASE_DELAY", 0.0)
     with psycopg.connect(database_url, autocommit=True) as conn:
         conn.execute(f"TRUNCATE {TABLES} CASCADE")
+    add_code(database_url, DEMO_LABEL, DEMO_CODE)
     return database_url
+
+
+def add_code(database_url: str, label: str, code: str) -> None:
+    with psycopg.connect(database_url, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO access_codes (id, label, code_hash) VALUES (%s, %s, %s)",
+            (str(uuid.uuid4()), label, access_code_hash(code)),
+        )
 
 
 def sql(database_url: str, query: str, params=()):
@@ -193,7 +204,6 @@ class FakeStorage:
 def settings_for(database_url: str, **overrides) -> Settings:
     values = dict(
         database_url=database_url,
-        demo_access_code=DEMO_CODE,
         allowed_origins=(ORIGIN,),
         quota_salt="test-salt",
     )
@@ -263,8 +273,8 @@ class User:
         ]
 
 
-def login(client: TestClient) -> User:
-    response = client.post("/api/demo-session", json={"code": DEMO_CODE})
+def login(client: TestClient, code: str = DEMO_CODE) -> User:
+    response = client.post("/api/demo-session", json={"code": code})
     assert response.status_code == 201, response.text
     token = response.cookies.get("vc_session")
     client.cookies.clear()
@@ -293,7 +303,10 @@ def seed_run(
     ids["token"] = f"token-{ids['user']}"
     ids["csrf"] = "seed-csrf"
     with psycopg.connect(database_url, autocommit=True) as conn:
-        conn.execute("INSERT INTO users (id, source_hash) VALUES (%s, 'seed')", (ids["user"],))
+        conn.execute(
+            "INSERT INTO users (id, source_hash, access_code_id) VALUES (%s, 'seed', (SELECT id FROM access_codes WHERE label = %s))",
+            (ids["user"], DEMO_LABEL),
+        )
         conn.execute(
             "INSERT INTO sessions (token_hash, user_id, csrf_token, expires_at) VALUES (%s, %s, %s, now() + interval '1 day')",
             (hashlib.sha256(ids["token"].encode()).hexdigest(), ids["user"], ids["csrf"]),

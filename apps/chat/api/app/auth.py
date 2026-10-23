@@ -19,6 +19,14 @@ COOKIE = "vc_session"
 SESSION_DAYS = 7
 FORWARDED_HEADERS = ("x-forwarded-for", "x-real-ip", "true-client-ip", "cf-connecting-ip", "forwarded")
 
+SESSION_SQL = """
+SELECT s.user_id, s.csrf_token, s.expires_at
+FROM sessions s
+JOIN users u ON u.id = s.user_id
+JOIN access_codes c ON c.id = u.access_code_id
+WHERE s.token_hash = %s AND s.expires_at > now() AND c.revoked_at IS NULL
+"""
+
 log = logging.getLogger("uvicorn.error")
 
 router = APIRouter()
@@ -83,6 +91,15 @@ def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def access_code_hash(code: str) -> str:
+    normalized = "".join(code.split()).replace("-", "").lower()
+    return hashlib.sha256(normalized.encode()).hexdigest()
+
+
+async def active_session(conn, token: str) -> dict | None:
+    return await fetch_one(conn, SESSION_SQL, (token_hash(token),))
+
+
 def check_origin(request: Request) -> None:
     origin = request.headers.get("origin")
     if origin not in request.app.state.settings.allowed_origins:
@@ -109,11 +126,7 @@ async def current_user(request: Request) -> CurrentUser:
     if not token:
         raise AppError("unauthorized")
     async with request.app.state.pool.connection() as conn:
-        row = await fetch_one(
-            conn,
-            "SELECT user_id, csrf_token, expires_at FROM sessions WHERE token_hash = %s AND expires_at > now()",
-            (token_hash(token),),
-        )
+        row = await active_session(conn, token)
     if row is None:
         raise AppError("unauthorized")
     return CurrentUser(str(row["user_id"]), row["csrf_token"], row["expires_at"], source_hash(request))
@@ -136,16 +149,22 @@ async def create_session(body: DemoSessionRequest, request: Request, response: R
         log_forwarded_chain(request, source)
     if not request.app.state.session_limiter.allow(source, settings.sessions_per_hour):
         raise AppError("rate_limited")
-    expected = settings.demo_access_code
-    if not expected or not hmac.compare_digest(body.code.encode(), expected.encode()):
-        raise AppError("invalid_demo_code")
 
     user_id = str(uuid.uuid4())
     token = secrets.token_urlsafe(32)
     csrf = secrets.token_hex(16)
     expires = datetime.now(timezone.utc) + timedelta(days=SESSION_DAYS)
     async with request.app.state.pool.connection() as conn:
-        await conn.execute("INSERT INTO users (id, source_hash) VALUES (%s, %s)", (user_id, source))
+        code = await fetch_one(
+            conn,
+            "SELECT id FROM access_codes WHERE code_hash = %s AND revoked_at IS NULL",
+            (access_code_hash(body.code),),
+        )
+        if code is None:
+            raise AppError("invalid_demo_code")
+        await conn.execute(
+            "INSERT INTO users (id, source_hash, access_code_id) VALUES (%s, %s, %s)", (user_id, source, code["id"])
+        )
         await conn.execute(
             "INSERT INTO sessions (token_hash, user_id, csrf_token, expires_at) VALUES (%s, %s, %s, %s)",
             (token_hash(token), user_id, csrf, expires),
