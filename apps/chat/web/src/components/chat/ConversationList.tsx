@@ -3,7 +3,6 @@ import { useState, type KeyboardEvent } from 'react'
 import type { Conversation } from '@/api/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { cn } from 'cn'
 
 interface ConversationListProps {
   conversations: Conversation[]
@@ -37,7 +36,7 @@ export function ConversationList({ conversations, activeId, onSelect, onCreate, 
 
   return (
     <nav aria-label="Диалоги" className="flex flex-col gap-2 p-3">
-      <Button variant="outline" onClick={onCreate} className="font-display font-bold tracking-[-0.01em] uppercase">
+      <Button variant="outline" onClick={onCreate}>
         Новый диалог
       </Button>
       <ul className="flex flex-col gap-1">
@@ -61,20 +60,16 @@ export function ConversationList({ conversations, activeId, onSelect, onCreate, 
           return (
             <li key={conversation.id} className="flex items-center gap-1">
               <Button
-                variant="ghost"
+                variant={active ? 'secondary' : 'ghost'}
                 aria-current={active ? 'page' : undefined}
                 onClick={() => onSelect(conversation.id)}
-                className={cn(
-                  'min-w-0 flex-1 justify-start rounded-full',
-                  active && 'bg-brand text-brand-foreground hover:bg-brand hover:text-brand-foreground',
-                )}
+                className="min-w-0 flex-1 justify-start"
               >
                 <span className="truncate">{conversation.title}</span>
               </Button>
               <Button
                 variant="ghost"
                 size="icon"
-                className="rounded-full text-muted-foreground"
                 aria-label={`Переименовать диалог «${conversation.title}»`}
                 onClick={() => setEditing({ id: conversation.id, title: conversation.title })}
               >

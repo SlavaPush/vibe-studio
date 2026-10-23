@@ -4,9 +4,8 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
-  --font-sans: "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-  --font-display: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -22,8 +21,6 @@
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
-  --color-brand: var(--brand);
-  --color-brand-foreground: var(--brand-foreground);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
@@ -50,56 +47,47 @@
 
 :root {
   color-scheme: light;
-  --radius: 0.75rem;
-  --background: #ffffff;
-  --foreground: #0f0f0f;
-  --card: #ffffff;
-  --card-foreground: #0f0f0f;
-  --popover: #ffffff;
-  --popover-foreground: #0f0f0f;
-  --primary: #ffbc5b;
-  --primary-foreground: #0f0f0f;
-  --secondary: #efecf5;
-  --secondary-foreground: #4520ab;
-  --muted: #f4f2fa;
-  --muted-foreground: #5e5e66;
-  --accent: rgb(69 32 171 / 0.08);
-  --accent-foreground: #4520ab;
-  --destructive: #c0262d;
-  --brand: #4520ab;
-  --brand-foreground: #ffffff;
-  --border: rgb(69 32 171 / 0.15);
-  --input: #8b7dc0;
-  --ring: #4520ab;
+  --radius: 0.5rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
 }
 
 .dark {
   color-scheme: dark;
-  --background: #1a1036;
-  --foreground: #ffffff;
-  --card: #241848;
-  --card-foreground: #ffffff;
-  --popover: #241848;
-  --popover-foreground: #ffffff;
-  --primary: #ffbc5b;
-  --primary-foreground: #0f0f0f;
-  --secondary: #2c1f5c;
-  --secondary-foreground: #e9e6fe;
-  --muted: #211546;
-  --muted-foreground: rgb(255 255 255 / 0.72);
-  --accent: rgb(255 255 255 / 0.08);
-  --accent-foreground: #ffffff;
-  --destructive: #ff8a8a;
-  --brand: #cfc0fb;
-  --brand-foreground: #1a1036;
-  --border: rgb(255 255 255 / 0.14);
-  --input: #8676c4;
-  --ring: #cfc0fb;
-}
-
-@utility bg-banner {
-  background-color: #1a1036;
-  background-image: radial-gradient(at 12% 110%, #4520ab 0%, transparent 50%);
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
 }
 
 @layer base {
@@ -109,11 +97,6 @@
 
   body {
     @apply bg-background font-sans text-foreground antialiased;
-  }
-
-  .dark body {
-    background-image: radial-gradient(at 12% 110%, rgb(69 32 171 / 0.35) 0%, transparent 50%);
-    background-attachment: fixed;
   }
 
   :focus-visible {

@@ -1,11 +1,11 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { ApiRequestError, type ApiClient } from '@/api/client'
 import { createChatController, type ChatController } from '@/store/chatController'
 import { createChatStore, initialChatState } from '@/store/conversations'
 import { draftKey } from '@/store/drafts'
 import { watchVersion } from '@/store/versionWatch'
-import { CONVERSATION_ID, testRun, testState } from '@/test/fixtures'
+import { CONVERSATION_ID, switchedRunEvents, testRun, testState } from '@/test/fixtures'
 import App from './App'
 
 function fakeController(overrides: Partial<ChatController> = {}): ChatController {
@@ -84,13 +84,105 @@ describe('App', () => {
       document.dispatchEvent(new Event('visibilitychange'))
     })
 
-    expect(await screen.findByText('Доступна новая версия.')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Обновить страницу' })).toBeInTheDocument()
+    const dialog = await screen.findByRole('dialog', { name: 'Доступна новая версия' })
+    expect(dialog).toHaveAccessibleDescription(
+      'Обновите страницу, чтобы получить изменения. Черновик сообщения и история диалогов сохранятся.',
+    )
+    expect(within(dialog).getByRole('button', { name: 'Обновить страницу' })).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Позже' })).toHaveFocus()
+    expect(screen.queryByText('Доступна новая версия.')).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Сообщение', hidden: true })).toBe(composer)
+    expect(composer).toHaveValue('Недописанный вопрос')
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Позже' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(screen.getByText('Доступна новая версия.')).toBeInTheDocument()
     expect(screen.getByRole('textbox', { name: 'Сообщение' })).toBe(composer)
     expect(composer).toHaveValue('Недописанный вопрос')
     expect(window.localStorage.getItem(draftKey('test-user', CONVERSATION_ID))).toBe('Недописанный вопрос')
     stop()
     window.localStorage.clear()
+  })
+
+  it.each([
+    ['кнопкой «Позже»', (dialog: HTMLElement) => fireEvent.click(within(dialog).getByRole('button', { name: 'Позже' }))],
+    ['по Escape', (dialog: HTMLElement) => fireEvent.keyDown(dialog, { key: 'Escape' })],
+  ])('окно новой версии закрывается %s, возвращает фокус и больше не открывается', async (_, close) => {
+    const store = createChatStore(testState())
+    render(<App store={store} controller={fakeController()} />)
+    const composer = screen.getByRole('textbox', { name: 'Сообщение' })
+    composer.focus()
+    act(() => store.showUpdate())
+
+    const dialog = await screen.findByRole('dialog', { name: 'Доступна новая версия' })
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Позже' })).toHaveFocus())
+    close(dialog)
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(composer).toHaveFocus()
+    const notice = screen.getByRole('status')
+    expect(notice).toHaveTextContent('Доступна новая версия.')
+    expect(within(notice).getByRole('button', { name: 'Обновить страницу' })).toBeInTheDocument()
+
+    act(() => store.showUpdate())
+    const { run, userMessage } = testRun('run-after-dismiss')
+    act(() => store.startRun(run, userMessage))
+    act(() => store.dispatch(switchedRunEvents(run.id).at(-1)!))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it.each(['queued', 'running'] as const)(
+    'при задании в статусе %s окно новой версии ждёт завершения задания',
+    async (status) => {
+      const store = createChatStore(testState())
+      render(<App store={store} controller={fakeController()} />)
+      const { run, userMessage } = testRun(`run-${status}`)
+      act(() => {
+        if (status === 'queued') {
+          store.startRun(run, userMessage)
+        } else {
+          store.loadMessages(CONVERSATION_ID, {
+            items: [userMessage],
+            active_run_id: run.id,
+            runs: [{ ...run, status }],
+          })
+        }
+      })
+      act(() => store.showUpdate())
+
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+      expect(screen.getByText('Доступна новая версия.')).toBeInTheDocument()
+
+      act(() => store.dispatch(switchedRunEvents(run.id).at(-1)!))
+      expect(await screen.findByRole('dialog', { name: 'Доступна новая версия' })).toBeInTheDocument()
+    },
+  )
+
+  it('пока сообщение отправляется, окно новой версии не открывается', async () => {
+    const store = createChatStore(testState())
+    render(<App store={store} controller={fakeController()} />)
+    act(() => store.setSending(true))
+    act(() => store.showUpdate())
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+
+    act(() => store.setSending(false))
+    expect(await screen.findByRole('dialog', { name: 'Доступна новая версия' })).toBeInTheDocument()
+  })
+
+  it('кнопка «Обновить страницу» в окне новой версии перезагружает страницу', async () => {
+    const reload = vi.fn()
+    vi.stubGlobal('location', { ...window.location, reload })
+    try {
+      const store = createChatStore(testState())
+      render(<App store={store} controller={fakeController()} />)
+      act(() => store.showUpdate())
+      const dialog = await screen.findByRole('dialog', { name: 'Доступна новая версия' })
+      expect(reload).not.toHaveBeenCalled()
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Обновить страницу' }))
+      expect(reload).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('после перезагрузки восстанавливает выбранный диалог и его черновик', async () => {

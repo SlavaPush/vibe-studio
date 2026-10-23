@@ -20,7 +20,7 @@ export function ThemeToggle({ className }: { className?: string }) {
         if (option) setTheme(option.value)
       }}
       aria-label="Тема оформления"
-      className={cn('inline-flex items-center gap-0.5 rounded-full border border-input p-0.5', className)}
+      className={cn('inline-flex items-center gap-0.5 rounded-md border p-0.5', className)}
     >
       {OPTIONS.map(({ value, label, Icon }) => (
         <ToggleGroup.Item
@@ -28,7 +28,7 @@ export function ThemeToggle({ className }: { className?: string }) {
           value={value}
           aria-label={label}
           title={label}
-          className="inline-flex size-8 items-center justify-center rounded-full text-muted-foreground transition-colors data-[state=off]:hover:bg-accent data-[state=off]:hover:text-accent-foreground data-[state=on]:bg-brand data-[state=on]:text-brand-foreground [&_svg]:size-4"
+          className="inline-flex size-8 items-center justify-center rounded-sm text-muted-foreground transition-colors focus-visible:outline-foreground data-[state=off]:hover:bg-accent data-[state=off]:hover:text-accent-foreground data-[state=on]:bg-primary data-[state=on]:text-primary-foreground [&_svg]:size-4"
         >
           <Icon aria-hidden="true" />
         </ToggleGroup.Item>

@@ -114,7 +114,7 @@ export function ChatThread({ store, actions, loadAssetUrl }: ChatThreadProps) {
             )}
           </ThreadPrimitive.Messages>
         </ThreadPrimitive.Viewport>
-        <ComposerPrimitive.Root className="mx-4 mb-4 flex items-end gap-2 rounded-2xl border border-input bg-card p-2 has-[textarea:focus-visible]:border-ring has-[textarea:focus-visible]:ring-2 has-[textarea:focus-visible]:ring-ring">
+        <ComposerPrimitive.Root className="flex items-end gap-2 border-t p-4">
           <ComposerPrimitive.Input
             aria-label="Сообщение"
             placeholder="Напишите сообщение"
@@ -124,7 +124,7 @@ export function ChatThread({ store, actions, loadAssetUrl }: ChatThreadProps) {
                 event.preventDefault()
               }
             }}
-            className="min-h-9 flex-1 resize-none bg-transparent px-2 py-2 text-sm outline-none placeholder:text-muted-foreground"
+            className="min-h-9 flex-1 resize-none rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
           />
           <AuiIf condition={(state) => !state.thread.isRunning}>
             <ComposerPrimitive.Send asChild>
@@ -248,13 +248,13 @@ function ChatMessage({ message, models, loadAssetUrl }: ChatMessageProps) {
         aria-label={SYSTEM_TITLES[kind]}
         data-kind={kind}
         className={cn(
-          'mx-auto w-full max-w-prose rounded-[14px] border px-4 py-3 text-sm',
+          'mx-auto w-full max-w-prose rounded-md border px-3 py-2 text-sm',
           kind === 'refusal'
-            ? 'border-destructive/40 bg-destructive/8 text-destructive'
-            : 'border-dashed border-input bg-muted text-muted-foreground',
+            ? 'border-destructive/50 text-destructive'
+            : 'border-dashed bg-muted text-muted-foreground',
         )}
       >
-        <p className="font-display text-xs font-bold tracking-[-0.01em] uppercase">{SYSTEM_TITLES[kind]}</p>
+        <p className="font-medium">{SYSTEM_TITLES[kind]}</p>
         <p>{text}</p>
       </div>
     )
@@ -262,7 +262,7 @@ function ChatMessage({ message, models, loadAssetUrl }: ChatMessageProps) {
 
   if (message.role === 'user') {
     return (
-      <div className="ml-auto max-w-[80%] rounded-2xl rounded-br-md bg-brand px-4 py-2.5 text-sm whitespace-pre-wrap text-brand-foreground">
+      <div className="ml-auto max-w-[80%] rounded-lg bg-secondary px-3 py-2 text-sm whitespace-pre-wrap text-secondary-foreground">
         {text}
       </div>
     )
@@ -271,10 +271,7 @@ function ChatMessage({ message, models, loadAssetUrl }: ChatMessageProps) {
   const model = models.find((profile) => profile.id === custom.effective_model)
   const isPending = message.status?.type === 'running'
   return (
-    <article
-      aria-label="Ответ ассистента"
-      className="flex max-w-[80%] flex-col gap-2 self-start rounded-2xl rounded-bl-md border bg-card px-4 py-3 text-sm text-card-foreground"
-    >
+    <article aria-label="Ответ ассистента" className="flex max-w-[80%] flex-col gap-2 text-sm">
       {custom.asset && <AssetImage asset={custom.asset} loadAssetUrl={loadAssetUrl} />}
       {text && <p className="whitespace-pre-wrap">{text}</p>}
       {custom.incomplete && <p className="text-xs text-destructive">Ответ не завершён</p>}

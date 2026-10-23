@@ -1,18 +1,54 @@
+import { useRef } from 'react'
 import type { ApiError } from '@/api/types'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 
 export function UpdateNotice() {
   return (
-    <div
-      role="status"
-      className="flex items-center justify-center gap-3 border-b bg-secondary px-4 py-2 text-sm font-medium text-secondary-foreground"
-    >
+    <div role="status" className="flex items-center justify-center gap-3 border-b bg-muted px-4 py-2 text-sm">
       <span>Доступна новая версия.</span>
       <Button size="sm" variant="outline" onClick={() => window.location.reload()}>
         Обновить страницу
       </Button>
     </div>
+  )
+}
+
+export function UpdateDialog({ open, onLater }: { open: boolean; onLater: () => void }) {
+  const returnFocus = useRef<HTMLElement | null>(null)
+  return (
+    <Dialog open={open} onOpenChange={(next) => !next && onLater()}>
+      <DialogContent
+        onOpenAutoFocus={() => {
+          returnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+        }}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault()
+          returnFocus.current?.focus()
+        }}
+      >
+        <DialogHeader>
+          <DialogTitle>Доступна новая версия</DialogTitle>
+          <DialogDescription>
+            Обновите страницу, чтобы получить изменения. Черновик сообщения и история диалогов сохранятся.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={onLater}>
+            Позже
+          </Button>
+          <Button onClick={() => window.location.reload()}>Обновить страницу</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 
