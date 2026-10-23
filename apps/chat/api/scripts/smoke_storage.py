@@ -16,6 +16,7 @@ from pathlib import Path
 import httpx
 
 CONTENT = b"vibe-chat storage smoke"
+DENIED_STATUSES = {400, 401, 403, 404}
 
 
 def load_env(path: Path) -> dict[str, str]:
@@ -57,11 +58,11 @@ def check_object(client: httpx.Client, storage: str, headers: dict, bucket: str,
         return False
 
     public = client.get(f"{storage}/object/public/{bucket}/{path}")
-    public_denied = public.status_code != 200
+    public_denied = public.status_code in DENIED_STATUSES
     report(step="public_access_denied", ok=public_denied, status=public.status_code)
 
     anonymous = client.get(f"{storage}/object/{bucket}/{path}")
-    anonymous_denied = anonymous.status_code != 200
+    anonymous_denied = anonymous.status_code in DENIED_STATUSES
     report(step="anonymous_access_denied", ok=anonymous_denied, status=anonymous.status_code)
 
     signed = client.post(f"{storage}/object/sign/{bucket}/{path}", headers=headers, json={"expiresIn": 60})
