@@ -16,10 +16,13 @@ __pycache__/
 .env.*
 !.env.example
 
-# Тесты и артефакты
+# Тесты, журналы и артефакты
 test-results/
 playwright-report/
 coverage/
+.coverage
+*.log
+dist-ssr/
 
 # Duet
 .duet/

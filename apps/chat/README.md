@@ -38,6 +38,12 @@ cd api && uv sync && uv run uvicorn app.main:app --reload --port 8000
 cd web && npm ci && npm run dev
 ```
 
+Локальная PostgreSQL (адрес совпадает с `DATABASE_URL` из `.env.example`):
+
+```bash
+docker compose -f infra/docker-compose.yml up -d
+```
+
 Проверки:
 
 ```bash
@@ -46,6 +52,18 @@ cd api && uv run pytest
 
 ```bash
 cd web && npm run build
+```
+
+Smoke-проверка облачных моделей (реальные платные вызовы; нужны ключи в `.env`; флаг `--image` добавляет генерацию одного изображения):
+
+```bash
+cd api && uv run python scripts/smoke_models.py
+```
+
+Smoke-проверка приватного Supabase Storage (bucket, загрузка, подписанная ссылка, запрет прямого доступа, удаление):
+
+```bash
+cd api && uv run python scripts/smoke_storage.py
 ```
 
 ## Переменные окружения

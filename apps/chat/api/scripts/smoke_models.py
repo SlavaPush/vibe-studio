@@ -3,6 +3,7 @@
 Запуск из каталога api: uv run python scripts/smoke_models.py [--image]
 Ключи читаются из ../.env (ANTHROPIC_API_KEY, OPENAI_API_KEY) или из окружения.
 Флаг --image дополнительно генерирует одно изображение низкого качества (платный вызов).
+Код возврата: 0 — все запрошенные проверки выполнены и прошли; 1 — есть ошибки; 2 — часть проверок пропущена.
 """
 
 import argparse
@@ -40,6 +41,20 @@ def report(**fields) -> None:
     print(json.dumps(fields, ensure_ascii=False))
 
 
+def describe_error(error: Exception) -> dict:
+    info: dict = {"error": type(error).__name__}
+    status = getattr(error, "status_code", None)
+    if status is not None:
+        info["status"] = status
+    body = getattr(error, "body", None)
+    if isinstance(body, dict):
+        detail = body.get("error") if isinstance(body.get("error"), dict) else body
+        for key in ("type", "code"):
+            if isinstance(detail.get(key), str):
+                info[key] = detail[key]
+    return info
+
+
 def timed(fn):
     started = time.monotonic()
     result = fn()
@@ -56,22 +71,23 @@ def check_anthropic(client: anthropic.Anthropic, model: str, effort: str) -> boo
                 messages=[{"role": "user", "content": PROMPT}],
             )
         )
-    except anthropic.APIError as error:
-        report(provider="anthropic", model=model, effort=effort, ok=False, error=type(error).__name__, detail=str(error)[:200])
+    except (anthropic.APIError, anthropic.APIConnectionError) as error:
+        report(provider="anthropic", model=model, effort=effort, ok=False, **describe_error(error))
         return False
     text = "".join(block.text for block in response.content if block.type == "text")
+    ok = response.stop_reason == "end_turn" and bool(text.strip())
     report(
         provider="anthropic",
         model=model,
         effort=effort,
-        ok=response.stop_reason == "end_turn",
+        ok=ok,
         seconds=seconds,
         stop_reason=response.stop_reason,
         input_tokens=response.usage.input_tokens,
         output_tokens=response.usage.output_tokens,
         answer=text.strip()[:200],
     )
-    return response.stop_reason == "end_turn"
+    return ok
 
 
 def check_openai_text(client: openai.OpenAI, model: str, effort: str) -> bool:
@@ -84,16 +100,17 @@ def check_openai_text(client: openai.OpenAI, model: str, effort: str) -> bool:
                 max_output_tokens=512,
             )
         )
-    except openai.APIError as error:
-        report(provider="openai", model=model, effort=effort, ok=False, error=type(error).__name__, detail=str(error)[:200])
+    except (openai.APIError, openai.APIConnectionError) as error:
+        report(provider="openai", model=model, effort=effort, ok=False, **describe_error(error))
         return False
     usage = response.usage
     reasoning_tokens = usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
+    ok = response.status == "completed" and bool(response.output_text.strip())
     report(
         provider="openai",
         model=model,
         effort=effort,
-        ok=response.status == "completed",
+        ok=ok,
         seconds=seconds,
         status=response.status,
         input_tokens=usage.input_tokens if usage else None,
@@ -101,7 +118,7 @@ def check_openai_text(client: openai.OpenAI, model: str, effort: str) -> bool:
         reasoning_tokens=reasoning_tokens,
         answer=response.output_text.strip()[:200],
     )
-    return response.status == "completed"
+    return ok
 
 
 def check_moderation(client: openai.OpenAI) -> bool:
@@ -109,8 +126,8 @@ def check_moderation(client: openai.OpenAI) -> bool:
     for label, text in MODERATION_SAMPLES.items():
         try:
             response, seconds = timed(lambda: client.moderations.create(model="omni-moderation-latest", input=text))
-        except openai.APIError as error:
-            report(provider="openai", model="omni-moderation-latest", sample=label, ok=False, error=type(error).__name__, detail=str(error)[:200])
+        except (openai.APIError, openai.APIConnectionError) as error:
+            report(provider="openai", model="omni-moderation-latest", sample=label, ok=False, **describe_error(error))
             ok = False
             continue
         result = response.results[0]
@@ -142,8 +159,8 @@ def check_image(client: openai.OpenAI, out_dir: Path) -> bool:
                 output_format="png",
             )
         )
-    except openai.APIError as error:
-        report(provider="openai", model="gpt-image-2.5-flare", ok=False, error=type(error).__name__, detail=str(error)[:300])
+    except (openai.APIError, openai.APIConnectionError) as error:
+        report(provider="openai", model="gpt-image-2.5-flare", ok=False, **describe_error(error))
         return False
     out_dir.mkdir(parents=True, exist_ok=True)
     target = out_dir / "smoke-image.png"
@@ -163,26 +180,36 @@ def main() -> int:
     openai_key = env.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
 
     results: list[bool] = []
+    skipped: list[str] = []
     if anthropic_key:
-        client = anthropic.Anthropic(api_key=anthropic_key, base_url=env.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com"))
+        client = anthropic.Anthropic(
+            api_key=anthropic_key,
+            base_url=env.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
+            max_retries=0,
+        )
         results.append(check_anthropic(client, "claude-haiku-5-5", "low"))
         results.append(check_anthropic(client, "claude-sonnet-5-5", "high"))
     else:
+        skipped.append("anthropic")
         report(provider="anthropic", ok=None, skipped="ANTHROPIC_API_KEY не задан")
 
     if openai_key:
-        client = openai.OpenAI(api_key=openai_key, base_url=env.get("OPENAI_BASE_URL"))
+        client = openai.OpenAI(api_key=openai_key, base_url=env.get("OPENAI_BASE_URL"), max_retries=0)
         results.append(check_openai_text(client, "gpt-6-luna", "low"))
         results.append(check_openai_text(client, "gpt-6.1-sol", "medium"))
         results.append(check_moderation(client))
         if args.image:
             results.append(check_image(client, Path(args.out)))
     else:
+        skipped.append("openai" + (" (включая --image)" if args.image else ""))
         report(provider="openai", ok=None, skipped="OPENAI_API_KEY не задан")
 
-    if not results:
+    report(summary=True, passed=sum(results), failed=len(results) - sum(results), skipped=skipped)
+    if not all(results):
+        return 1
+    if skipped:
         return 2
-    return 0 if all(results) else 1
+    return 0
 
 
 if __name__ == "__main__":
