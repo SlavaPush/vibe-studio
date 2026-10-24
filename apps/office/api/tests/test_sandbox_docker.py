@@ -105,6 +105,10 @@ def test_real_sandbox_on_vibe_chat(real, tmp_path):
     assert image.status_code == 200
     assert image.headers["content-type"] == "image/png"
     assert image.content.startswith(b"\x89PNG")
+    [unmocked] = [url for url in urls if url.endswith("unmocked-api.txt")]
+    assert "GET /api/" in client.get(unmocked).text
+    outcome = sandbox.e2e_result(task_id, after, "web/e2e/office/title.pw.ts")
+    assert outcome.status == "invalid" and "page.route" in outcome.reason
 
     policy = yaml.safe_load(app.state.settings.commands_policy.read_text(encoding="utf-8"))
     policy["steps"]["probe"] = {"command": PROBE, "network": False, "timeout_seconds": 120, "roles": ["developer"]}

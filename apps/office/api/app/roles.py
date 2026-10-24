@@ -1,14 +1,25 @@
 import secrets
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator, model_validator
 
 QA_TEST_DIR = "web/e2e/office"
+QA_API_FILES = ("contracts/api.md", "web/src/api/client.ts", "web/src/api/types.ts", "web/src/mocks/contract-examples.ts")
+CLIPPED = " [обрезано]"
 
 
 class ContextTooLarge(Exception):
     pass
+
+
+def clip(limit: int) -> BeforeValidator:
+    def cut(value: Any) -> Any:
+        if isinstance(value, str) and len(value) > limit:
+            return value[: limit - len(CLIPPED)] + CLIPPED
+        return value
+
+    return BeforeValidator(cut)
 
 
 class Reply(BaseModel):
@@ -33,12 +44,12 @@ class ResearchPlan(Reply):
 
 
 class ResearchSource(Reply):
-    title: str = Field(max_length=200)
+    title: Annotated[str, clip(200)] = Field(max_length=200)
     url: str = Field(max_length=2000)
 
 
 class ResearchNotes(Reply):
-    notes: str = Field(max_length=4000)
+    notes: Annotated[str, clip(4000)] = Field(max_length=4000)
     sources: list[ResearchSource] = Field(max_length=3)
 
 
@@ -63,10 +74,18 @@ class Action(Reply):
         return self
 
 
+class DeveloperAction(Action):
+    step: Literal["lint", "test", "build"] | None
+
+
+class QaAction(Action):
+    step: Literal["e2e"] | None
+
+
 class Turn(Reply):
-    summary: str = Field(max_length=500)
+    summary: Annotated[str, clip(500)] = Field(max_length=500)
     done: bool
-    actions: list[Action] = Field(max_length=8)
+    actions: list[DeveloperAction] = Field(max_length=8)
 
 
 class ModelFinding(Reply):
@@ -74,7 +93,7 @@ class ModelFinding(Reply):
     criterion: int | None = Field(ge=1, le=8)
     file: str | None = Field(max_length=400)
     line: int | None = Field(ge=1)
-    text: str = Field(min_length=1, max_length=1000)
+    text: Annotated[str, clip(1000)] = Field(min_length=1, max_length=1000)
 
     @field_validator("line", mode="before")
     @classmethod
@@ -91,11 +110,11 @@ class ModelFinding(Reply):
 
 
 class QaTurn(Reply):
-    summary: str = Field(max_length=500)
+    summary: Annotated[str, clip(500)] = Field(max_length=500)
     criteria_covered: list[int] = Field(max_length=8)
     findings: list[ModelFinding] = Field(max_length=8)
     done: bool
-    actions: list[Action] = Field(max_length=8)
+    actions: list[QaAction] = Field(max_length=8)
 
 
 class CriticReview(Reply):
@@ -151,6 +170,8 @@ def provider_schema(model: type[BaseModel]) -> dict[str, Any]:
         for key, value in node.items():
             if key == "properties":
                 result[key] = {name: walk(item) for name, item in value.items()}
+            elif key == "const":
+                result["enum"] = [value]
             elif key not in DROPPED_KEYS:
                 result[key] = walk(value)
         return result
@@ -268,7 +289,8 @@ DEVELOPER = """Ты — разработчик офиса. Ты изменяеш
 
 QA = """Ты — QA офиса. Ты пишешь один сквозной тест Playwright на TypeScript, который проверяет критерии приёмки на собранном приложении vibe-chat.
 
-Тест пишется только в файл, указанный в данных. Импорт: import { test, expect } from "@playwright/test". Приложение открывается через page.goto("/"), backend недоступен. Тест должен не проходить на исходной версии интерфейса и проходить после изменений разработчика.
+Тест пишется только в файл, указанный в данных. Импорт: import { test, expect } from "@playwright/test". Приложение открывается через page.goto("/"). Тест должен не проходить на исходной версии интерфейса и проходить после изменений разработчика.
+Условия запуска: собранное приложение работает без backend и без сети. Каждый запрос к /api/, который тест не подменил, получает ответ с ошибкой, а такой тест не принимается как проверка критериев. Поэтому до page.goto подмени все запросы к API одним обработчиком page.route("**/api/**", ...): по методу и пути запроса верни route.fulfill с contentType "application/json" и телом по контракту API vibe-chat. Пути контракта, клиента API и примеров ответов указаны в данных; прочитай нужные действием read_file.
 Каждый ответ — один ход: summary, criteria_covered (номера проверяемых критериев), findings (замечания: blocking, criterion или file, line, text; пустой список, если замечаний нет), done и список действий (не больше 8).
 Действия (неиспользуемые поля равны null): list_dir, read_file (path), write_file (path, content — полный текст теста), run_step со step = e2e — запуск тестов на текущей версии.
 Когда тест готов, верни done = true. Ответь только JSON по заданной схеме."""

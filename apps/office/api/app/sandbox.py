@@ -32,6 +32,8 @@ TIMEOUT_EXIT = 124
 BUILD_EXIT = 90
 LABEL = "back-office.workspace"
 REPORT_NAME = "playwright-report.json"
+UNMOCKED_NAME = "unmocked-api.txt"
+UNMOCKED_SHOWN = 5
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 ASSERTION = re.compile(r"^(Error: )?(expect(\.soft)?\(|Timed out \d+ms waiting for expect\()")
 SANDBOX_USER = "10001:10001"
@@ -100,10 +102,32 @@ class SandboxCancelled(Exception):
 
 @dataclass(frozen=True)
 class E2EResult:
-    status: Literal["passed", "failed", "no_evidence"]
+    status: Literal["passed", "failed", "invalid", "no_evidence"]
     reason: str = ""
     line: int | None = None
     message: str = ""
+
+
+def unmocked_requests(task_dir: Path, artifact_urls: list[str]) -> list[str]:
+    for url in artifact_urls:
+        name = url.rsplit("/", 1)[-1]
+        if name.endswith(UNMOCKED_NAME):
+            try:
+                text = (task_dir / name).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                return ["список запросов недоступен"]
+            return list(dict.fromkeys(line.strip() for line in text.splitlines() if line.strip()))
+    return []
+
+
+def unmocked_reason(requests: list[str]) -> str:
+    shown = ", ".join(requests[:UNMOCKED_SHOWN])
+    if len(requests) > UNMOCKED_SHOWN:
+        shown += f" и ещё {len(requests) - UNMOCKED_SHOWN}"
+    return (
+        f"Тест QA обратился к API vibe-chat без подмены: {shown}. Backend в sandbox недоступен, поэтому результат "
+        "теста не проверяет критерии. Подмените все запросы к /api/ через page.route до page.goto ответами по контракту API."
+    )
 
 
 def _specs(suite: dict[str, Any]) -> Iterator[dict[str, Any]]:
@@ -220,6 +244,7 @@ class Sandbox:
         self.policy_files = (
             settings.commands_policy,
             SANDBOX_DIR / "office-e2e" / "playwright.config.ts",
+            SANDBOX_DIR / "office-e2e" / "serve.mjs",
             SANDBOX_DIR / "step.sh",
         )
         self.image = settings.sandbox_image
@@ -534,7 +559,7 @@ class Sandbox:
             qa_full = self.workspace.resolve(qa_sha)
             qa = Path(tmp) / "qa"
             qa.mkdir()
-            qa_files = self.workspace.export_qa(qa_full, qa)
+            qa_files = self.workspace.export_qa(qa_full, qa) if require_e2e else []
             self._open_tree(qa)
             if require_e2e and not qa_files:
                 raise SandboxError("Набор тестов QA пуст.")
@@ -578,6 +603,9 @@ class Sandbox:
             return E2EResult("no_evidence", "Сборка приложения для e2e не прошла.")
         if check.exit_code == TIMEOUT_EXIT:
             return E2EResult("no_evidence", "Превышено время шага e2e.")
+        unmocked = unmocked_requests(self.artifacts_dir / task_id, check.artifact_urls)
+        if unmocked:
+            return E2EResult("invalid", unmocked_reason(unmocked))
         data = None
         for url in check.artifact_urls:
             name = url.rsplit("/", 1)[-1]

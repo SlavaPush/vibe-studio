@@ -23,6 +23,8 @@ from app.sandbox import (
     StepDenied,
     parse_playwright,
     run_process,
+    unmocked_reason,
+    unmocked_requests,
 )
 from app.schemas import AgentRole, CheckReport, CheckResult
 
@@ -369,6 +371,26 @@ def test_suite_runs_same_qa_on_base_and_task_commit(setup):
     assert response.headers["content-type"] == "image/png"
 
 
+def test_suite_without_required_e2e_skips_existing_qa_test(setup):
+    app, _, docker, make, start = setup
+    sandbox = make()
+    [task_id] = start()
+    ready(docker, sandbox, app, task_id)
+    workspace = app.state.workspace
+    root = workspace.worktree_path(task_id)
+    (root / "web/e2e/office").mkdir(parents=True)
+    (root / "web/e2e/office/old.pw.ts").write_text("test('old attempt')\n")
+    commit = workspace.commit(task_id, "qa test of previous attempt")
+    docker.exit_codes["e2e"] = 1
+
+    report = sandbox.run_suite(task_id, commit, commit)
+    assert [check.command for check in report.checks] == ["npm run lint", "npm run test", "npm run build"]
+    assert docker.runs("e2e") == []
+    full = sandbox.run_suite(task_id, commit, commit, require_e2e=True)
+    assert [check.exit_code for check in full.checks] == [0, 0, 0, 1]
+    assert report.suite_hash != full.suite_hash
+
+
 def test_suite_checks_committed_content_while_worktree_changes(setup):
     app, _, docker, make, start = setup
     sandbox = make()
@@ -620,3 +642,23 @@ def test_e2e_result_reads_report_artifact(setup):
     assert outcome(1, urls[:1]).status == "no_evidence"
     empty = CheckReport(task_id=task_id, commit_sha=None, spec_hash=None, suite_hash=None, checks=[])
     assert sandbox.e2e_result(task_id, empty, QA_FILE).status == "no_evidence"
+
+    lines = "".join(f"GET /api/item/{index}\n" for index in range(7)) + "GET /api/item/0\n"
+    (directory / "e2e-1-1-unmocked-api.txt").write_text(lines)
+    unmocked = urls + [f"/api/tasks/{task_id}/artifacts/e2e-1-1-unmocked-api.txt"]
+    for exit_code in (0, 1):
+        invalid = outcome(exit_code, unmocked)
+        assert invalid.status == "invalid" and invalid.message == ""
+        assert "GET /api/item/0, GET /api/item/1, GET /api/item/2, GET /api/item/3, GET /api/item/4 и ещё 2" in invalid.reason
+        assert "page.route" in invalid.reason
+    assert outcome(90, unmocked).status == "no_evidence"
+    assert outcome(1, urls[:1] + unmocked[2:]).status == "invalid"
+
+
+def test_unmocked_requests_reads_artifact(tmp_path):
+    assert unmocked_requests(tmp_path, ["/api/tasks/t/artifacts/e2e-1.log"]) == []
+    assert unmocked_requests(tmp_path, ["/api/tasks/t/artifacts/e2e-1-0-unmocked-api.txt"]) == ["список запросов недоступен"]
+    (tmp_path / "e2e-1-0-unmocked-api.txt").write_text("POST /api/demo-session\n\nPOST /api/demo-session\nGET /healthz\n")
+    found = unmocked_requests(tmp_path, ["/api/tasks/t/artifacts/e2e-1-0-unmocked-api.txt"])
+    assert found == ["POST /api/demo-session", "GET /healthz"]
+    assert unmocked_reason(found).startswith("Тест QA обратился к API vibe-chat без подмены: POST /api/demo-session, GET /healthz.")

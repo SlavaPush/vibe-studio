@@ -12,6 +12,7 @@ from app.roles import (
     CRITIC,
     DEVELOPER,
     QA,
+    QA_API_FILES,
     QA_TEST_DIR,
     RESEARCH_NOTES,
     RESEARCH_PLAN,
@@ -29,7 +30,7 @@ from app.roles import (
     assemble,
 )
 from app.research import FetchError, fetch_public
-from app.sandbox import SandboxError, StepDenied
+from app.sandbox import SandboxError, StepDenied, unmocked_reason, unmocked_requests
 from app.schemas import AgentRole, Task, TaskEventType, TaskStatus
 from app.tools import ToolOutcome, WorkspaceTools
 
@@ -218,7 +219,9 @@ class TaskGraph:
         except SandboxError as error:
             return ToolOutcome("error", str(error))
         tail = self.log_tail(result.artifact_urls[0]) if result.artifact_urls else ""
-        return ToolOutcome("ok", f"Код выхода {result.exit_code}.\n{tail}")
+        unmocked = unmocked_requests(self.settings.artifacts_dir / self.task_id, result.artifact_urls)
+        note = f"{unmocked_reason(unmocked)}\n" if unmocked else ""
+        return ToolOutcome("ok", f"Код выхода {result.exit_code}.\n{note}{tail}")
 
     def execute(
         self, actions: list[Action], role: AgentRole, status: TaskStatus, only_path: str | None = None
@@ -407,7 +410,11 @@ class TaskGraph:
             self.task_id, commit_message(reply.summary, AgentRole.developer, marker), AgentRole.developer
         )
         if sha is None:
-            self.halt(AgentRole.developer, "implement", "Разработчик не изменил файлы.")
+            sha = self.workspace.head(self.task_id)
+            if sha == task.base_sha:
+                self.halt(AgentRole.developer, "implement", "Разработчик не изменил файлы.")
+            self.finished(AgentRole.developer, "implement", "ok", "Новых изменений нет, проверяется текущая версия ветки.")
+            return {"dev_sha": sha, "check_feedback": ""}
         self.finished(AgentRole.developer, "implement", "ok", reply.summary or "Изменения зафиксированы.")
         return {"dev_sha": sha, "check_feedback": ""}
 
@@ -478,6 +485,10 @@ class TaskGraph:
                 covered, model_findings = draft
             else:
                 fixed = self.spec_entries(task) + [Entry("Файл теста QA", test_file, required=True)]
+                root = self.workspace.worktree_path(self.task_id)
+                api_files = [rel for rel in QA_API_FILES if (root / rel).is_file()]
+                if api_files:
+                    fixed.append(Entry("Контракт API vibe-chat, клиент и примеры ответов", "\n".join(api_files), required=True))
                 if feedback:
                     fixed.append(Entry("Результат прошлой попытки", feedback, required=True))
                 fixed.append(Entry("Файлы web/src", self.listing()))
@@ -508,7 +519,12 @@ class TaskGraph:
                 if qa_try == QA_ATTEMPTS:
                     self.halt(AgentRole.qa, "qa", "Тест QA проходит на исходной версии после двух попыток.")
                 continue
-            after = self.evidence(qa_sha, qa_sha, test_file)
+            after = base if base.status == "invalid" else self.evidence(qa_sha, qa_sha, test_file)
+            if after.status == "invalid":
+                feedback = after.reason
+                if qa_try == QA_ATTEMPTS:
+                    self.halt(AgentRole.qa, "qa", "Тест QA обращается к API vibe-chat без подмены после двух попыток.")
+                continue
             findings = [
                 Finding(id=f"qa-{cycle}-{index}", source="qa", **item.model_dump())
                 for index, item in enumerate(model_findings, 1)

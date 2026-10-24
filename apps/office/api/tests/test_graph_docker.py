@@ -12,9 +12,23 @@ from app.schemas import ModelProfile, TaskStatus
 from app.tasks import IntakeOutcome
 
 TARGET = os.environ.get("OFFICE_TEST_TARGET_REPO", "https://github.com/SlavaPush/vibe-chat.git")
+UNMOCKED_TEST = """import { test, expect } from "@playwright/test";
+
+test("заголовок новой версии", async ({ page }) => {
+  await page.goto("/");
+  await expect(page).toHaveTitle("vibe-chat office", { timeout: 5000 });
+});
+"""
 TITLE_TEST = """import { test, expect } from "@playwright/test";
 
 test("заголовок новой версии", async ({ page }) => {
+  await page.route("**/api/**", (route) =>
+    route.fulfill({
+      status: 401,
+      contentType: "application/json",
+      body: JSON.stringify({ code: "unauthorized", message: "Нет сеанса.", retryable: false, operation_id: "op_test" }),
+    }),
+  );
   await page.goto("/");
   await expect(page).toHaveTitle("vibe-chat office", { timeout: 5000 });
 });
@@ -64,10 +78,12 @@ def test_graph_with_real_sandbox_produces_qa_evidence(real):
         page = (workspace.worktree_path(call.task_id) / "web/index.html").read_text()
         return developer_answer(page.replace("<title>vibe-chat</title>", "<title>vibe-chat office</title>"), "web/index.html")
 
+    tests = iter([UNMOCKED_TEST, TITLE_TEST])
+
     def qa(call):
         path = f"web/e2e/office/{call.task_id}.pw.ts"
         return {
-            "actions": [{"kind": "write_file", "path": path, "content": TITLE_TEST, "step": None}],
+            "actions": [{"kind": "write_file", "path": path, "content": next(tests), "step": None}],
             "done": True,
             "summary": "Тест заголовка",
             "criteria_covered": [1],
@@ -101,11 +117,18 @@ def test_graph_with_real_sandbox_produces_qa_evidence(real):
     command = "playwright test --config /office-e2e/playwright.config.ts"
     e2e = [(row["commit_sha"], check["exit_code"]) for row in rows for check in json.loads(row["checks"]) if check["command"] == command]
     head = workspace.head(task_id)
-    assert e2e == [(task.base_sha, 1), (head, 0)]
+    assert e2e == [(task.base_sha, 1), (task.base_sha, 1), (head, 0)]
     artifacts = app.state.settings.artifacts_dir / task_id
-    reports = sorted(artifacts.glob("e2e-*-playwright-report.json"))
-    assert len(reports) == 2
-    before = json.loads(reports[0].read_text())
+    [unmocked] = artifacts.glob("e2e-*-unmocked-api.txt")
+    assert unmocked.name.startswith("e2e-1-") and "GET /api/" in unmocked.read_text()
+    qa_calls = gateway.role_calls("qa", task_id)
+    assert len(qa_calls) == 2
+    assert "Тест QA обратился к API vibe-chat без подмены: GET /api/" in qa_calls[1].user
+    assert "contracts/api.md\nweb/src/api/client.ts" in qa_calls[0].user
+    assert len(gateway.role_calls("developer", task_id)) == 1
+    reports = sorted(artifacts.glob("e2e-*-playwright-report.json"), key=lambda path: int(path.name.split("-")[1]))
+    assert len(reports) == 3
+    before = json.loads(reports[1].read_text())
     assert before["errors"] == []
     [spec] = [spec for suite in before["suites"] for child in [suite, *suite.get("suites", [])] for spec in child.get("specs", [])]
     assert spec["file"].endswith(f"{task_id}.pw.ts")

@@ -12,7 +12,7 @@ from app.graph import TaskGraph, spec_hash
 from app.models_gateway import ProviderReply
 from app.roles import Finding
 from app.sandbox import E2EResult, SandboxCancelled
-from app.schemas import AgentRole, ModelProfile, TaskStatus
+from app.schemas import AgentRole, CheckResult, ModelProfile, TaskStatus
 from app.tasks import IntakeOutcome
 
 
@@ -535,6 +535,100 @@ def test_blocking_critic_finding_returns_to_developer_until_limit(graph):
     assert events(app, task_id, "role_finished")[-1].payload["outcome"] == "blocked"
 
 
+NO_CHANGE = {"actions": [], "done": True, "summary": "Изменения уже сделаны."}
+
+
+def developer_finished(app, task_id):
+    return [event.payload for event in events(app, task_id, "role_finished") if event.role == "developer"]
+
+
+@pytest.mark.parametrize("outcome", [TaskStatus.needs_attention, TaskStatus.failed])
+def test_retry_without_new_changes_continues_committed_version(graph, outcome):
+    app, client, me = graph
+    gateway = app.state.gateway
+    suite = app.state.suite
+    if outcome == TaskStatus.needs_attention:
+        suite.exits = lambda task_id, app_sha, qa_sha, e2e: {"build": 2}
+    else:
+        gateway.handlers["qa"] = lambda call: {"actions": [], "done": True}
+    task_id = create(app, me["id"])
+    approve(client, app, task_id)
+    wait_status(app, task_id, outcome)
+    wait_for(lambda: not app.state.runner.active(task_id), 30, "run stopped")
+    head = git(worktree(app, task_id), "rev-parse", "HEAD")
+    commits = office_commits(app, task_id, "developer")
+    assert commits[0] == head != app.state.store.get_task(task_id).base_sha
+
+    suite.exits = lambda task_id, app_sha, qa_sha, e2e: {}
+    gateway.handlers["qa"] = qa_answer
+    gateway.handlers["developer"] = lambda call: NO_CHANGE
+    start = len(suite.calls)
+    decide(client, app, task_id, "retry")
+    approve(client, app, task_id, 2)
+    wait_status(app, task_id, TaskStatus.awaiting_integration, TaskStatus.failed, TaskStatus.needs_attention)
+    assert status(app, task_id) == TaskStatus.awaiting_integration, events(app, task_id)[-3:]
+    assert transitions(app, task_id)[-3:] == [
+        ("awaiting_spec_approval", "developing"),
+        ("developing", "reviewing"),
+        ("reviewing", "awaiting_integration"),
+    ]
+    assert office_commits(app, task_id, "developer") == commits
+    assert suite.calls[start] == (task_id, head, head, False)
+    assert developer_finished(app, task_id)[-1] == {
+        "step": "implement", "outcome": "ok", "summary": "Новых изменений нет, проверяется текущая версия ветки."
+    }
+
+
+def test_retry_without_changes_from_base_needs_attention(graph):
+    app, client, me = graph
+    gateway = app.state.gateway
+    gateway.handlers["developer"] = lambda call: {
+        "actions": [{"kind": "write_file", "path": "web/src/App.tsx", "content": "export const x = 1\n"}],
+        "done": True,
+        "summary": "x",
+    }
+    task_id = create(app, me["id"])
+    approve(client, app, task_id)
+    wait_status(app, task_id, TaskStatus.failed)
+    wait_for(lambda: not app.state.runner.active(task_id), 30, "run stopped")
+
+    gateway.handlers["developer"] = lambda call: NO_CHANGE
+    decide(client, app, task_id, "retry")
+    approve(client, app, task_id, 2)
+    wait_status(app, task_id, TaskStatus.needs_attention)
+    task = app.state.store.get_task(task_id)
+    assert git(worktree(app, task_id), "rev-parse", "HEAD") == task.base_sha
+    assert developer_finished(app, task_id)[-1] == {
+        "step": "implement", "outcome": "blocked", "summary": "Разработчик не изменил файлы."
+    }
+    assert app.state.suite.calls == []
+
+
+def test_fix_cycle_without_new_changes_rechecks_same_version(graph):
+    app, client, me = graph
+    gateway = app.state.gateway
+    finding = {"blocking": True, "criterion": None, "file": "web/src/App.tsx", "line": 2, "text": "Кнопка не подписана."}
+    gateway.handlers["critic"] = lambda call: {"verdict": "changes_requested", "findings": [finding]}
+    answers = iter([developer_answer("export function App() {\n  return 'ok'\n}\n")])
+    gateway.handlers["developer"] = lambda call: next(answers, NO_CHANGE)
+    task_id = create(app, me["id"])
+    approve(client, app, task_id)
+    wait_status(app, task_id, TaskStatus.needs_attention)
+    task = app.state.store.get_task(task_id)
+    assert task.fix_cycles == 2
+    assert len(gateway.role_calls("developer")) == 3
+    assert len(gateway.role_calls("qa")) == 3
+    assert len(gateway.role_calls("critic")) == 3
+    [dev_sha] = office_commits(app, task_id, "developer")
+    [qa_sha] = office_commits(app, task_id, "qa")
+    assert [call[1] for call in app.state.suite.calls if not call[3]] == [dev_sha, qa_sha, qa_sha]
+    directory = app.state.settings.artifacts_dir / task_id
+    assert all((directory / f"review-{cycle}-{role}.json").is_file() for cycle in range(3) for role in ("qa", "critic"))
+    assert events(app, task_id, "role_finished")[-1].payload == {
+        "step": "review", "outcome": "blocked", "summary": "Блокирующие замечания остались после двух циклов исправления."
+    }
+
+
 def test_qa_failure_on_task_version_becomes_blocking_finding(graph):
     app, client, me = graph
     suite = app.state.suite
@@ -620,6 +714,85 @@ def test_missing_qa_evidence_is_retried_once(graph):
     assert len([call for call in app.state.suite.calls if call[3]]) == 2
     finished = [event for event in events(app, task_id, "role_finished") if event.role == "qa"]
     assert finished[-1].payload["summary"].startswith("Нет свидетельства QA")
+
+
+UNMOCKED = E2EResult("invalid", "Тест QA обратился к API vibe-chat без подмены: GET /api/me.")
+
+
+def test_unmocked_api_on_base_returns_test_to_qa(graph):
+    app, client, me = graph
+    store = app.state.store
+    seen = {"base": 0}
+
+    def e2e(task_id, app_sha, test_file):
+        if app_sha == store.get_task(task_id).base_sha:
+            seen["base"] += 1
+            return UNMOCKED if seen["base"] == 1 else E2EResult("failed", line=3, message="no button")
+        return E2EResult("passed")
+
+    app.state.suite.e2e = e2e
+    task_id = create(app, me["id"])
+    approve(client, app, task_id)
+    wait_status(app, task_id, TaskStatus.awaiting_integration)
+    qa_calls = app.state.gateway.role_calls("qa")
+    assert len(qa_calls) == 2 and UNMOCKED.reason in qa_calls[1].user
+    assert len(app.state.gateway.role_calls("developer")) == 1
+    base = store.get_task(task_id).base_sha
+    assert [call[1] == base for call in app.state.suite.calls if call[3]] == [True, True, False]
+    assert json.loads((app.state.settings.artifacts_dir / task_id / "review-0-qa.json").read_text())["findings"] == []
+
+
+def test_unmocked_api_twice_needs_attention_without_developer_finding(graph):
+    app, client, me = graph
+    store = app.state.store
+    seen = {"base": 0}
+
+    def e2e(task_id, app_sha, test_file):
+        if app_sha == store.get_task(task_id).base_sha:
+            seen["base"] += 1
+            return UNMOCKED if seen["base"] == 1 else E2EResult("failed", line=3, message="no button")
+        return UNMOCKED
+
+    app.state.suite.e2e = e2e
+    task_id = create(app, me["id"])
+    approve(client, app, task_id)
+    wait_status(app, task_id, TaskStatus.needs_attention)
+    qa_calls = app.state.gateway.role_calls("qa")
+    assert len(qa_calls) == 2 and UNMOCKED.reason in qa_calls[1].user
+    assert len(app.state.gateway.role_calls("developer")) == 1
+    assert store.get_task(task_id).fix_cycles == 0
+    finished = [event for event in events(app, task_id, "role_finished") if event.role == "qa"]
+    assert finished[-1].payload["summary"] == "Тест QA обращается к API vibe-chat без подмены после двух попыток."
+    assert not list((app.state.settings.artifacts_dir / task_id).glob("review-*-qa.json"))
+
+
+def test_qa_gets_api_files_and_unmocked_note_from_own_run(origin, graph):
+    app, client, me = graph
+    origin.push("contracts/api.md", "# Контракт\n")
+    origin.push("web/src/api/client.ts", "export {}\n")
+    directory = app.state.settings.artifacts_dir
+
+    def run_step(task_id, step, role):
+        (directory / task_id).mkdir(parents=True, exist_ok=True)
+        (directory / task_id / "e2e-1-0-unmocked-api.txt").write_text("GET /api/conversations\n")
+        urls = [f"/api/tasks/{task_id}/artifacts/{name}" for name in ("e2e-1.log", "e2e-1-0-unmocked-api.txt")]
+        return CheckResult(command=step, exit_code=1, duration_ms=1, artifact_urls=urls)
+
+    app.state.suite.run_step = run_step
+    turns = iter([
+        lambda call: qa_answer(call) | {
+            "actions": [{"kind": "run_step", "path": None, "step": "e2e", "content": None}], "done": False
+        },
+        qa_answer,
+    ])
+    app.state.gateway.handlers["qa"] = lambda call: next(turns)(call)
+    task_id = create(app, me["id"])
+    approve(client, app, task_id)
+    wait_status(app, task_id, TaskStatus.awaiting_integration)
+    first, second = app.state.gateway.role_calls("qa")
+    assert "Контракт API vibe-chat, клиент и примеры ответов\ncontracts/api.md\nweb/src/api/client.ts\n" in first.user
+    assert "web/src/api/types.ts" not in first.user
+    assert "Тест QA обратился к API vibe-chat без подмены: GET /api/conversations." in second.user
 
 
 def test_budget_allows_thirtieth_call_and_stops_thirty_first(graph):

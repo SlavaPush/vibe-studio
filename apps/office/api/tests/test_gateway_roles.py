@@ -11,8 +11,9 @@ import openai
 import pytest
 from conftest import FakeAnthropic, FakeOpenAI
 
-from app.models_gateway import InvalidModelResponse, ModelsGateway, ProviderError, TruncatedModelResponse
+from app.models_gateway import InvalidModelResponse, ModelCall, ModelsGateway, ProviderError, TruncatedModelResponse
 from app.roles import (
+    CLIPPED,
     ContextTooLarge,
     CriticReview,
     Entry,
@@ -24,6 +25,8 @@ from app.roles import (
     provider_schema,
     size,
 )
+from app.config import Settings
+from app.sandbox import CommandsPolicy
 from app.schemas import AgentRole, ModelProfile
 from app.tasks import BudgetExceeded
 
@@ -46,6 +49,7 @@ class Ollama:
         }
         self.delay = delay
         self.error = error
+        self.response = None
         self.requests = []
         self.running = 0
         self.max_running = 0
@@ -60,6 +64,8 @@ class Ollama:
             time.sleep(self.delay)
             if self.error is not None:
                 raise self.error
+            if self.response is not None:
+                return self.response
             return httpx.Response(200, json=self.answer)
         finally:
             with self.lock:
@@ -157,6 +163,53 @@ def test_ollama_request_and_no_fallback(setup):
     assert json.loads(ollama.requests[-1].content)["think"] is True
     assert gpt.calls == []
     assert store.get_task(task_id).usage.model_calls == 2
+
+
+def test_ollama_error_status_carries_short_error_field(setup):
+    store, task_id, _, _, ollama, make = setup
+    gateway = make()
+    reason = "model requires more system memory\n(10.2 GiB) than is available " + "x" * 1000
+    ollama.response = httpx.Response(500, json={"error": reason, "detail": "SYSTEM PROMPT"})
+    with pytest.raises(ProviderError) as error:
+        gateway.structured(store, task_id, ModelProfile.local, AgentRole.qa, "qa", "SYSTEM PROMPT", "USER", QaTurn)
+    message = str(error.value)
+    assert message.startswith("ollama status 500: model requires more system memory (10.2 GiB) than is available xxx")
+    assert len(message) == len("ollama status 500: ") + 300
+    assert "SYSTEM PROMPT" not in message and "USER" not in message
+
+    for response in (httpx.Response(502, text="<html>bad gateway</html>"), httpx.Response(500, json={"error": " "})):
+        ollama.response = response
+        with pytest.raises(ProviderError) as error:
+            gateway.structured(store, task_id, ModelProfile.local, AgentRole.qa, "qa", "S", "U", QaTurn)
+        assert str(error.value) == f"ollama status {response.status_code}"
+
+
+def test_ollama_reply_carries_metrics_and_cloud_reply_does_not(setup):
+    _, _, claude, _, ollama, make = setup
+    gateway = make()
+
+    def call(profile):
+        target = gateway.targets(profile, AgentRole.supervisor)[0]
+        return gateway.call_provider(
+            ModelCall("t", AgentRole.supervisor, "spec", target, "S", "U", provider_schema(SpecDraft), 5.0)
+        )
+
+    ollama.answer |= {"eval_duration": 3_000_000_000, "prompt_eval_duration": 500_000_000, "load_duration": 70_000_000}
+    reply = call(ModelProfile.local)
+    assert (reply.done_reason, reply.eval_duration_ns, reply.prompt_eval_duration_ns, reply.load_duration_ns) == (
+        "stop", 3_000_000_000, 500_000_000, 70_000_000
+    )
+    assert reply.complete and (reply.input_tokens, reply.output_tokens) == (70, 9)
+
+    ollama.answer = {"message": {"content": "{}"}, "done": True, "done_reason": "stop", "eval_duration": "3"}
+    reply = call(ModelProfile.local)
+    assert (reply.done_reason, reply.eval_duration_ns, reply.prompt_eval_duration_ns, reply.load_duration_ns) == (
+        "stop", None, None, None
+    )
+
+    claude.answer = json.dumps(SPEC)
+    reply = call(ModelProfile.cloud)
+    assert (reply.done_reason, reply.eval_duration_ns, reply.load_duration_ns) == (None, None, None)
 
 
 def test_ollama_calls_are_serialized(setup):
@@ -293,6 +346,66 @@ def test_long_text_fields_come_last_in_turn_schema(reply_type):
     action = schema["properties"]["actions"]["items"]
     assert list(action["properties"]) == ["kind", "path", "step", "content"]
     assert action["required"] == ["kind", "path", "step", "content"]
+
+
+def test_long_descriptive_text_is_clipped_and_strict_fields_stay_strict(setup):
+    store, task_id, claude, _, _, make = setup
+    long = "Заголовок вкладки " * 100
+    claude.answer = json.dumps(TURN | {"summary": long})
+    reply = make().structured(
+        store, task_id, ModelProfile.cloud, AgentRole.developer, "implement", "S", "U", Turn
+    )
+    assert len(reply.summary) == 500 and reply.summary == long[: 500 - len(CLIPPED)] + CLIPPED
+    assert reply.actions[0].path == "web/src/App.tsx"
+    assert Turn.model_validate(TURN | {"summary": "x" * 500}).summary == "x" * 500
+
+    finding = {"blocking": True, "criterion": 1, "file": None, "line": None, "text": "т" * 3000}
+    qa = QaTurn.model_validate(
+        {"summary": long, "criteria_covered": [1], "findings": [finding], "done": True, "actions": []}
+    )
+    assert len(qa.summary) == 500 and qa.summary.endswith(CLIPPED)
+    assert len(qa.findings[0].text) == 1000 and qa.findings[0].text.endswith(CLIPPED)
+    review = CriticReview.model_validate({"verdict": "changes_requested", "findings": [finding]})
+    assert len(review.findings[0].text) == 1000
+    notes = ResearchNotes.model_validate(
+        {"notes": "н" * 5000, "sources": [{"title": "т" * 300, "url": "https://example.com"}]}
+    )
+    assert len(notes.notes) == 4000 and len(notes.sources[0].title) == 200
+
+    for broken in (
+        TURN | {"summary": None},
+        TURN | {"actions": [{"kind": "read_file", "path": None, "content": None, "step": None}]},
+        TURN | {"actions": [{"kind": "run_step", "path": None, "content": None, "step": "e2e"}]},
+        TURN | {"actions": [TURN["actions"][0]] * 9},
+    ):
+        with pytest.raises(ValueError):
+            Turn.model_validate(broken)
+    with pytest.raises(ValueError):
+        CriticReview.model_validate({"verdict": "pass", "findings": [finding | {"text": ""}]})
+    with pytest.raises(ValueError):
+        CriticReview.model_validate({"verdict": "pass", "findings": [finding | {"file": "a" * 401}]})
+    with pytest.raises(ValueError):
+        ResearchNotes.model_validate({"notes": "", "sources": [{"title": "t", "url": "h" * 2001}]})
+    with pytest.raises(ValueError):
+        SpecDraft.model_validate(SPEC | {"summary": "s" * 2001})
+
+
+@pytest.mark.parametrize(("reply_type", "role"), [(Turn, AgentRole.developer), (QaTurn, AgentRole.qa)])
+def test_action_step_is_enum_of_role_steps(reply_type, role):
+    policy = CommandsPolicy(Settings().commands_policy)
+    allowed = [name for name, step in policy.steps.items() if role in step.roles]
+    step = provider_schema(reply_type)["properties"]["actions"]["items"]["properties"]["step"]
+    assert step == {"anyOf": [{"enum": allowed, "type": "string"}, {"type": "null"}]}
+    assert "const" not in json.dumps(provider_schema(reply_type))
+    base = {"summary": "s", "done": True, "criteria_covered": [], "findings": []}
+    fields = {name: base[name] for name in reply_type.model_fields if name in base}
+    for name in allowed:
+        action = {"kind": "run_step", "path": None, "step": name, "content": None}
+        assert reply_type.model_validate(fields | {"actions": [action]}).actions[0].step == name
+    for name in ("run_e2e_tests", "install", *{"lint", "test", "build", "e2e"} - set(allowed)):
+        action = {"kind": "run_step", "path": None, "step": name, "content": None}
+        with pytest.raises(ValueError):
+            reply_type.model_validate(fields | {"actions": [action]})
 
 
 def test_context_keeps_required_parts_and_last_turn():

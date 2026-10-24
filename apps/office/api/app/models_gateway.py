@@ -20,6 +20,7 @@ MODERATION_MODEL = "omni-moderation-latest"
 CLASSIFIER_MAX_TOKENS = 1024
 CLOUD_TIMEOUT = 300.0
 OLLAMA_TIMEOUT = 600.0
+OLLAMA_ERROR_CHARS = 300
 
 ReplyT = TypeVar("ReplyT", bound=BaseModel)
 
@@ -105,6 +106,25 @@ class ProviderReply:
     output_tokens: int
     complete: bool
     truncated: bool = False
+    done_reason: str | None = None
+    eval_duration_ns: int | None = None
+    prompt_eval_duration_ns: int | None = None
+    load_duration_ns: int | None = None
+
+
+def _nanoseconds(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _ollama_error(response: httpx.Response) -> str:
+    try:
+        data = response.json()
+    except ValueError:
+        return ""
+    error = data.get("error") if isinstance(data, dict) else None
+    if not isinstance(error, str) or not error.strip():
+        return ""
+    return ": " + " ".join(error.split())[:OLLAMA_ERROR_CHARS]
 
 
 class ModelsGateway:
@@ -281,7 +301,7 @@ class ModelsGateway:
             except httpx.HTTPError as error:
                 raise ProviderError(f"ollama failed: {type(error).__name__}") from error
         if response.status_code != 200:
-            raise ProviderError(f"ollama status {response.status_code}")
+            raise ProviderError(f"ollama status {response.status_code}{_ollama_error(response)}")
         try:
             data = response.json()
         except ValueError as error:
@@ -292,6 +312,10 @@ class ModelsGateway:
             output_tokens=int(data.get("eval_count") or 0),
             complete=data.get("done") is True and data.get("done_reason") == "stop",
             truncated=data.get("done_reason") == "length",
+            done_reason=data["done_reason"] if isinstance(data.get("done_reason"), str) else None,
+            eval_duration_ns=_nanoseconds(data.get("eval_duration")),
+            prompt_eval_duration_ns=_nanoseconds(data.get("prompt_eval_duration")),
+            load_duration_ns=_nanoseconds(data.get("load_duration")),
         )
 
     def anthropic_client(self) -> Any:
