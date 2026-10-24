@@ -1,0 +1,23 @@
+/.github/ @SlavaPush
+
+/apps/office/ @SlavaPush
+
+/apps/chat/api/ @SlavaPush
+/apps/chat/contracts/ @SlavaPush
+/apps/chat/infra/ @SlavaPush
+
+**/package.json @SlavaPush
+**/package-lock.json @SlavaPush
+**/pyproject.toml @SlavaPush
+**/uv.lock @SlavaPush
+
+/apps/chat/web/src/api/ @SlavaPush
+/apps/chat/web/src/mocks/ @SlavaPush
+
+/apps/chat/web/*.config.* @SlavaPush
+/apps/chat/web/tsconfig*.json @SlavaPush
+/apps/chat/web/.oxlintrc.json @SlavaPush
+/apps/chat/web/scripts/ @SlavaPush
+
+**/*.test.* @SlavaPush
+/apps/chat/web/src/test/ @SlavaPush

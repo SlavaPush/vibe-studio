@@ -1,15 +1,49 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
   "plugins": ["react", "typescript", "oxc"],
+  "env": {
+    "browser": true
+  },
   "rules": {
     "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
+    "react/only-export-components": ["warn", { "allowConstantExport": true }],
+    "react/no-danger": "error",
+    "no-eval": "error",
+    "no-implied-eval": "error"
   },
   "overrides": [
     {
       "files": ["src/components/ui/**"],
       "rules": {
         "react/only-export-components": "off"
+      }
+    },
+    {
+      "files": ["src/mods/**"],
+      "rules": {
+        "no-restricted-globals": [
+          "error",
+          {
+            "checkGlobalObject": true,
+            "globals": [
+              "fetch",
+              "XMLHttpRequest",
+              "WebSocket",
+              "EventSource",
+              "localStorage",
+              "sessionStorage",
+              "indexedDB",
+              "location",
+              "open"
+            ]
+          }
+        ],
+        "no-restricted-properties": [
+          "error",
+          { "property": "sendBeacon" },
+          { "property": "cookie" },
+          { "object": "document", "property": "location" }
+        ]
       }
     }
   ]

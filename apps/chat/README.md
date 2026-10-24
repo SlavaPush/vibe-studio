@@ -2,7 +2,9 @@
 
 Публичный AI-чат: отдельные диалоги для каждого участника, проверка каждого сообщения модерацией и классификатором риска, маршрутизация запроса по намерению и сложности на подходящую модель и уровень усилий, генерация изображений, постоянная история.
 
-Облачные модели: Anthropic (основной провайдер), OpenAI (резервный, а также модерация и изображения). Сервис развивает мультиагентный офис из репозитория [back-office](https://github.com/SlavaPush/back-office).
+Облачные модели: Anthropic (основной провайдер), OpenAI (резервный, а также модерация и изображения). Сервис развивает мультиагентный офис; после импорта офиса в монорепозиторий его код будет находиться в каталоге `apps/office` (`../office` относительно этого файла).
+
+Приложение входит в монорепозиторий [vibe-studio](https://github.com/SlavaPush/vibe-studio) и находится в каталоге `apps/chat`. Команды этого файла выполняются из каталога `apps/chat`, кроме разделов, где указан корень монорепозитория. Общий README и CI — в корне монорепозитория.
 
 ## Состав
 
@@ -88,12 +90,16 @@ Cookie сеанса по умолчанию имеет флаг `Secure`. Chrome
 
 ## Проверки
 
+Команды выполняются из корня монорепозитория. Те же проверки выполняют job `chat-api`, `chat-web` и `chat-containers` в `.github/workflows/ci.yml`.
+
 ```bash
-docker compose -f infra/docker-compose.yml up -d
-cd api && uv sync --locked && uv run pytest
-cd web && npm ci && npm run lint && npm run test && npm run build
-docker build -f infra/Dockerfile -t vibe-chat:local .
+docker compose -f apps/chat/infra/docker-compose.yml up -d
+(cd apps/chat/api && uv sync --locked && uv run pytest)
+(cd apps/chat/web && npm ci && npm run lint && npm run test && npm run build)
+docker build -f apps/chat/infra/Dockerfile -t vibe-chat:local apps/chat
 ```
+
+Образ собирается с контекстом `apps/chat`: пути в `infra/Dockerfile` и `.dockerignore` заданы относительно этого каталога.
 
 Тесты API используют реальную PostgreSQL: базу `vibe_test` в контейнере из `infra/docker-compose.yml` (другой адрес задаётся `TEST_DATABASE_URL`). Если база недоступна, тесты завершаются ошибкой с подсказкой. Провайдеры моделей и Storage в тестах заменены поддельными объектами, платных вызовов нет.
 
@@ -187,10 +193,10 @@ uv run python scripts/access_codes.py --database-url-env DATABASE_URL_SUPABASE a
 
 Процесс работает под пользователем с UID `10001`, файлы приложения принадлежат root и доступны только на чтение. В образ попадают только `api/app/`, зависимости и сборка интерфейса: `.dockerignore` исключает всё остальное, включая `.env`, тесты и скрипты. Uvicorn запускается с `--no-proxy-headers`: адрес клиента определяет приложение (`TRUST_PROXY_HEADERS`, `CLIENT_IP_SOURCE`, `PROXY_HOPS`). После `SIGTERM` Uvicorn ждёт открытые соединения не больше 3 с, исполнитель ждёт активные задания до 15 с и ещё до 5 с после их отмены. Задание, которое не успело сохранить состояние, следующий экземпляр завершает по правилам восстановления без повторного платного вызова.
 
-Проверка образа с локальной PostgreSQL (порт `8000` на машине владельца занят, поэтому `18080`):
+Проверка образа с локальной PostgreSQL из корня монорепозитория (порт `8000` на машине владельца занят, поэтому `18080`):
 
 ```bash
-docker compose -f infra/docker-compose.yml up -d
+docker compose -f apps/chat/infra/docker-compose.yml up -d
 docker run --rm -p 127.0.0.1:18080:10000 \
   -e DATABASE_URL=postgresql://vibe:vibe@host.docker.internal:5432/vibe \
   vibe-chat:local
@@ -201,16 +207,21 @@ curl http://127.0.0.1:18080/healthz
 
 ## Деплой на Render
 
-Сервис создаётся вручную (Render MCP или Dashboard); `render.yaml` в репозитории нет. Параметры web service:
+Сервис создаётся вручную (Render MCP или Dashboard); `render.yaml` в репозитории нет. Параметры web service для сборки из монорепозитория:
 
 | Параметр | Значение |
 | --- | --- |
-| Репозиторий и ветка | `SlavaPush/vibe-chat`, `main` |
-| Среда | Docker, Dockerfile `infra/Dockerfile`, контекст — корень репозитория |
+| Репозиторий и ветка | `SlavaPush/vibe-studio`, `main` |
+| Среда | Docker |
+| Root Directory | пусто (корень монорепозитория) |
+| Dockerfile Path | `./apps/chat/infra/Dockerfile` |
+| Docker Build Context Directory | `./apps/chat` |
 | Регион | Singapore (ближе всего к Supabase `ap-south-1`) |
 | Тариф | Free |
 | Health check | `/healthz` |
 | Автодеплой | выключен: деплой запускается вручную |
+
+Эти параметры применяются при переключении сервиса на монорепозиторий. До переключения сервисы на Render собираются из прежнего репозитория `SlavaPush/vibe-chat`: Dockerfile `infra/Dockerfile`, контекст — корень репозитория.
 
 Переменные окружения. Секретные значения владелец вводит в Render Dashboard; в репозиторий и в сообщения они не попадают.
 

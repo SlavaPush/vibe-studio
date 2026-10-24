@@ -5,12 +5,15 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
-  api:
+  chat-api:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: api
+        working-directory: apps/chat/api
     services:
       postgres:
         image: postgres:16-alpine
@@ -32,28 +35,28 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.2
         with:
           enable-cache: true
-          working-directory: api
+          working-directory: apps/chat/api
       - run: uv sync --locked
       - run: uv run pytest
 
-  web:
+  chat-web:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: web
+        working-directory: apps/chat/web
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: web/package-lock.json
+          cache-dependency-path: apps/chat/web/package-lock.json
       - run: npm ci
       - run: npm run lint
       - run: npm run test
       - run: npm run build
 
-  containers:
+  chat-containers:
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -71,7 +74,7 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v7
-      - run: docker build -f infra/Dockerfile -t vibe-chat:ci .
+      - run: docker build -f apps/chat/infra/Dockerfile -t vibe-chat:ci apps/chat
       - run: >-
           docker run -d --name vibe-chat --network host
           -e PORT=10000 -e APP_VERSION=ci-check

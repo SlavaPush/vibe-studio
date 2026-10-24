@@ -160,6 +160,8 @@ describe('ChatThread', () => {
     const refusals = () => screen.getAllByRole('note', { name: 'Запрос отклонён' })
     expect(await screen.findByText('Второй отказ')).toBeInTheDocument()
     expect(refusals()).toHaveLength(1)
+    expect(refusals()[0]).toBeVisible()
+    expect(within(refusals()[0]).getByText('Второй отказ')).toBeVisible()
     expect(screen.queryByText('Первый отказ')).not.toBeInTheDocument()
     expect(screen.getByText('Первый запрос')).toBeInTheDocument()
     expect(screen.getByText('Второй запрос')).toBeInTheDocument()
@@ -181,6 +183,8 @@ describe('ChatThread', () => {
 
     expect(await screen.findByText('Третий отказ')).toBeInTheDocument()
     expect(refusals()).toHaveLength(1)
+    expect(refusals()[0]).toBeVisible()
+    expect(within(refusals()[0]).getByText('Третий отказ')).toBeVisible()
     expect(screen.queryByText('Второй отказ')).not.toBeInTheDocument()
     expect(screen.getByText('Третий запрос')).toBeInTheDocument()
   })

@@ -595,10 +595,77 @@ describe('App', () => {
     const store = createChatStore({ ...testState(), session: null })
     render(<App store={store} controller={fakeController()} />)
     const info = screen.getByRole('region', { name: 'Как работает доступ' })
+    expect(info).toBeVisible()
     expect(info).toHaveTextContent('демонстрационный проект')
     expect(info).toHaveTextContent('одноразовые коды доступа')
     expect(info).toHaveTextContent('Код действует для одного входа.')
     expect(info).toHaveTextContent('нужен новый код')
     expect(info).toHaveTextContent('Прежняя история будет недоступна.')
+  })
+
+  const editableFields = (container: HTMLElement) =>
+    Array.from(container.querySelectorAll('input, textarea, [contenteditable]'))
+
+  it('на экране входа единственное поле ввода — код доступа', () => {
+    const store = createChatStore({ ...testState(), session: null })
+    const { container } = render(<App store={store} controller={fakeController()} />)
+    expect(editableFields(container)).toEqual([screen.getByLabelText('Код доступа')])
+    expect(screen.getAllByRole('textbox')).toEqual([screen.getByLabelText('Код доступа')])
+  })
+
+  it('в чате поля ввода — только сообщение и название диалога при переименовании', () => {
+    const store = createChatStore(testState())
+    const { container } = render(<App store={store} controller={fakeController()} />)
+    const composer = screen.getByRole('textbox', { name: 'Сообщение' })
+    expect(editableFields(container)).toEqual([composer])
+    expect(screen.getAllByRole('textbox')).toEqual([composer])
+
+    fireEvent.click(screen.getByRole('button', { name: 'Переименовать диалог «Тестовый диалог»' }))
+    const title = screen.getByRole('textbox', { name: 'Название диалога' })
+    expect(editableFields(container)).toHaveLength(2)
+    expect(editableFields(container)).toEqual(expect.arrayContaining([composer, title]))
+    expect(screen.getAllByRole('textbox')).toHaveLength(2)
+  })
+
+  it('на сервер уходит видимый текст поля сообщения без пробелов по краям: при отправке и из очереди', async () => {
+    const listeners = new Map<string, (event: MessageEvent<string>) => void>()
+    const openEvents = () =>
+      ({
+        addEventListener: (type: string, listener: (event: MessageEvent<string>) => void) => listeners.set(type, listener),
+        close: () => {},
+      }) as unknown as EventSource
+    const { run } = testRun('run-1')
+    const createRun = vi.fn().mockResolvedValueOnce(run).mockResolvedValueOnce(testRun('run-2').run)
+    const api = {
+      createRun,
+      conversations: vi.fn().mockResolvedValue({ items: testState().conversations }),
+    } as unknown as ApiClient
+    const store = createChatStore(testState())
+    render(<App store={store} controller={createChatController(store, api, openEvents)} />)
+    const composer = screen.getByRole<HTMLTextAreaElement>('textbox', { name: 'Сообщение' })
+
+    fireEvent.change(composer, { target: { value: '  Первый  вопрос\n ' } })
+    expect(composer).toHaveValue('  Первый  вопрос\n ')
+    const firstVisible = composer.value
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить' }))
+    await waitFor(() => expect(createRun).toHaveBeenCalledTimes(1))
+    expect(createRun.mock.calls[0][0]).toBe(CONVERSATION_ID)
+    expect(createRun.mock.calls[0][1].text).toBe(firstVisible.trim())
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'В очередь' })).toBeInTheDocument())
+    fireEvent.change(composer, { target: { value: '\t Второй, из очереди  ' } })
+    expect(composer).toHaveValue('\t Второй, из очереди  ')
+    const secondVisible = composer.value
+    fireEvent.click(screen.getByRole('button', { name: 'В очередь' }))
+    await waitFor(() => expect(store.getState().queue).toHaveLength(1))
+    expect(createRun).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      listeners.get('completed')?.({ data: JSON.stringify(switchedRunEvents(run.id).at(-1)) } as MessageEvent<string>)
+    })
+    await waitFor(() => expect(createRun).toHaveBeenCalledTimes(2))
+    expect(createRun.mock.calls[1][0]).toBe(CONVERSATION_ID)
+    expect(createRun.mock.calls[1][1].text).toBe(secondVisible.trim())
+    window.localStorage.clear()
   })
 })
