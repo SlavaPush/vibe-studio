@@ -107,7 +107,7 @@ export function ChatThread({ store, actions, loadAssetUrl, queue }: ChatThreadPr
         <ThreadPrimitive.Viewport
           role="log"
           aria-label="Сообщения диалога"
-          className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 py-6"
+          className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-3 py-4 md:px-4 md:py-6"
         >
           {historyStatus === 'loading' && <LoadingStatus label="Загрузка сообщений…" />}
           {historyStatus === 'ready' && (
@@ -124,7 +124,7 @@ export function ChatThread({ store, actions, loadAssetUrl, queue }: ChatThreadPr
           </ThreadPrimitive.Messages>
         </ThreadPrimitive.Viewport>
         {queue}
-        <ComposerPrimitive.Root className="flex items-end gap-2 border-t p-4">
+        <ComposerPrimitive.Root className="flex flex-wrap items-end gap-2 border-t p-4 pb-[max(1rem,env(safe-area-inset-bottom))] md:flex-nowrap">
           <ComposerPrimitive.Input
             aria-label="Сообщение"
             placeholder="Напишите сообщение"
@@ -134,7 +134,7 @@ export function ChatThread({ store, actions, loadAssetUrl, queue }: ChatThreadPr
               if (sendBlocked || running) event.preventDefault()
               if (!sendBlocked && running) enqueueComposer()
             }}
-            className="min-h-9 flex-1 resize-none rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            className="max-h-40 min-h-10 min-w-40 flex-1 resize-none overflow-y-auto rounded-md border border-input bg-transparent px-3 py-2 text-base shadow-xs md:min-h-9 md:min-w-auto md:text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
           />
           <AuiIf condition={(state) => !state.thread.isRunning}>
             <ComposerPrimitive.Send asChild>
@@ -220,10 +220,10 @@ function AssetImage({ asset, loadAssetUrl }: { asset: AssetRef; loadAssetUrl: Lo
   }, [url])
 
   return (
-    <Card className="w-64 overflow-hidden py-0">
+    <Card className="w-64 max-w-full overflow-hidden py-0">
       <CardContent className="p-0">
         {error ? (
-          <div role="alert" className="flex flex-col gap-2 p-3 text-sm text-destructive">
+          <div role="alert" className="flex flex-col gap-2 p-3 text-sm [overflow-wrap:anywhere] text-destructive">
             <p>{error}</p>
             <Button size="sm" variant="outline" onClick={() => setAttempt((value) => value + 1)}>
               Повторить
@@ -268,7 +268,7 @@ function ChatMessage({ message, models, loadAssetUrl }: ChatMessageProps) {
         aria-label={SYSTEM_TITLES[kind]}
         data-kind={kind}
         className={cn(
-          'mx-auto w-full max-w-prose rounded-md border px-3 py-2 text-sm',
+          'mx-auto w-full max-w-prose rounded-md border px-3 py-2 text-sm [overflow-wrap:anywhere]',
           kind === 'refusal'
             ? 'border-destructive/50 text-destructive'
             : 'border-dashed bg-muted text-muted-foreground',
@@ -282,7 +282,7 @@ function ChatMessage({ message, models, loadAssetUrl }: ChatMessageProps) {
 
   if (message.role === 'user') {
     return (
-      <div className="ml-auto max-w-[80%] rounded-lg bg-secondary px-3 py-2 text-sm whitespace-pre-wrap text-secondary-foreground">
+      <div className="ml-auto max-w-[85%] rounded-lg bg-secondary px-3 py-2 text-sm [overflow-wrap:anywhere] whitespace-pre-wrap text-secondary-foreground md:max-w-[80%]">
         {text}
       </div>
     )
@@ -291,7 +291,10 @@ function ChatMessage({ message, models, loadAssetUrl }: ChatMessageProps) {
   const model = models.find((profile) => profile.id === custom.effective_model)
   const isPending = message.status?.type === 'running'
   return (
-    <article aria-label="Ответ ассистента" className="flex max-w-[80%] flex-col gap-2 text-sm">
+    <article
+      aria-label="Ответ ассистента"
+      className="flex max-w-[85%] min-w-0 flex-col gap-2 text-sm [overflow-wrap:anywhere] md:max-w-[80%]"
+    >
       {custom.asset && <AssetImage asset={custom.asset} loadAssetUrl={loadAssetUrl} />}
       {text && <p className="whitespace-pre-wrap">{text}</p>}
       {custom.incomplete && <p className="text-xs text-destructive">Ответ не завершён</p>}

@@ -13,7 +13,10 @@ import {
 
 export function UpdateNotice() {
   return (
-    <div role="status" className="flex items-center justify-center gap-3 border-b bg-muted px-4 py-2 text-sm">
+    <div
+      role="status"
+      className="flex flex-wrap items-center justify-center gap-3 border-b bg-muted px-4 py-2 pt-[max(0.5rem,env(safe-area-inset-top))] text-sm"
+    >
       <span>Доступна новая версия.</span>
       <Button size="sm" variant="outline" onClick={() => window.location.reload()}>
         Обновить страницу
@@ -66,7 +69,7 @@ export function LoadingStatus({ label }: { label: string }) {
 export function SessionErrorNotice({ error, onRetry }: { error: ApiError; onRetry: () => void }) {
   return (
     <main className="flex flex-1 items-center justify-center p-4">
-      <Alert variant="destructive" className="w-full max-w-sm">
+      <Alert variant="destructive" className="w-full max-w-sm [overflow-wrap:anywhere]">
         <AlertTitle>Не удалось проверить сеанс</AlertTitle>
         <AlertDescription>
           <p>{error.message}</p>
@@ -82,7 +85,7 @@ export function SessionErrorNotice({ error, onRetry }: { error: ApiError; onRetr
 export function RunErrorNotice({ error }: { error: ApiError }) {
   const cancelled = error.code === 'run_cancelled'
   return (
-    <Alert variant={cancelled ? 'default' : 'destructive'} className="mx-4 w-auto">
+    <Alert variant={cancelled ? 'default' : 'destructive'} className="mx-3 w-auto [overflow-wrap:anywhere] md:mx-4">
       <AlertTitle>{cancelled ? 'Запрос отменён' : 'Не удалось получить ответ'}</AlertTitle>
       <AlertDescription>
         <p>{error.message}</p>

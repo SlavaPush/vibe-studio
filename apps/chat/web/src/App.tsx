@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react'
+import { Menu, X } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
 import { ChatThread } from '@/components/chat/ChatThread'
 import { ConversationList } from '@/components/chat/ConversationList'
 import { LoginScreen } from '@/components/chat/LoginScreen'
@@ -12,6 +13,8 @@ import {
   UpdateNotice,
 } from '@/components/chat/Notices'
 import { ThemeToggle } from '@/components/ThemeToggle'
+import { Button } from '@/components/ui/button'
+import { Sheet, SheetClose, SheetContent, SheetTitle, SheetTrigger } from '@/components/ui/sheet'
 import type { ConversationActions } from '@/store/assistantAdapter'
 import type { ChatController } from '@/store/chatController'
 import { hasActiveRun, NO_CONVERSATION, useChatState, type ChatStore } from '@/store/conversations'
@@ -20,6 +23,8 @@ interface AppProps {
   store: ChatStore
   controller: ChatController
 }
+
+const DESKTOP_QUERY = '(min-width: 768px)'
 
 export default function App({ store, controller }: AppProps) {
   const state = useChatState(store, (current) => current)
@@ -30,6 +35,7 @@ export default function App({ store, controller }: AppProps) {
     [controller],
   )
   const [updatePrompt, setUpdatePrompt] = useState<'pending' | 'open' | 'closed'>('pending')
+  const [navOpen, setNavOpen] = useState(false)
   if (
     state.updateAvailable &&
     updatePrompt === 'pending' &&
@@ -40,8 +46,18 @@ export default function App({ store, controller }: AppProps) {
     setUpdatePrompt('open')
   }
 
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return
+    const query = window.matchMedia(DESKTOP_QUERY)
+    const close = () => {
+      if (query.matches) setNavOpen(false)
+    }
+    query.addEventListener('change', close)
+    return () => query.removeEventListener('change', close)
+  }, [])
+
   return (
-    <div className="flex h-dvh flex-col">
+    <div className="flex h-dvh flex-col pr-[env(safe-area-inset-right)] pl-[env(safe-area-inset-left)]">
       {state.updateAvailable && updatePrompt !== 'open' && <UpdateNotice />}
       <UpdateDialog open={updatePrompt === 'open'} onLater={() => setUpdatePrompt('closed')} />
       {!state.sessionChecked ? (
@@ -51,39 +67,73 @@ export default function App({ store, controller }: AppProps) {
       ) : state.sessionError ? (
         <SessionErrorNotice error={state.sessionError} onRetry={() => void controller.start()} />
       ) : state.session ? (
-        <div className="flex min-h-0 flex-1">
-          <aside className="w-64 shrink-0 overflow-y-auto border-r">
-            <ConversationList
-              conversations={state.conversations}
-              activeId={state.activeConversationId}
-              onSelect={(id) => void controller.selectConversation(id)}
-              onCreate={() => void controller.createConversation()}
-              onRename={(id, title) => void controller.renameConversation(id, title)}
-            />
-          </aside>
-          <main className="flex min-w-0 flex-1 flex-col">
-            <header className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3">
-              <h1 className="truncate text-base font-semibold">{active?.title ?? 'vibe-chat'}</h1>
-              <div className="flex items-center gap-3">
-                <ModelSelector
-                  models={state.models}
-                  value={state.selectedModel}
-                  onChange={store.selectModel}
-                />
-                <ThemeToggle />
+        <Sheet open={navOpen} onOpenChange={setNavOpen}>
+          <div className="flex min-h-0 flex-1">
+            <aside className="hidden w-64 shrink-0 overflow-y-auto border-r md:block">
+              <ConversationList
+                conversations={state.conversations}
+                activeId={state.activeConversationId}
+                onSelect={(id) => void controller.selectConversation(id)}
+                onCreate={() => void controller.createConversation()}
+                onRename={(id, title) => void controller.renameConversation(id, title)}
+              />
+            </aside>
+            <SheetContent aria-describedby={undefined}>
+              <div className="flex items-center justify-between gap-2 border-b py-1 pr-1 pl-3">
+                <SheetTitle>Диалоги</SheetTitle>
+                <SheetClose asChild>
+                  <Button variant="ghost" size="icon" aria-label="Закрыть список диалогов">
+                    <X aria-hidden="true" />
+                  </Button>
+                </SheetClose>
               </div>
-            </header>
-            <ChatThread
-              store={store}
-              actions={actions}
-              loadAssetUrl={controller.loadAssetUrl}
-              queue={
-                <MessageQueue store={store} onRemove={controller.removeQueued} onResume={controller.resumeQueue} />
-              }
-            />
-            {error && <RunErrorNotice error={error} />}
-          </main>
-        </div>
+              <div className="min-h-0 flex-1 overflow-y-auto">
+                <ConversationList
+                  conversations={state.conversations}
+                  activeId={state.activeConversationId}
+                  onSelect={(id) => {
+                    setNavOpen(false)
+                    void controller.selectConversation(id)
+                  }}
+                  onCreate={() => {
+                    setNavOpen(false)
+                    void controller.createConversation()
+                  }}
+                  onRename={(id, title) => void controller.renameConversation(id, title)}
+                />
+              </div>
+            </SheetContent>
+            <main className="flex min-w-0 flex-1 flex-col">
+              <header className="flex flex-col gap-2 border-b px-3 pt-[max(0.75rem,env(safe-area-inset-top))] pb-2 md:flex-row md:flex-wrap md:items-center md:justify-between md:gap-3 md:px-4 md:py-3">
+                <div className="flex min-w-0 items-center gap-2">
+                  <SheetTrigger asChild>
+                    <Button variant="ghost" size="icon" className="md:hidden" aria-label="Открыть список диалогов">
+                      <Menu aria-hidden="true" />
+                    </Button>
+                  </SheetTrigger>
+                  <h1 className="min-w-0 flex-1 truncate text-base font-semibold">{active?.title ?? 'vibe-chat'}</h1>
+                </div>
+                <div className="flex min-w-0 items-center gap-2 md:gap-3">
+                  <ModelSelector
+                    models={state.models}
+                    value={state.selectedModel}
+                    onChange={store.selectModel}
+                  />
+                  <ThemeToggle className="shrink-0" />
+                </div>
+              </header>
+              <ChatThread
+                store={store}
+                actions={actions}
+                loadAssetUrl={controller.loadAssetUrl}
+                queue={
+                  <MessageQueue store={store} onRemove={controller.removeQueued} onResume={controller.resumeQueue} />
+                }
+              />
+              {error && <RunErrorNotice error={error} />}
+            </main>
+          </div>
+        </Sheet>
       ) : (
         <LoginScreen onSubmit={controller.signIn} />
       )}

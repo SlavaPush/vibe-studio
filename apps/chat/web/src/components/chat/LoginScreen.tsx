@@ -31,11 +31,11 @@ export function LoginScreen({ onSubmit }: LoginScreenProps) {
   }
 
   return (
-    <main className="relative flex flex-1 items-center justify-center p-4">
-      <div className="absolute top-4 right-4">
+    <main className="relative flex min-h-0 flex-1 flex-col items-center gap-4 overflow-y-auto p-4 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))]">
+      <div className="self-end md:absolute md:top-4 md:right-4">
         <ThemeToggle />
       </div>
-      <Card className="w-full max-w-sm">
+      <Card className="my-auto w-full max-w-sm">
         <CardHeader>
           <CardTitle>
             <h1>Вход в vibe-chat</h1>
@@ -54,7 +54,7 @@ export function LoginScreen({ onSubmit }: LoginScreenProps) {
               autoComplete="off"
             />
             {error && (
-              <p id="demo-code-error" role="alert" className="text-sm text-destructive">
+              <p id="demo-code-error" role="alert" className="text-sm [overflow-wrap:anywhere] text-destructive">
                 {error}
               </p>
             )}
