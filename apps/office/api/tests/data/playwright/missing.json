@@ -1,0 +1,174 @@
+{
+  "config": {
+    "argv": [
+      "/usr/bin/node",
+      "/usr/bin/playwright",
+      "test",
+      "--config",
+      "/cfg/playwright.config.ts",
+      "missing.pw.ts"
+    ],
+    "configFile": "/cfg/playwright.config.ts",
+    "rootDir": "/qa",
+    "failOnFlakyTests": false,
+    "forbidOnly": true,
+    "fullyParallel": false,
+    "globalSetup": null,
+    "globalTeardown": null,
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {
+      "actualWorkers": 1
+    },
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "/tmp/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "",
+        "name": "",
+        "testDir": "/qa",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.pw.ts"
+        ],
+        "timeout": 5000
+      }
+    ],
+    "filteredProjects": [
+      {
+        "grep": {},
+        "grepInvert": null,
+        "outputDir": "/tmp/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "name": "",
+        "testDir": "/qa",
+        "snapshotDir": "/qa",
+        "testIgnore": [],
+        "testMatch": "**/*.pw.ts",
+        "timeout": 5000,
+        "use": {},
+        "dependencies": [],
+        "ignoreSnapshots": false,
+        "__projectId": ""
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "line",
+        null
+      ],
+      [
+        "json",
+        {
+          "outputFile": "/data/missing.json"
+        }
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "default",
+    "updateSourceMethod": "patch",
+    "version": "1.64.1",
+    "workers": 1,
+    "webServer": null
+  },
+  "suites": [
+    {
+      "title": "apps/chat/web/e2e/office/missing.pw.ts",
+      "file": "apps/chat/web/e2e/office/missing.pw.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "клик по отсутствующему диалогу",
+          "ok": false,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 5000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "failed",
+                  "duration": 1086,
+                  "error": {
+                    "message": "TimeoutError: locator.click: Timeout 1000ms exceeded.\nCall log:\n\u001b[2m  - waiting for getByRole('button', { name: 'Диалог из теста', exact: true })\u001b[22m\n",
+                    "stack": "TimeoutError: locator.click: Timeout 1000ms exceeded.\nCall log:\n\u001b[2m  - waiting for getByRole('button', { name: 'Диалог из теста', exact: true })\u001b[22m\n\n    at /qa/apps/chat/web/e2e/office/missing.pw.ts:5:76",
+                    "location": {
+                      "file": "/qa/apps/chat/web/e2e/office/missing.pw.ts",
+                      "column": 76,
+                      "line": 5
+                    },
+                    "snippet": "\u001b[0m \u001b[90m 3 |\u001b[39m test(\u001b[32m\"клик по отсутствующему диалогу\"\u001b[39m\u001b[33m,\u001b[39m \u001b[36masync\u001b[39m ({ page }) \u001b[33m=>\u001b[39m {\n \u001b[90m 4 |\u001b[39m   \u001b[36mawait\u001b[39m page\u001b[33m.\u001b[39msetContent(\u001b[32m`<nav aria-label=\"Диалоги\"><button>Новый диалог</button></nav>`\u001b[39m)\u001b[33m;\u001b[39m\n\u001b[31m\u001b[1m>\u001b[22m\u001b[39m\u001b[90m 5 |\u001b[39m   \u001b[36mawait\u001b[39m page\u001b[33m.\u001b[39mgetByRole(\u001b[32m\"button\"\u001b[39m\u001b[33m,\u001b[39m { name\u001b[33m:\u001b[39m \u001b[32m\"Диалог из теста\"\u001b[39m\u001b[33m,\u001b[39m exact\u001b[33m:\u001b[39m \u001b[36mtrue\u001b[39m })\u001b[33m.\u001b[39mclick({ timeout\u001b[33m:\u001b[39m \u001b[35m1000\u001b[39m })\u001b[33m;\u001b[39m\n \u001b[90m   |\u001b[39m                                                                            \u001b[31m\u001b[1m^\u001b[22m\u001b[39m\n \u001b[90m 6 |\u001b[39m   \u001b[36mawait\u001b[39m expect(page\u001b[33m.\u001b[39mgetByText(\u001b[32m\"Ответ\"\u001b[39m))\u001b[33m.\u001b[39mtoBeVisible()\u001b[33m;\u001b[39m\n \u001b[90m 7 |\u001b[39m })\u001b[33m;\u001b[39m\n \u001b[90m 8 |\u001b[39m\u001b[0m"
+                  },
+                  "errors": [
+                    {
+                      "location": {
+                        "file": "/qa/apps/chat/web/e2e/office/missing.pw.ts",
+                        "column": 76,
+                        "line": 5
+                      },
+                      "message": "TimeoutError: locator.click: Timeout 1000ms exceeded.\nCall log:\n\u001b[2m  - waiting for getByRole('button', { name: 'Диалог из теста', exact: true })\u001b[22m\n\n\n  3 | test(\"клик по отсутствующему диалогу\", async ({ page }) => {\n  4 |   await page.setContent(`<nav aria-label=\"Диалоги\"><button>Новый диалог</button></nav>`);\n> 5 |   await page.getByRole(\"button\", { name: \"Диалог из теста\", exact: true }).click({ timeout: 1000 });\n    |                                                                            ^\n  6 |   await expect(page.getByText(\"Ответ\")).toBeVisible();\n  7 | });\n  8 |\n    at /qa/apps/chat/web/e2e/office/missing.pw.ts:5:76"
+                    }
+                  ],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T12:24:05.442Z",
+                  "annotations": [],
+                  "attachments": [
+                    {
+                      "name": "error-context",
+                      "contentType": "text/markdown",
+                      "path": "/tmp/test-results/apps-chat-web-e2e-office-m-d28bc-к-по-отсутствующему-диалогу/error-context.md"
+                    }
+                  ],
+                  "errorLocation": {
+                    "file": "/qa/apps/chat/web/e2e/office/missing.pw.ts",
+                    "column": 76,
+                    "line": 5
+                  }
+                }
+              ],
+              "status": "unexpected"
+            }
+          ],
+          "id": "b654a393caecb2e08e5c-c750b2bf9c539d33b1d4",
+          "file": "apps/chat/web/e2e/office/missing.pw.ts",
+          "line": 3,
+          "column": 5
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-10-24T12:24:05.137Z",
+    "duration": 1594.487,
+    "expected": 0,
+    "skipped": 0,
+    "unexpected": 1,
+    "flaky": 0
+  }
+}

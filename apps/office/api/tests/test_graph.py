@@ -4,7 +4,7 @@ import uuid
 from datetime import timedelta
 
 import pytest
-from conftest import QA_TEST, UI_TASK, ScriptedGateway, developer_answer, git, qa_answer, wait_for
+from conftest import QA_TEST, UI_TASK, FakeSuite, ScriptedGateway, developer_answer, git, qa_answer, wait_for
 from langgraph.types import Command
 
 from app.db import utcnow
@@ -299,26 +299,35 @@ def test_crash_after_transition_does_not_repeat_it(office, origin, tmp_path, gra
         assert len(office_commits(second, task_id, "developer")) == 2
 
 
-def test_crash_after_qa_commit_keeps_qa_findings(office, origin, tmp_path, graph):
+@pytest.mark.parametrize("moment", ["before", "after"])
+def test_crash_around_qa_commit_keeps_qa_findings(office, origin, tmp_path, graph, moment):
     app, client, me = graph
     finding = {"blocking": True, "criterion": 1, "file": None, "line": None, "text": "Кнопка не подписана."}
     app.state.gateway.handlers["qa"] = lambda call: qa_answer(call, findings=[finding])
     workspace = app.state.workspace
     original = workspace.commit
+    crashed = threading.Event()
 
     def failing_commit(task_id, message, role=None):
+        if role == AgentRole.qa and moment == "before":
+            crashed.set()
+            crash(app)
         sha = original(task_id, message, role)
         if role == AgentRole.qa:
+            crashed.set()
             crash(app)
         return sha
 
     workspace.commit = failing_commit
     task_id = create(app, me["id"])
     approve(client, app, task_id)
-    wait_for(lambda: office_commits(app, task_id, "qa"), 30, "qa commit")
+    assert crashed.wait(30)
     wait_for(lambda: not app.state.runner.active(task_id), 30, "crashed run")
     office.stop_app(app)
     assert status(app, task_id) == TaskStatus.reviewing
+    assert len(office_commits(app, task_id, "qa")) == (0 if moment == "before" else 1)
+    state = json.loads((app.state.settings.artifacts_dir / task_id / "qa-state-0-1.json").read_text())
+    assert (state["phase"], state["changed"]) == ("answered", True)
 
     fresh = ScriptedGateway(app.state.settings)
     fresh.versions = 100
@@ -330,6 +339,105 @@ def test_crash_after_qa_commit_keeps_qa_findings(office, origin, tmp_path, graph
     assert saved["findings"] == [{"id": "qa-0-1", "source": "qa"} | finding]
     assert len(fresh.role_calls("qa")) == 1
     assert "Кнопка не подписана." in fresh.role_calls("developer")[0].user
+    [qa_sha] = office_commits(second, task_id, "qa")
+    assert saved["qa_sha"] == qa_sha
+    state = json.loads((second.state.settings.artifacts_dir / task_id / "qa-state-0-1.json").read_text())
+    assert (state["phase"], state["qa_try"], state["qa_sha"]) == ("done", 1, qa_sha)
+
+
+def test_crash_during_qa_call_repeats_same_attempt(office, origin, tmp_path, graph):
+    app, client, me = graph
+    app.state.gateway.handlers["qa"] = lambda call: crash(app)
+    task_id = create(app, me["id"])
+    approve(client, app, task_id)
+    wait_for(lambda: app.state.gateway.role_calls("qa", task_id), 30, "qa call")
+    wait_for(lambda: not app.state.runner.active(task_id), 30, "crashed run")
+    office.stop_app(app)
+    state = json.loads((app.state.settings.artifacts_dir / task_id / "qa-state-0-1.json").read_text())
+    assert (state["phase"], state["qa_try"]) == ("calling", 1)
+
+    fresh = ScriptedGateway(app.state.settings)
+    second = office.graph_app(origin, tmp_path, gateway=fresh)
+    wait_status(second, task_id, TaskStatus.awaiting_integration, TaskStatus.failed, TaskStatus.needs_attention)
+    assert status(second, task_id) == TaskStatus.awaiting_integration
+    [qa_call] = fresh.role_calls("qa")
+    assert "Результат прошлой попытки" not in qa_call.user
+    [qa_sha] = office_commits(second, task_id, "qa")
+    assert git(worktree(second, task_id), "log", "-1", "--format=%(trailers:key=Office-Round,valueonly)", qa_sha) == "0-1-1"
+
+
+def test_crash_after_unchanged_recheck_answer_sends_finding_without_new_qa_call(office, origin, tmp_path, graph):
+    app, client, me = graph
+    store = app.state.store
+    workspace = app.state.workspace
+    original = workspace.commit
+    commits = {"qa": 0}
+
+    def failing_commit(task_id, message, role=None):
+        if role == AgentRole.qa:
+            commits["qa"] += 1
+            if commits["qa"] == 2:
+                crash(app)
+        return original(task_id, message, role)
+
+    def e2e(task_id, app_sha, test_file):
+        if app_sha == store.get_task(task_id).base_sha:
+            return E2EResult("failed", line=3, message="no button")
+        return E2EResult("failed", line=8, message="Expected copy button")
+
+    workspace.commit = failing_commit
+    app.state.suite.e2e = e2e
+    task_id = create(app, me["id"])
+    approve(client, app, task_id)
+    wait_for(lambda: commits["qa"] == 2, 30, "second qa commit")
+    wait_for(lambda: not app.state.runner.active(task_id), 30, "crashed run")
+    office.stop_app(app)
+    state = json.loads((app.state.settings.artifacts_dir / task_id / "qa-state-0-1.json").read_text())
+    assert (state["phase"], state["qa_try"], state["changed"]) == ("answered", 2, False)
+    assert state["pending"] == {"line": 8, "message": "Expected copy button"}
+
+    fresh = ScriptedGateway(app.state.settings)
+    fresh.versions = 100
+    second = office.graph_app(origin, tmp_path, gateway=fresh)
+    wait_status(second, task_id, TaskStatus.awaiting_integration, TaskStatus.failed, TaskStatus.needs_attention)
+    assert status(second, task_id) == TaskStatus.awaiting_integration
+    assert len(fresh.role_calls("qa")) == 1
+    assert "Expected copy button" in fresh.role_calls("developer")[0].user
+    saved = json.loads((second.state.settings.artifacts_dir / task_id / "review-0-qa.json").read_text())
+    [qa_sha] = office_commits(second, task_id, "qa")
+    assert saved["qa_sha"] == qa_sha and saved["findings"][-1]["text"] == "Expected copy button"
+    assert len([call for call in second.state.suite.calls if call[3]]) == 2
+
+
+def test_restart_after_second_qa_attempt_continues_with_last_attempt(office, origin, tmp_path, graph, monkeypatch):
+    app, client, me = graph
+    app.state.suite.e2e = lambda task_id, app_sha, test_file: E2EResult("passed")
+    original = TaskGraph.save_qa_state
+    crashed = threading.Event()
+
+    def failing_save(self, path, data):
+        original(self, path, data)
+        if data["phase"] == "checked" and data["qa_try"] == 2 and not crashed.is_set():
+            crashed.set()
+            crash(app)
+
+    monkeypatch.setattr(TaskGraph, "save_qa_state", failing_save)
+    task_id = create(app, me["id"])
+    approve(client, app, task_id)
+    assert crashed.wait(30)
+    wait_for(lambda: not app.state.runner.active(task_id), 30, "crashed run")
+    office.stop_app(app)
+    assert len(app.state.gateway.role_calls("qa")) == 2
+
+    fresh = ScriptedGateway(app.state.settings)
+    suite = FakeSuite(app.state.store)
+    suite.e2e = lambda task_id, app_sha, test_file: E2EResult("passed")
+    second = office.graph_app(origin, tmp_path, gateway=fresh, suite=suite)
+    wait_status(second, task_id, TaskStatus.needs_attention, TaskStatus.awaiting_integration)
+    [qa_call] = fresh.role_calls("qa")
+    assert "Тест прошёл на исходной версии" in qa_call.user
+    finished = [event for event in events(second, task_id, "role_finished") if event.role == "qa"]
+    assert finished[-1].payload["summary"] == "Тест QA проходит на исходной версии после трёх попыток."
 
 
 def test_immediate_approval_after_retry_continues_new_attempt(graph):
@@ -661,6 +769,11 @@ def test_qa_failure_on_task_version_becomes_blocking_finding(graph):
     }
     developer = app.state.gateway.role_calls("developer")
     assert len(developer) == 2 and "Expected visible button" in developer[1].user
+    qa_calls = app.state.gateway.role_calls("qa")
+    assert len(qa_calls) == 3
+    assert "Тест не проходит на версии задачи (строка 7):\nExpected visible button" in qa_calls[1].user
+    assert "оставьте файл теста без изменений" in qa_calls[1].user
+    assert len([call for call in app.state.suite.calls if call[3]]) == 4
     assert app.state.store.get_task(task_id).fix_cycles == 1
     assert json.loads((app.state.settings.artifacts_dir / task_id / "review-1-qa.json").read_text())["findings"] == []
 
@@ -672,10 +785,10 @@ def test_qa_test_passing_on_base_is_rejected(graph):
     approve(client, app, task_id)
     wait_status(app, task_id, TaskStatus.needs_attention)
     qa_calls = app.state.gateway.role_calls("qa")
-    assert len(qa_calls) == 2
-    assert "Тест прошёл на исходной версии" in qa_calls[1].user
+    assert len(qa_calls) == 3
+    assert all("Тест прошёл на исходной версии" in call.user for call in qa_calls[1:])
     finished = [event for event in events(app, task_id, "role_finished") if event.role == "qa"]
-    assert finished[-1].payload["summary"] == "Тест QA проходит на исходной версии после двух попыток."
+    assert finished[-1].payload["summary"] == "Тест QA проходит на исходной версии после трёх попыток."
     assert not (app.state.settings.artifacts_dir / task_id / "review-0-qa.json").exists()
 
 
@@ -714,6 +827,123 @@ def test_missing_qa_evidence_is_retried_once(graph):
     assert len([call for call in app.state.suite.calls if call[3]]) == 2
     finished = [event for event in events(app, task_id, "role_finished") if event.role == "qa"]
     assert finished[-1].payload["summary"].startswith("Нет свидетельства QA")
+
+
+STRICT = E2EResult(
+    "test_error",
+    "Тест QA завершился ошибкой до проверки утверждения.",
+    line=7,
+    message="Error: locator.click: Error: strict mode violation: getByRole('button', { name: 'Кот в скафандре' }) resolved to 2 elements",
+)
+
+
+def rewriting_qa(*contents):
+    answers = iter(contents)
+
+    def qa(call):
+        answer = qa_answer(call)
+        answer["actions"][0]["content"] = next(answers)
+        return answer
+
+    return qa
+
+
+@pytest.mark.parametrize("version", ["base", "task"])
+def test_test_error_gives_qa_another_attempt_with_playwright_message(graph, version):
+    app, client, me = graph
+    store = app.state.store
+    seen = {"errors": 0}
+
+    def e2e(task_id, app_sha, test_file):
+        on_base = app_sha == store.get_task(task_id).base_sha
+        if (version == "base") == on_base and seen["errors"] == 0:
+            seen["errors"] += 1
+            return STRICT
+        return E2EResult("failed", line=3, message="no button") if on_base else E2EResult("passed")
+
+    app.state.suite.e2e = e2e
+    app.state.gateway.handlers["qa"] = rewriting_qa(QA_TEST, QA_TEST.replace("feature", "feature exact"))
+    task_id = create(app, me["id"])
+    approve(client, app, task_id)
+    wait_status(app, task_id, TaskStatus.awaiting_integration)
+    first, second = app.state.gateway.role_calls("qa")
+    where = "исходной версии" if version == "base" else "версии задачи"
+    assert STRICT.message not in first.user
+    assert f"Тест QA завершился ошибкой до проверки утверждения на {where} (строка 7):\n{STRICT.message}" in second.user
+    assert "exact: true" in second.user and "mockApi" in second.user
+    assert len(app.state.gateway.role_calls("developer")) == 1
+    assert len(office_commits(app, task_id, "qa")) == 2
+    assert json.loads((app.state.settings.artifacts_dir / task_id / "review-0-qa.json").read_text())["findings"] == []
+
+
+def test_test_error_three_times_needs_attention(graph):
+    app, client, me = graph
+    app.state.suite.e2e = lambda task_id, app_sha, test_file: STRICT
+    task_id = create(app, me["id"])
+    approve(client, app, task_id)
+    wait_status(app, task_id, TaskStatus.needs_attention)
+    qa_calls = app.state.gateway.role_calls("qa")
+    assert len(qa_calls) == 3 and all(STRICT.message in call.user for call in qa_calls[1:])
+    assert len([call for call in app.state.suite.calls if call[3]]) == 3
+    assert len(app.state.gateway.role_calls("developer")) == 1
+    finished = [event for event in events(app, task_id, "role_finished") if event.role == "qa"]
+    assert finished[-1].payload["summary"].startswith(
+        "Тест QA завершается ошибкой до проверки утверждения после трёх попыток: Error: locator.click: Error: strict mode violation"
+    )
+    assert not list((app.state.settings.artifacts_dir / task_id).glob("review-*-qa.json"))
+
+
+def test_qa_fixes_own_test_after_failure_on_task_version(graph):
+    app, client, me = graph
+    store = app.state.store
+    seen = {"after": 0}
+
+    def e2e(task_id, app_sha, test_file):
+        if app_sha == store.get_task(task_id).base_sha:
+            return E2EResult("failed", line=3, message="no button")
+        seen["after"] += 1
+        return E2EResult("failed", line=5, message="Expected text «Копировать»") if seen["after"] == 1 else E2EResult("passed")
+
+    app.state.suite.e2e = e2e
+    app.state.gateway.handlers["qa"] = rewriting_qa(QA_TEST, QA_TEST.replace("feature", "feature fixed"))
+    task_id = create(app, me["id"])
+    approve(client, app, task_id)
+    wait_status(app, task_id, TaskStatus.awaiting_integration)
+    qa_calls = app.state.gateway.role_calls("qa")
+    assert len(qa_calls) == 2 and "Expected text «Копировать»" in qa_calls[1].user
+    assert len(app.state.gateway.role_calls("developer")) == 1
+    assert app.state.store.get_task(task_id).fix_cycles == 0
+    first, second = office_commits(app, task_id, "qa")[::-1]
+    root = worktree(app, task_id)
+    assert git(root, "log", "-1", "--format=%(trailers:key=Office-Round,valueonly)", second) == "0-1-2"
+    assert [call[1:3] for call in app.state.suite.calls if call[3]][2:] == [
+        (store.get_task(task_id).base_sha, second), (second, second)
+    ]
+    assert json.loads((app.state.settings.artifacts_dir / task_id / "review-0-qa.json").read_text())["findings"] == []
+
+
+def test_fixed_test_failing_again_goes_to_developer(graph):
+    app, client, me = graph
+    store = app.state.store
+    seen = {"after": 0}
+
+    def e2e(task_id, app_sha, test_file):
+        if app_sha == store.get_task(task_id).base_sha:
+            return E2EResult("failed", line=3, message="no button")
+        seen["after"] += 1
+        if seen["after"] <= 2:
+            return E2EResult("failed", line=5, message=f"assertion {seen['after']}")
+        return E2EResult("passed")
+
+    app.state.suite.e2e = e2e
+    app.state.gateway.handlers["qa"] = rewriting_qa(QA_TEST, QA_TEST.replace("feature", "feature fixed"), QA_TEST)
+    task_id = create(app, me["id"])
+    approve(client, app, task_id)
+    wait_status(app, task_id, TaskStatus.awaiting_integration)
+    assert len(app.state.gateway.role_calls("qa")) == 3
+    developer = app.state.gateway.role_calls("developer")
+    assert len(developer) == 2 and "assertion 2" in developer[1].user and "assertion 1" not in developer[1].user
+    assert app.state.store.get_task(task_id).fix_cycles == 1
 
 
 UNMOCKED = E2EResult("invalid", "Тест QA обратился к API vibe-chat без подмены: GET /api/me.")
@@ -758,11 +988,11 @@ def test_unmocked_api_twice_needs_attention_without_developer_finding(graph):
     approve(client, app, task_id)
     wait_status(app, task_id, TaskStatus.needs_attention)
     qa_calls = app.state.gateway.role_calls("qa")
-    assert len(qa_calls) == 2 and UNMOCKED.reason in qa_calls[1].user
+    assert len(qa_calls) == 3 and all(UNMOCKED.reason in call.user for call in qa_calls[1:])
     assert len(app.state.gateway.role_calls("developer")) == 1
     assert store.get_task(task_id).fix_cycles == 0
     finished = [event for event in events(app, task_id, "role_finished") if event.role == "qa"]
-    assert finished[-1].payload["summary"] == "Тест QA обращается к API vibe-chat без подмены после двух попыток."
+    assert finished[-1].payload["summary"] == "Тест QA обращается к API vibe-chat без подмены после трёх попыток."
     assert not list((app.state.settings.artifacts_dir / task_id).glob("review-*-qa.json"))
 
 

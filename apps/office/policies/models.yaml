@@ -61,7 +61,7 @@ profiles:
     supervisor: {provider: anthropic, model: claude-haiku-5-5, effort: low, fallback: openai/gpt-6-luna, max_output_tokens: 8192}
     researcher: {provider: anthropic, model: claude-haiku-5-5, effort: low, fallback: openai/gpt-6-luna, max_output_tokens: 8192}
     developer: {provider: anthropic, model: claude-sonnet-5-5, effort: high, fallback: openai/gpt-6.1-sol, max_output_tokens: 32000}
-    qa: {provider: anthropic, model: claude-haiku-5-5, effort: low, fallback: openai/gpt-6-luna, max_output_tokens: 16000}
+    qa: {provider: anthropic, model: claude-sonnet-5-5, effort: high, fallback: openai/gpt-6.1-sol, max_output_tokens: 16000}
     critic: {provider: anthropic, model: claude-sonnet-5-5, effort: high, fallback: openai/gpt-6.1-sol, max_output_tokens: 16000}
     pr_reviewer: {provider: anthropic, model: claude-sonnet-5-5, effort: high, fallback: openai/gpt-6.1-sol, max_output_tokens: 16000}
     intake_filter: {provider: anthropic, model: claude-haiku-5-5, effort: low, fallback: openai/gpt-6-luna}
@@ -69,7 +69,7 @@ profiles:
     supervisor: {provider: ollama, model: qwen3:8b, effort: off, max_output_tokens: 4096}
     researcher: {provider: ollama, model: qwen3:8b, effort: off, max_output_tokens: 4096}
     developer: {provider: anthropic, model: claude-sonnet-5-5, effort: high, fallback: openai/gpt-6.1-sol, max_output_tokens: 32000}
-    qa: {provider: ollama, model: qwen3:8b, effort: off, max_output_tokens: 4096}
+    qa: {provider: anthropic, model: claude-haiku-5-5, effort: low, fallback: openai/gpt-6-luna, max_output_tokens: 16000}
     critic: {provider: anthropic, model: claude-sonnet-5-5, effort: high, fallback: openai/gpt-6.1-sol, max_output_tokens: 16000}
     pr_reviewer: {provider: anthropic, model: claude-sonnet-5-5, effort: high, fallback: openai/gpt-6.1-sol, max_output_tokens: 16000}
     intake_filter: {provider: anthropic, model: claude-haiku-5-5, effort: low, fallback: openai/gpt-6-luna}

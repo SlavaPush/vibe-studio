@@ -601,6 +601,7 @@ def result(status, *errors):
 
 FAILURE = {"message": "\x1b[31mError: expect(locator).toBeVisible() failed\x1b[39m", "location": {"file": f"/qa/{QA_FILE}", "line": 12, "column": 5}}
 TIMEOUT = {"message": "Test timeout of 30000ms exceeded."}
+LOCATOR = {"message": "Error: locator.click: Timeout 1000ms exceeded.", "location": {"file": f"/qa/{QA_FILE}", "line": 9, "column": 3}}
 
 
 @pytest.mark.parametrize(
@@ -623,10 +624,58 @@ TIMEOUT = {"message": "Test timeout of 30000ms exceeded."}
         (report(result("failed", {"message": "Error: page.goto: net::ERR_CONNECTION_REFUSED at http://127.0.0.1:4173/"})), "no_evidence"),
         (report(result("failed", {"message": "Error: Fixture \"page\" timeout of 30000ms exceeded during setup."})), "no_evidence"),
         (report(result("failed", FAILURE), result("failed", {"message": "Error: page.goto: net::ERR_ABORTED"})), "no_evidence"),
+        (report(result("failed", LOCATOR)), "test_error"),
+        (report(result("timedOut", TIMEOUT, LOCATOR)), "test_error"),
+        (report(result("failed", FAILURE), result("failed", LOCATOR)), "test_error"),
+        (report(result("failed", FAILURE, LOCATOR)), "test_error"),
+        (report(result("failed", FAILURE, TIMEOUT)), "failed"),
+        (report(result("failed", LOCATOR | {"location": {"file": "/qa/web/e2e/office/other.pw.ts", "line": 3}})), "no_evidence"),
+        (report(result("failed", {"message": "Error: Test timeout of 30000ms exceeded while setting up \"page\".", "location": LOCATOR["location"]})), "no_evidence"),
     ],
 )
 def test_playwright_report_parsing(data, expected):
     assert parse_playwright(data, QA_FILE).status == expected
+
+
+PLAYWRIGHT_REPORTS = Path(__file__).parent / "data" / "playwright"
+
+
+@pytest.mark.parametrize(
+    ("name", "status", "line", "text"),
+    [
+        ("strict", "test_error", 7, "strict mode violation: getByRole('button', { name: 'Кот в скафандре' }) resolved to 2 elements"),
+        ("missing", "test_error", 5, "locator.click: Timeout 1000ms exceeded."),
+        ("timeout", "test_error", 5, "locator.click: Test timeout of 5000ms exceeded."),
+        ("throw", "test_error", 6, "Error: Список диалогов не задан"),
+        ("helper", "test_error", 6, "Error: В подмене нет диалогов"),
+        ("assertion", "failed", 5, "toBeVisible() failed"),
+        ("noserver", "no_evidence", None, ""),
+    ],
+)
+def test_real_playwright_reports(name, status, line, text):
+    data = json.loads((PLAYWRIGHT_REPORTS / f"{name}.json").read_text(encoding="utf-8"))
+    parsed = parse_playwright(data, f"apps/chat/web/e2e/office/{name}.pw.ts")
+    assert (parsed.status, parsed.line) == (status, line)
+    assert text in parsed.message
+    assert "\x1b" not in parsed.message
+
+
+def test_test_error_message_is_cut():
+    long = LOCATOR | {"message": "\x1b[31mError: locator.click: " + "x" * 3000}
+    parsed = parse_playwright(report(result("failed", long)), QA_FILE)
+    assert parsed.status == "test_error" and parsed.line == 9
+    assert len(parsed.message) == 1500 and parsed.message.startswith("Error: locator.click: x")
+
+
+def test_locator_error_after_soft_assertion_in_same_result_is_test_error():
+    soft = FAILURE | {"message": "Error: expect.soft(locator).toBeVisible() failed"}
+    strict = {
+        "message": "Error: locator.click: Error: strict mode violation: getByRole('button') resolved to 2 elements",
+        "location": {"file": f"/qa/{QA_FILE}", "line": 14, "column": 3},
+    }
+    parsed = parse_playwright(report(result("failed", soft, strict)), QA_FILE)
+    assert (parsed.status, parsed.line) == ("test_error", 14)
+    assert "strict mode violation" in parsed.message
 
 
 def test_playwright_failure_details():
