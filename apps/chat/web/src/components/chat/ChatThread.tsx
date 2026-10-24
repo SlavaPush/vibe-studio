@@ -9,7 +9,7 @@ import {
   type MessageState,
 } from '@assistant-ui/react'
 import { ArrowUp, ListPlus, Square } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ApiRequestError } from '@/api/client'
 import type { AssetRef, AssetUrl, Effort, ModelProfile, SystemMessageKind } from '@/api/types'
 import { Button } from '@/components/ui/button'
@@ -39,6 +39,8 @@ const SYSTEM_TITLES: Record<SystemMessageKind, string> = {
 
 const COMPOSER_BUTTON = 'rounded-full md:h-9 md:w-auto md:rounded-md md:px-4'
 
+const COMPOSER_HINT = 'Enter — отправить, Shift+Enter — новая строка'
+
 const THINKING_DOT_DELAYS = ['[animation-delay:0ms]', '[animation-delay:200ms]', '[animation-delay:400ms]']
 
 export type LoadAssetUrl = (id: string) => Promise<AssetUrl>
@@ -54,6 +56,8 @@ export function ChatThread({ store, actions, loadAssetUrl, queue }: ChatThreadPr
   const storageKey = useChatState(store, (state) =>
     draftKey(state.session?.user_id ?? '', state.activeConversationId),
   )
+  const hintId = useId()
+  const dialogOpen = useChatState(store, (state) => state.activeConversationId != null)
   const runtimeRef = useRef<AssistantRuntime | null>(null)
   const threadActions = useMemo<ConversationActions>(
     () => ({
@@ -127,9 +131,15 @@ export function ChatThread({ store, actions, loadAssetUrl, queue }: ChatThreadPr
           </ThreadPrimitive.Messages>
         </ThreadPrimitive.Viewport>
         {queue}
-        <ComposerPrimitive.Root className="flex items-end gap-2 border-t p-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
+        <ComposerPrimitive.Root
+          className={cn(
+            'flex items-end gap-2 border-t px-4 pt-4',
+            dialogOpen ? 'pb-2' : 'pb-[max(1rem,env(safe-area-inset-bottom))]',
+          )}
+        >
           <ComposerPrimitive.Input
             aria-label="Сообщение"
+            aria-describedby={dialogOpen ? hintId : undefined}
             placeholder="Напишите сообщение"
             rows={1}
             onKeyDown={(event) => {
@@ -157,6 +167,14 @@ export function ChatThread({ store, actions, loadAssetUrl, queue }: ChatThreadPr
             </ComposerPrimitive.Cancel>
           </AuiIf>
         </ComposerPrimitive.Root>
+        {dialogOpen && (
+          <p
+            id={hintId}
+            className="pointer-events-none px-4 pb-[max(0.5rem,env(safe-area-inset-bottom))] text-xs text-muted-foreground select-none"
+          >
+            {COMPOSER_HINT}
+          </p>
+        )}
       </ThreadPrimitive.Root>
     </AssistantRuntimeProvider>
   )
