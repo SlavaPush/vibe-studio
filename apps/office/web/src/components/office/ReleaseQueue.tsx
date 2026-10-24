@@ -76,7 +76,7 @@ function ReleaseItem({ release, queue, participant, run, onRefresh }: ReleaseIte
         {active && <Badge variant="outline">Выполняется</Badge>}
         <span className="text-muted-foreground">Задача {release.task_id}</span>
       </div>
-      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+      <dl className="grid grid-cols-1 gap-x-3 gap-y-1 sm:grid-cols-[auto_minmax(0,1fr)]">
         <dt className="text-muted-foreground">Commit</dt>
         <dd className="font-mono break-all">{release.commit_sha}</dd>
         <dt className="text-muted-foreground">Предыдущая версия</dt>
@@ -220,7 +220,7 @@ function BlockedNotice({ blocked, queue, participant, run, onRefresh }: BlockedP
           {revert.pr_url && (
             <>
               {': '}
-              <a className="underline" href={revert.pr_url} target="_blank" rel="noreferrer">
+              <a className="tap-target underline" href={revert.pr_url} target="_blank" rel="noreferrer">
                 PR #{revert.pr_number}
               </a>
             </>

@@ -105,7 +105,7 @@ export function TaskForm({ run, onCreated }: TaskFormProps) {
                 value={profile}
                 disabled={pending}
                 onChange={(event) => setProfile(event.target.value as ModelProfile)}
-                className="h-9 rounded-md border border-input bg-background px-3 text-sm focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                className="h-11 rounded-md border border-input bg-background px-3 text-sm focus-visible:ring-[3px] focus-visible:ring-ring/50 desk:h-9"
               >
                 {MODEL_PROFILES.map((value) => (
                   <option key={value} value={value}>
