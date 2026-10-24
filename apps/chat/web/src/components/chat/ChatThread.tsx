@@ -37,6 +37,11 @@ const SYSTEM_TITLES: Record<SystemMessageKind, string> = {
   check_unavailable: 'Проверка недоступна',
 }
 
+const SYSTEM_HINTS: Partial<Record<SystemMessageKind, string>> = {
+  model_switched: 'Выбор модели в списке не изменился.',
+  check_unavailable: 'Сообщение не передано модели. Повторите позже.',
+}
+
 const COMPOSER_BUTTON = 'rounded-full md:h-9 md:w-auto md:rounded-md md:px-4'
 
 const THINKING_DOT_DELAYS = ['[animation-delay:0ms]', '[animation-delay:200ms]', '[animation-delay:400ms]']
@@ -102,6 +107,7 @@ export function ChatThread({ store, actions, loadAssetUrl, queue }: ChatThreadPr
     if (!id || state.loaded[id]) return 'ready'
     return state.errors[id] ? 'failed' : 'loading'
   })
+  const noConversation = useChatState(store, (state) => state.activeConversationId === null)
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
@@ -110,13 +116,16 @@ export function ChatThread({ store, actions, loadAssetUrl, queue }: ChatThreadPr
         <ThreadPrimitive.Viewport
           role="log"
           aria-label="Сообщения диалога"
-          className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-3 py-4 md:px-4 md:py-6"
+          tabIndex={0}
+          className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-3 py-4 outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset md:px-4 md:py-6"
         >
           {historyStatus === 'loading' && <LoadingStatus label="Загрузка сообщений…" />}
           {historyStatus === 'ready' && (
             <AuiIf condition={(state) => state.thread.isEmpty}>
-              <p className="m-auto text-sm text-muted-foreground">
-                Сообщений пока нет. Напишите первый запрос.
+              <p className="m-auto text-center text-sm text-muted-foreground">
+                {noConversation
+                  ? 'Напишите сообщение, чтобы начать диалог.'
+                  : 'Сообщений пока нет. Напишите первый запрос.'}
               </p>
             </AuiIf>
           )}
@@ -129,6 +138,7 @@ export function ChatThread({ store, actions, loadAssetUrl, queue }: ChatThreadPr
         {queue}
         <ComposerPrimitive.Root className="flex items-end gap-2 border-t p-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
           <ComposerPrimitive.Input
+            id="composer-input"
             aria-label="Сообщение"
             placeholder="Напишите сообщение"
             rows={1}
@@ -137,7 +147,7 @@ export function ChatThread({ store, actions, loadAssetUrl, queue }: ChatThreadPr
               if (sendBlocked || running) event.preventDefault()
               if (!sendBlocked && running) enqueueComposer()
             }}
-            className="max-h-40 min-h-10 min-w-0 flex-1 resize-none overflow-y-auto rounded-md border border-input bg-transparent px-3 py-2 text-base shadow-xs md:min-h-9 md:text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            className="max-h-40 min-h-10 min-w-0 flex-1 resize-none overflow-y-auto rounded-md border border-input bg-transparent px-3 py-2 text-base shadow-xs md:min-h-9 md:text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring"
           />
           <AuiIf condition={(state) => !state.thread.isRunning}>
             <ComposerPrimitive.Send asChild>
@@ -292,6 +302,7 @@ function ChatMessage({ message, models, loadAssetUrl }: ChatMessageProps) {
       >
         <p className="font-medium">{SYSTEM_TITLES[kind]}</p>
         <p>{text}</p>
+        {SYSTEM_HINTS[kind] && <p>{SYSTEM_HINTS[kind]}</p>}
       </div>
     )
   }
