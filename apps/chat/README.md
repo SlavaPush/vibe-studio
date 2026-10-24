@@ -244,7 +244,7 @@ Render сам задаёт `RENDER=true`, `PORT`, `RENDER_GIT_COMMIT` и `RENDER
 
 Проверка после деплоя:
 
-1. `GET https://<сервис>.onrender.com/healthz` возвращает `{"status":"ok"}`, `GET /api/version` — первые 7 символов commit.
+1. `GET https://<сервис>.onrender.com/healthz` возвращает `{"status":"ok"}`, `GET /api/version` — первые 7 символов commit. Значение совпадает с `git rev-parse --short origin/main`, если на Render выкачен последний commit `main`.
 2. Сквозная проверка (платные вызовы):
 
    ```bash
