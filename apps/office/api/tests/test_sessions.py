@@ -286,6 +286,24 @@ def test_session_without_code_is_rejected(office):
     assert response.json()["code"] == "unauthorized"
 
 
+def test_task_of_participant_before_p56_is_transferred_to_new_participant(office):
+    with office.store.db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO participants (id, display_name, role, created_at) VALUES ('prt_old', 'Мария', 'participant', :now)",
+            {"now": to_text(utcnow())},
+        )
+    task_id = office.queued_task("prt_old")
+    office.store.promote_queue()
+    client, me = office.login("Мария")
+    body = {"decision": "cancel", "expected_version": office.store.get_task(task_id).version, "idempotency_key": "move-key-1"}
+    assert client.post(f"/api/tasks/{task_id}/decisions", json=body).status_code == 403
+    with office.store.db.transaction() as conn:
+        conn.execute("UPDATE tasks SET owner_id = :owner WHERE id = :id", {"owner": me["id"], "id": task_id})
+    body["idempotency_key"] = "move-key-2"
+    assert client.post(f"/api/tasks/{task_id}/decisions", json=body).status_code == 200
+    assert office.store.get_task(task_id).status == "cancelled"
+
+
 def test_long_labels_are_kept_in_full(office):
     prefix = "Участник с очень длинной меткой кода доступа"
     assert len(prefix) > 40
