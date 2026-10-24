@@ -1,5 +1,5 @@
 import { useRef } from 'react'
-import type { ApiError } from '@/api/types'
+import type { ApiError, ErrorCode } from '@/api/types'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import {
@@ -82,15 +82,24 @@ export function SessionErrorNotice({ error, onRetry }: { error: ApiError; onRetr
   )
 }
 
+const RUN_ERROR_TITLES: Partial<Record<ErrorCode, string>> = {
+  service_unavailable: 'Нет связи с сервером',
+  quota_exceeded: 'Лимит запросов исчерпан',
+  rate_limited: 'Слишком много запросов',
+  provider_unavailable: 'Модели временно недоступны',
+  provider_outcome_unknown: 'Ответ не завершён',
+  response_truncated: 'Ответ не завершён',
+  run_cancelled: 'Запрос отменён',
+}
+
 export function RunErrorNotice({ error }: { error: ApiError }) {
   const cancelled = error.code === 'run_cancelled'
   return (
     <Alert variant={cancelled ? 'default' : 'destructive'} className="mx-3 w-auto [overflow-wrap:anywhere] md:mx-4">
-      <AlertTitle>{cancelled ? 'Запрос отменён' : 'Не удалось получить ответ'}</AlertTitle>
+      <AlertTitle>{RUN_ERROR_TITLES[error.code] ?? 'Ошибка сервера'}</AlertTitle>
       <AlertDescription>
         <p>{error.message}</p>
         {error.retryable && <p>Запрос можно повторить позже.</p>}
-        <p className="text-xs">Код операции: {error.operation_id}</p>
       </AlertDescription>
     </Alert>
   )

@@ -18,18 +18,26 @@ import { Sheet, SheetClose, SheetContent, SheetTitle, SheetTrigger } from '@/com
 import type { ConversationActions } from '@/store/assistantAdapter'
 import type { ChatController } from '@/store/chatController'
 import { hasActiveRun, NO_CONVERSATION, useChatState, type ChatStore } from '@/store/conversations'
+import { buildVersion } from '@/store/versionWatch'
 
 interface AppProps {
   store: ChatStore
   controller: ChatController
+  version?: string
 }
 
 const DESKTOP_QUERY = '(min-width: 768px)'
 
-export default function App({ store, controller }: AppProps) {
+const COMPOSER_INPUT_ID = 'composer-input'
+
+export default function App({ store, controller, version = buildVersion() }: AppProps) {
   const state = useChatState(store, (current) => current)
   const active = state.conversations.find((item) => item.id === state.activeConversationId)
   const error = state.errors[state.activeConversationId ?? NO_CONVERSATION]
+  const listFailed = state.errors[NO_CONVERSATION] !== undefined
+  const versionLabel = (
+    <p className="mt-auto px-3 pt-2 pb-3 text-xs text-muted-foreground [overflow-wrap:anywhere]">Версия: {version}</p>
+  )
   const actions = useMemo<ConversationActions>(
     () => ({ send: (text) => controller.send(text), cancel: () => void controller.cancel() }),
     [controller],
@@ -68,15 +76,27 @@ export default function App({ store, controller }: AppProps) {
         <SessionErrorNotice error={state.sessionError} onRetry={() => void controller.start()} />
       ) : state.session ? (
         <Sheet open={navOpen} onOpenChange={setNavOpen}>
+          <a
+            href={`#${COMPOSER_INPUT_ID}`}
+            onClick={(event) => {
+              event.preventDefault()
+              document.getElementById(COMPOSER_INPUT_ID)?.focus()
+            }}
+            className="sr-only focus:not-sr-only focus:m-2 focus:self-start focus:rounded-md focus:bg-background focus:px-3 focus:py-2 focus:text-sm focus:underline"
+          >
+            Перейти к полю сообщения
+          </a>
           <div className="flex min-h-0 flex-1">
-            <aside className="hidden w-64 shrink-0 overflow-y-auto border-r md:block">
+            <aside className="hidden w-64 shrink-0 flex-col overflow-y-auto border-r md:flex">
               <ConversationList
                 conversations={state.conversations}
                 activeId={state.activeConversationId}
                 onSelect={(id) => void controller.selectConversation(id)}
                 onCreate={() => void controller.createConversation()}
                 onRename={(id, title) => void controller.renameConversation(id, title)}
+                loadFailed={listFailed}
               />
+              {versionLabel}
             </aside>
             <SheetContent aria-describedby={undefined}>
               <div className="flex items-center justify-between gap-2 border-b py-1 pr-1 pl-3">
@@ -100,8 +120,10 @@ export default function App({ store, controller }: AppProps) {
                     void controller.createConversation()
                   }}
                   onRename={(id, title) => void controller.renameConversation(id, title)}
+                  loadFailed={listFailed}
                 />
               </div>
+              {versionLabel}
             </SheetContent>
             <main className="flex min-w-0 flex-1 flex-col">
               <header className="flex flex-col gap-2 border-b px-3 pt-[max(0.75rem,env(safe-area-inset-top))] pb-2 md:flex-row md:flex-wrap md:items-center md:justify-between md:gap-3 md:px-4 md:py-3">

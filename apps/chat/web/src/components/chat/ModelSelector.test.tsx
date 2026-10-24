@@ -30,4 +30,16 @@ describe('ModelSelector', () => {
     expect(store.getState().selectedModel).toBe('claude-haiku-5-5')
     expect(screen.getByRole('combobox', { name: 'Модель' })).toHaveTextContent('Claude Haiku 5.5')
   })
+
+  it('поле выбора и пункты списка имеют сплошное кольцо фокуса', async () => {
+    const store = createChatStore(testState())
+    render(<ConnectedSelector store={store} />)
+
+    const trigger = screen.getByRole('combobox', { name: 'Модель' })
+    expect(trigger).toHaveClass('focus-visible:ring-ring')
+    trigger.focus()
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' })
+    const auto = await screen.findByRole('option', { name: 'Авто' })
+    expect(auto).toHaveClass('focus:ring-ring', 'focus:ring-inset')
+  })
 })
