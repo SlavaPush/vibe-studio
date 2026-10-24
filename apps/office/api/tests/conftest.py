@@ -490,6 +490,15 @@ class FakeGitHub:
         self.status: dict[tuple[str, str], int] = {}
         self.jwts: list[str] = []
         self.lock = threading.Lock()
+        self.merged_by = "vibe-office[bot]"
+        self.commit_prs: dict[str, list[dict[str, Any]]] = {}
+        self.activity: list[dict[str, Any]] = []
+
+    def pushed(self, before: str, after: str, login: str = "SlavaPush") -> None:
+        self.activity.insert(
+            0, {"before": before, "after": after, "ref": "refs/heads/main", "activity_type": "push",
+                "actor": {"login": login}},
+        )
 
     def mutations(self) -> list[tuple[str, str]]:
         return [
@@ -508,8 +517,25 @@ class FakeGitHub:
         parent = self.ref("main")
         merged = self.git("commit-tree", tree, "-p", parent, "-m", f"{pr['title']} (#{pr['number']})")
         self.git("update-ref", "refs/heads/main", merged, parent)
-        pr.update(state="closed", merged=True, merge_commit_sha=merged)
+        pr.update(
+            state="closed", merged=True, merge_commit_sha=merged, merged_at="2026-10-24T12:00:00Z",
+            merged_by={"login": self.merged_by},
+        )
         return merged
+
+    def compare(self, base: str, head: str) -> dict[str, Any]:
+        base, head = self.git("rev-parse", base), self.git("rev-parse", head)
+        ahead = int(self.git("rev-list", "--count", f"{base}..{head}"))
+        behind = int(self.git("rev-list", "--count", f"{head}..{base}"))
+        status = "identical" if base == head else "ahead" if not behind else "behind" if not ahead else "diverged"
+        listed = self.git("rev-list", "--reverse", "--parents", f"{base}..{head}") if ahead else ""
+        commits = [
+            {"sha": line.split()[0], "parents": [{"sha": parent} for parent in line.split()[1:]]}
+            for line in listed.splitlines()
+        ]
+        return {
+            "status": status, "ahead_by": ahead, "behind_by": behind, "total_commits": ahead, "commits": commits,
+        }
 
     def ref(self, branch: str) -> str | None:
         result = subprocess.run(
@@ -586,13 +612,26 @@ class FakeGitHub:
                 return httpx.Response(200, json={"sha": self.git("rev-parse", "--verify", f"{match.group(1)}^{{commit}}")})
             except subprocess.CalledProcessError:
                 return httpx.Response(404, json={"message": "Not Found"})
+        match = re.fullmatch(r"/commits/([0-9a-f]{40})/pulls", rel)
+        if match:
+            sha = match.group(1)
+            found = self.commit_prs.get(sha) or [pr for pr in self.prs.values() if pr.get("merge_commit_sha") == sha]
+            return httpx.Response(200, json=found)
+        if rel == "/activity":
+            start = int(request.url.params.get("after", 0))
+            size = int(request.url.params["per_page"])
+            page = self.activity[start:start + size]
+            headers = {}
+            if start + size < len(self.activity):
+                link = f"https://api.github.com{REPO_PATH}/activity?per_page={size}&after={start + size}"
+                headers["Link"] = f'<{link}>; rel="next"'
+            return httpx.Response(200, json=page, headers=headers)
         match = re.fullmatch(r"/compare/([0-9a-f]+)\.\.\.(\w+)", rel)
         if match:
-            base, head = self.git("rev-parse", match.group(1)), self.git("rev-parse", match.group(2))
-            ahead = int(self.git("rev-list", "--count", f"{base}..{head}"))
-            behind = int(self.git("rev-list", "--count", f"{head}..{base}"))
-            status = "identical" if base == head else "ahead" if not behind else "behind" if not ahead else "diverged"
-            return httpx.Response(200, json={"status": status, "ahead_by": ahead, "behind_by": behind})
+            try:
+                return httpx.Response(200, json=self.compare(match.group(1), match.group(2)))
+            except subprocess.CalledProcessError:
+                return httpx.Response(404, json={"message": "Not Found"})
         match = re.fullmatch(r"/pulls/(\d+)", rel)
         if match:
             number = int(match.group(1))
@@ -671,6 +710,112 @@ class FakeGitHub:
     def add_push_runs(self, sha: str, conclusion: str | None = "success", **overrides: str | None) -> int:
         jobs = {name: overrides.get(name.replace("-", "_"), conclusion) for name in CI_JOBS}
         return self.add_run("ci.yml", "push", sha, [], jobs, head_branch="main")
+
+
+class FakeService:
+    def __init__(self, version: str) -> None:
+        self.version = version
+        self.broken: set[str] = set()
+        self.down = False
+        self.on_version: Callable[[], Any] | None = None
+        self.on_request: Callable[[httpx.Request], Any] | None = None
+        self.requests: list[httpx.Request] = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if self.on_request is not None:
+            self.on_request(request)
+        if request.url.path == "/api/version" and self.on_version is not None:
+            hook, self.on_version = self.on_version, None
+            hook()
+        if self.down:
+            raise httpx.ConnectError("connection refused", request=request)
+        healthy = self.version not in self.broken
+        if request.url.path == "/healthz":
+            return httpx.Response(200 if healthy else 503, json={"status": "ok" if healthy else "error"})
+        if request.url.path == "/api/version":
+            return httpx.Response(200, json={"version": self.version})
+        page = f'<html><head><meta name="app-version" content="{self.version}" /></head></html>'
+        return httpx.Response(200, text=page)
+
+
+RENDER_PATH = "/v1/services/srv-test"
+
+
+class FakeRender:
+    def __init__(self, service: FakeService, live_sha: str) -> None:
+        self.service = service
+        self.deploys: list[dict[str, Any]] = []
+        self.requests: list[httpx.Request] = []
+        self.down = False
+        self.lose_post = False
+        self.hide_new = False
+        self.post_status: int | None = None
+        self.moment = time.time() - 3600
+        self.add(live_sha, "live", trigger="api", past=True)
+
+    def stamp(self, past: bool = False) -> str:
+        self.moment = self.moment + 1 if past else max(self.moment + 1, time.time())
+        return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(self.moment)) + ".000000Z"
+
+    def add(self, sha: str, status: str, trigger: str = "api", past: bool = False) -> dict[str, Any]:
+        deploy = {
+            "id": f"dep-{len(self.deploys) + 1}", "commit": {"id": sha, "message": "commit"}, "status": status,
+            "trigger": trigger, "createdAt": self.stamp(past), "updatedAt": None, "finishedAt": None,
+        }
+        self.deploys.insert(0, deploy)
+        if status == "live":
+            self.set(deploy["id"], "live")
+        return deploy
+
+    def find(self, deploy_id: str) -> dict[str, Any]:
+        return next(deploy for deploy in self.deploys if deploy["id"] == deploy_id)
+
+    def set(self, deploy_id: str, status: str) -> None:
+        deploy = self.find(deploy_id)
+        if status == "live":
+            for other in self.deploys:
+                if other["status"] == "live" and other is not deploy:
+                    other["status"] = "deactivated"
+            self.service.version = deploy["commit"]["id"][:7]
+        deploy["status"] = status
+
+    def posts(self) -> list[tuple[str, dict[str, Any]]]:
+        return [
+            (request.url.path.removeprefix(RENDER_PATH), json.loads(request.content))
+            for request in self.requests if request.method == "POST"
+        ]
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        assert request.headers["Authorization"] == "Bearer render-test-key"
+        if self.down:
+            raise httpx.ConnectError("connection refused", request=request)
+        rel = request.url.path.removeprefix(RENDER_PATH)
+        if request.method == "POST":
+            if self.post_status is not None:
+                return httpx.Response(self.post_status, json={"message": "error"})
+            body = json.loads(request.content)
+            if rel == "/rollback":
+                target = self.find(body["deployId"])
+                deploy = self.add(target["commit"]["id"], "update_in_progress", trigger="rollback")
+            else:
+                deploy = self.add(body["commitId"], "build_in_progress")
+            deploy["hidden"] = self.hide_new
+            if self.lose_post:
+                raise httpx.ReadTimeout("timed out", request=request)
+            return httpx.Response(201, json={key: value for key, value in deploy.items() if key != "hidden"})
+        if rel == "/deploys":
+            listed = [
+                {"deploy": {key: value for key, value in deploy.items() if key != "hidden"}, "cursor": deploy["id"]}
+                for deploy in self.deploys if not deploy.get("hidden")
+            ]
+            return httpx.Response(200, json=listed[: int(request.url.params.get("limit", 20))])
+        deploy_id = rel.removeprefix("/deploys/")
+        found = [deploy for deploy in self.deploys if deploy["id"] == deploy_id]
+        if not found:
+            return httpx.Response(404, json={"message": "not found"})
+        return httpx.Response(200, json={key: value for key, value in found[0].items() if key != "hidden"})
 
 
 @pytest.fixture(scope="session")

@@ -10,6 +10,7 @@ from app.tasks import TaskStore
 
 OLD_SCHEMA = Path(__file__).with_name("data") / "schema_1cfa9a5.sql"
 P51_SCHEMA = Path(__file__).with_name("data") / "schema_36bda3f.sql"
+P52_SCHEMA = Path(__file__).with_name("data") / "schema_8dc33dd.sql"
 NOW = "2026-10-23T09:00:00.000000Z"
 TABLES = (
     "scheduler", "participants", "sessions", "tasks", "task_events", "decisions", "release_candidates",
@@ -148,6 +149,68 @@ def test_p51_database_gets_review_and_merge_columns(database_url):
                 store.create_candidate(
                     conn, task_id="tsk_pr", kind=ReleaseKind.release, commit_sha="c" * 40,
                     expected_previous_sha="a" * 40, spec_hash="sha256:spec", suite_hash="sha256:suite",
+                    ci_run_ids=[], pr_url=None,
+                )
+        first = dump(db)
+        db.init_schema()
+        assert dump(db) == first
+    finally:
+        db.close()
+
+
+def test_p52_database_gets_release_queue_columns(database_url):
+    db = Database(database_url)
+    try:
+        with db.transaction() as conn:
+            for statement in P52_SCHEMA.read_text(encoding="utf-8").split(";"):
+                if statement.strip():
+                    conn.execute(statement.strip())
+            conn.execute(
+                "INSERT INTO participants (id, display_name, role, created_at) VALUES ('prt_1', 'Мария', 'participant', :now)",
+                {"now": NOW},
+            )
+            conn.execute(
+                "INSERT INTO tasks (id, owner_id, title, text, status, profile, version, created_at, updated_at, "
+                "rejection_reason, spec, branch, base_sha, pr_url, changed_files, fix_cycles, model_calls, "
+                "model_calls_limit, input_tokens, output_tokens, event_seq, merge_sha) VALUES ('tsk_pr', 'prt_1', "
+                "'Задача', 'Текст задачи', 'awaiting_release', 'hybrid', 7, :now, :now, NULL, NULL, 'office/tsk_pr', "
+                "'abc', NULL, '[]', 0, 12, 30, 100, 20, 0, :merge)",
+                {"now": NOW, "merge": "e" * 40},
+            )
+            for release_id, status, commit, published in (
+                ("rel_0", "released", "c" * 40, True), ("rel_1", "approved", "e" * 40, False)
+            ):
+                conn.execute(
+                    "INSERT INTO release_candidates (id, task_id, kind, status, version, commit_sha, "
+                    "expected_previous_sha, spec_hash, suite_hash, ci_run_ids, pr_url, created_at, approved_by, "
+                    "approved_at, is_published, deploy, pr_review_id, e2e) VALUES (:id, 'tsk_pr', 'release', :status, "
+                    "1, :commit, :previous, :spec, :suite, '[]', NULL, :now, NULL, NULL, :published, NULL, NULL, NULL)",
+                    {"id": release_id, "status": status, "commit": commit, "previous": "a" * 40, "now": NOW,
+                     "published": published, "spec": "sha256:spec", "suite": "sha256:suite"},
+                )
+        db.init_schema()
+        store = TaskStore(db)
+        releases = {release.id: release for release in store.list_releases()}
+        assert (releases["rel_1"].status, releases["rel_1"].version) == ("pending", 2)
+        assert releases["rel_0"].status == "released" and releases["rel_0"].is_published
+        assert all(release.origin == "task" and release.revert is None for release in releases.values())
+        with db.connection() as conn:
+            assert store.queue_state(conn) == {
+                "active_release_id": None, "release_blocked_by": None, "published_sha": None,
+                "external_wait_since": None,
+            }
+        with db.locked_transaction() as conn:
+            store.update_candidate(conn, "rel_1", status="revoked")
+            store.create_candidate(
+                conn, task_id="tsk_pr", kind=ReleaseKind.release, commit_sha="e" * 40,
+                expected_previous_sha="c" * 40, spec_hash="sha256:spec", suite_hash="sha256:suite", ci_run_ids=[],
+                pr_url=None,
+            )
+        with pytest.raises((sqlite3.IntegrityError, psycopg.errors.UniqueViolation)):
+            with db.locked_transaction() as conn:
+                store.create_candidate(
+                    conn, task_id="tsk_pr", kind=ReleaseKind.release, commit_sha="e" * 40,
+                    expected_previous_sha="d" * 40, spec_hash="sha256:spec", suite_hash="sha256:suite",
                     ci_run_ids=[], pr_url=None,
                 )
         first = dump(db)

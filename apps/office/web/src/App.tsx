@@ -4,6 +4,7 @@ import {
   STALE_MESSAGE,
   asApiError,
   getSlots,
+  getReleaseQueue,
   getTask,
   isStale,
   isUnauthorized,
@@ -38,10 +39,18 @@ const STREAM_LABELS: Record<StreamState, string> = {
   reconnecting: 'Переподключение к обновлениям…',
 }
 
-const RELEASE_EVENTS = new Set<TaskEvent['type']>(['release_candidate', 'deploy_status'])
+const RELEASE_EVENTS = new Set<TaskEvent['type']>([
+  'release_candidate',
+  'deploy_status',
+  'rollback_status',
+  'release_blocked',
+  'release_unblocked',
+  'external_publish',
+])
 
 function touchesReleases(event: TaskEvent): boolean {
   if (RELEASE_EVENTS.has(event.type)) return true
+  if ('release_id' in event.payload || 'revert_of' in event.payload) return true
   return (
     event.type === 'decision_recorded' &&
     (RELEASE_DECISIONS as readonly unknown[]).includes(event.payload.decision)
@@ -135,7 +144,11 @@ function App() {
   )
 
   const loadReleases = useCallback(
-    () => load(listReleases, (releases) => dispatch({ type: 'releases', releases })),
+    () =>
+      Promise.all([
+        load(listReleases, (releases) => dispatch({ type: 'releases', releases })),
+        load(getReleaseQueue, (queue) => dispatch({ type: 'queue', queue })),
+      ]),
     [load],
   )
 
@@ -294,6 +307,7 @@ function App() {
         </div>
         <ReleaseQueue
           releases={state.releases}
+          queue={state.queue}
           participant={participant}
           run={run}
           onRefresh={releaseChanged}

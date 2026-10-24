@@ -25,12 +25,14 @@ class Operation:
     external_ref: str | None
     detail: str | None
     started_at: datetime
+    release_id: str | None = None
 
 
 def operation_from_row(row: dict[str, Any]) -> Operation:
     return Operation(
         id=row["id"],
         task_id=row["task_id"],
+        release_id=row["release_id"],
         kind=row["kind"],
         key=row["key"],
         status=OpStatus(row["status"]),
@@ -107,12 +109,23 @@ class OperationLog:
         with self.db.transaction() as conn:
             self.finish(conn, operation, status, detail=detail)
 
-    def open_for(self, task_id: str) -> list[Operation]:
+    def open_for(self, task_id: str, release_id: str | None = None) -> list[Operation]:
+        release = "release_id = :release_id" if release_id else "release_id IS NULL"
         with self.db.connection() as conn:
             rows = conn.fetchall(
-                "SELECT * FROM operations WHERE task_id = :id AND status IN ('started', 'unknown') "
+                f"SELECT * FROM operations WHERE task_id = :id AND {release} AND status IN ('started', 'unknown') "
                 "ORDER BY started_at, id",
-                {"id": task_id},
+                {"id": task_id, "release_id": release_id},
+            )
+        return [operation_from_row(row) for row in rows]
+
+    def open_kinds(self, kinds: tuple[str, ...]) -> list[Operation]:
+        names = {f"k{index}": kind for index, kind in enumerate(kinds)}
+        with self.db.connection() as conn:
+            rows = conn.fetchall(
+                f"SELECT * FROM operations WHERE kind IN ({', '.join(':' + key for key in names)}) "
+                "AND status IN ('started', 'unknown') ORDER BY started_at, id",
+                names,
             )
         return [operation_from_row(row) for row in rows]
 

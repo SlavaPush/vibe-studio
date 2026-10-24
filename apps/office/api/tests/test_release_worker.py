@@ -12,16 +12,18 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+from app import release_queue
 from app import workspace as workspace_module
 from app.config import CHECKOUT_ROOT
 from app.db import utcnow
 from app.github import GitHubError, GitHubUnavailable, github_client
 from app.models_gateway import ProviderReply
 from app.operations import OperationLog, OpStatus
-from app.release import ReleaseWorker
+from app.release import ReleaseWorker, task_carrier
 from app.required_checks import load_required_checks
 from app.sandbox import SandboxError
 from app.schemas import AgentRole, CheckReport, CheckResult, FailureKind, ReleaseStatus, TaskEventType, TaskStatus
+from app.service_check import SERVICE_TIMEOUT
 from app.workspace import PushResult, Workspace
 from conftest import CI_JOBS, FakeGitHub, FakeSuite, ScriptedGateway, git
 
@@ -56,10 +58,18 @@ class Service:
         self.version: object = version
         self.status = 200
         self.down = False
+        self.timeouts = 0
+        self.tick: timedelta | None = None
+        self.clock: Clock | None = None
         self.requests: list[httpx.Request] = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
+        if self.tick is not None and self.clock is not None:
+            self.clock.offset += self.tick
+        if self.timeouts:
+            self.timeouts -= 1
+            raise httpx.ReadTimeout("timed out", request=request)
         if self.down:
             raise httpx.ConnectError("connection refused", request=request)
         return httpx.Response(self.status, json={"version": self.version})
@@ -121,7 +131,7 @@ def setup(office, origin, tmp_path, app_key, monkeypatch):
     fake = FakeGitHub(origin.bare, token)
     github = github_client("5452356", "174735588", app_key.path, "SlavaPush/vibe-studio",
                            transport=httpx.MockTransport(fake.handler))
-    settings = replace(app.state.settings, github_push_url=origin.url)
+    settings = replace(app.state.settings, github_push_url=origin.url, verify_seconds=0)
     pushes = []
     real_push = workspace.push
 
@@ -333,7 +343,7 @@ def test_rejected_push_needs_attention(setup):
 
 
 def test_branch_violation_blocks_push(setup, monkeypatch):
-    monkeypatch.setattr(setup.workspace, "verify_branch", lambda task_id: ["apps/chat/api/main.py: запрещено"])
+    monkeypatch.setattr(setup.workspace, "verify_branch", lambda *args: ["apps/chat/api/main.py: запрещено"])
     drive(setup.worker(), setup.task_id)
     assert setup.task().status == TaskStatus.needs_attention
     assert setup.pushes == []
@@ -781,7 +791,7 @@ def test_new_head_after_review_is_not_merged(setup):
     assert worker.step(setup.task_id)
     review = setup.task().pr_review
     assert (review.verdict, review.head_sha) == ("approve", setup.head)
-    assert not worker._merge(setup.task(), review)
+    assert not worker._merge(task_carrier(setup.task()), review)
     task = setup.task()
     assert task.status == TaskStatus.needs_attention
     assert task.pr_review == review
@@ -1081,7 +1091,39 @@ def test_unavailable_service_version_needs_attention(setup, failure):
     assert len(setup.suite.calls) == 1
 
 
-def test_published_candidate_is_base_when_it_matches_service(setup):
+def test_sleeping_service_wakes_within_window_and_candidate_is_created(setup, monkeypatch):
+    monkeypatch.setattr(release_queue, "VERIFY_INTERVAL", 0)
+    setup.settings = replace(setup.settings, verify_seconds=120)
+    worker = merged(setup)
+    setup.fake.add_push_runs(setup.task().merge_sha)
+    setup.service.timeouts = 2
+    before = len(setup.service.requests)
+    drive(worker, setup.task_id)
+    assert setup.task().status == TaskStatus.awaiting_release
+    assert len(candidates_of(setup)) == 1
+    versions = [r for r in setup.service.requests[before:] if r.url.path == "/api/version"]
+    assert len(versions) >= 3
+    assert all(r.extensions["timeout"]["read"] == SERVICE_TIMEOUT for r in versions[:3])
+
+
+def test_service_version_window_is_exhausted_then_needs_attention(setup, monkeypatch):
+    monkeypatch.setattr(release_queue, "VERIFY_INTERVAL", 0)
+    setup.settings = replace(setup.settings, verify_seconds=120)
+    worker = merged(setup)
+    setup.fake.add_push_runs(setup.task().merge_sha)
+    setup.service.timeouts = 1000
+    setup.service.clock, setup.service.tick = setup.clock, timedelta(seconds=30)
+    before = len(setup.service.requests)
+    drive(worker, setup.task_id)
+    assert setup.task().status == TaskStatus.needs_attention
+    assert candidates_of(setup) == []
+    timeouts = [r.extensions["timeout"]["read"] for r in setup.service.requests[before:]]
+    assert 3 <= len(timeouts) <= 6
+    assert timeouts[0] == SERVICE_TIMEOUT
+    assert timeouts[-1] < SERVICE_TIMEOUT
+
+
+def test_published_candidate_is_base_and_external_version_replaces_it(setup):
     other = setup.office.queued_task(setup.me["id"])
     setup.office.add_candidate(other, commit_sha="d" * 40, status=ReleaseStatus.released, is_published=True)
     setup.service.version = "d" * 7
@@ -1094,8 +1136,12 @@ def test_published_candidate_is_base_when_it_matches_service(setup):
         conn.execute("DELETE FROM release_candidates WHERE task_id = :id", {"id": setup.task_id})
     setup.service.version = setup.published[:7]
     drive(worker, setup.task_id)
-    assert setup.task().status == TaskStatus.needs_attention
-    assert candidates_of(setup) == []
+    assert setup.task().status == TaskStatus.awaiting_release
+    [candidate] = candidates_of(setup)
+    assert candidate.expected_previous_sha == setup.published
+    assert not any(release.is_published for release in setup.store.list_releases())
+    with setup.store.db.connection() as conn:
+        assert setup.store.queue_state(conn)["published_sha"] == setup.published
 
 
 @pytest.mark.parametrize("case", ["unknown", "outside_main"])

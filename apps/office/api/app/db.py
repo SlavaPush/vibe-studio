@@ -22,6 +22,17 @@ ADDED_COLUMNS = (
     ("tasks", "pr_review_calls", "INTEGER NOT NULL DEFAULT 0"),
     ("release_candidates", "pr_review_id", "TEXT"),
     ("release_candidates", "e2e", "TEXT"),
+    ("release_candidates", "superseded_by", "TEXT"),
+    ("release_candidates", "origin", "TEXT NOT NULL DEFAULT 'task'"),
+    ("release_candidates", "origin_decision_id", "TEXT"),
+    ("release_candidates", "blocked_reason", "TEXT"),
+    ("release_candidates", "verify", "TEXT"),
+    ("release_candidates", "rollback", "TEXT"),
+    ("release_candidates", "revert", "TEXT"),
+    ("scheduler", "active_release_id", "TEXT"),
+    ("scheduler", "release_blocked_by", "TEXT"),
+    ("scheduler", "published_sha", "TEXT"),
+    ("scheduler", "external_wait_since", "TEXT"),
 )
 
 logger = logging.getLogger("office.db")
@@ -174,6 +185,8 @@ class Database:
             "UPDATE tasks SET status = 'needs_attention', version = version + 1 "
             "WHERE status = 'awaiting_release_approval'"
         )
+        conn.execute("DROP INDEX IF EXISTS release_candidates_release_commit")
+        conn.execute("UPDATE release_candidates SET status = 'pending', version = version + 1 WHERE status = 'approved'")
 
     def close(self) -> None:
         if self._pool is not None:

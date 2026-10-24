@@ -1,10 +1,10 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import type { Run } from '@/api/client'
-import type { CheckReport, Participant, ReleaseCandidate, Task } from '@/api/types'
+import type { CheckReport, Participant, ReleaseCandidate, ReleaseQueueState, Task } from '@/api/types'
 import { ReleaseQueue } from '@/components/office/ReleaseQueue'
 import { TaskCard } from '@/components/office/TaskCard'
-import { participants, releases, tasks } from '@/mocks/data'
+import { blockedRelease, participants, releaseQueue, releases, tasks } from '@/mocks/data'
 import {
   FakeEventSource,
   apiError,
@@ -405,39 +405,95 @@ describe('TaskCard: вкладки', () => {
   })
 })
 
-function renderQueue(participant: Participant, list: ReleaseCandidate[] = releases) {
+const freeQueue: ReleaseQueueState = { ...releaseQueue, release_blocked_by: null, blocked_reason: null }
+
+function renderQueue(
+  participant: Participant,
+  list: ReleaseCandidate[] = releases,
+  queue: ReleaseQueueState | null = freeQueue,
+) {
   const onRefresh = vi.fn()
   const view = render(
-    <ReleaseQueue releases={list} participant={participant} run={direct} onRefresh={onRefresh} />,
+    <ReleaseQueue releases={list} queue={queue} participant={participant} run={direct} onRefresh={onRefresh} />,
   )
   const rerender = (next: ReleaseCandidate[]) =>
     view.rerender(
-      <ReleaseQueue releases={next} participant={participant} run={direct} onRefresh={onRefresh} />,
+      <ReleaseQueue releases={next} queue={queue} participant={participant} run={direct} onRefresh={onRefresh} />,
     )
   return { onRefresh, rerender }
 }
 
 describe('ReleaseQueue', () => {
-  it('участник не видит кнопок подтверждения выпуска и отката', () => {
+  it('участник не видит кнопок отката и возобновления, подтверждения выпуска нет', () => {
     fakeApi()
-    renderQueue(maria)
+    renderQueue(maria, [...releases, blockedRelease], releaseQueue)
     expect(screen.queryByRole('button', { name: 'Подтвердить выпуск' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Откатить' })).not.toBeInTheDocument()
-    expect(
-      screen.getByText('Подтверждение выпуска и откат доступны только администратору.'),
-    ).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Возобновить выпуск' })).not.toBeInTheDocument()
+    expect(screen.getByText('Откат и возобновление выпуска доступны только администратору.')).toBeInTheDocument()
+    expect(screen.getByText('Ждёт очереди')).toBeInTheDocument()
   })
 
-  it('администратор подтверждает выпуск с версией и ключом', async () => {
+  it('показывает проверку после деплоя, откат и блокировку с revert-PR', () => {
+    fakeApi()
+    renderQueue(maria, [...releases, blockedRelease], releaseQueue)
+    const blocked = screen.getByRole('region', { name: 'Выпуск заблокирован после отката rel_5' })
+    expect(within(blocked).getByRole('link', { name: 'PR #11' })).toHaveAttribute(
+      'href',
+      'https://github.com/SlavaPush/vibe-studio/pull/11',
+    )
+    expect(within(blocked).getByText(/состояние: выполняется/)).toBeInTheDocument()
+    expect(screen.getByText('не пройдена: /healthz не ответил status ok')).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        (_, element) =>
+          element?.tagName === 'DD' &&
+          element.textContent === 'к 5e0c1a7, Render: live, проверка пройдена (попыток: 1)',
+      ),
+    ).toBeInTheDocument()
+    expect(screen.getByText('пройдена (попыток: 2)')).toBeInTheDocument()
+  })
+
+  it('предупреждает, что выпуск не настроен', () => {
+    fakeApi()
+    renderQueue(admin, releases, { ...freeQueue, configured: false })
+    expect(screen.getByText(/Выпуск не настроен/)).toHaveAttribute('role', 'status')
+  })
+
+  it('администратор возобновляет выпуск с fix_sha после блокировки', async () => {
     const api = fakeApi()
-    api.on(`POST /api/releases/${pending.id}/decisions`, { decision_id: 'dec_9' })
-    const { onRefresh } = renderQueue(admin)
-    fireEvent.click(screen.getByRole('button', { name: 'Подтвердить выпуск' }))
+    api.on(`POST /api/releases/${blockedRelease.id}/decisions`, { decision_id: 'dec_12' })
+    const { onRefresh } = renderQueue(admin, [...releases, blockedRelease], releaseQueue)
+    const button = screen.getByRole('button', { name: 'Возобновить выпуск' })
+    const input = screen.getByLabelText('Исправляющий commit в main (fix_sha, 40 символов)')
+    fireEvent.change(input, { target: { value: 'abc' } })
+    expect(button).toBeDisabled()
+    fireEvent.change(input, { target: { value: 'A'.repeat(40) } })
+    fireEvent.click(button)
+    await screen.findByText('Решение записано.')
+    const [body] = api.bodies(`POST /api/releases/${blockedRelease.id}/decisions`) as Record<string, unknown>[]
+    expect(body).toMatchObject({
+      decision: 'resume_releases',
+      expected_version: blockedRelease.version,
+      fix_sha: 'a'.repeat(40),
+    })
+    expect(typeof body.idempotency_key).toBe('string')
+    expect(onRefresh).toHaveBeenCalledWith(blockedRelease)
+  })
+
+  it('остановленный кандидат возобновляется без fix_sha после подтверждения', async () => {
+    const api = fakeApi()
+    const halted = { ...pending, blocked_reason: 'Состав выпуска не подтверждён: c3d4e5f: нет push.' }
+    api.on(`POST /api/releases/${pending.id}/decisions`, { decision_id: 'dec_13' })
+    renderQueue(admin, [halted, published])
+    expect(screen.getByText(halted.blocked_reason)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Возобновить выпуск' }))
+    const dialog = await screen.findByRole('alertdialog', { name: `Возобновить выпуск ${pending.id}?` })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Возобновить выпуск' }))
     await screen.findByText('Решение записано.')
     const [body] = api.bodies(`POST /api/releases/${pending.id}/decisions`) as Record<string, unknown>[]
-    expect(body).toMatchObject({ decision: 'approve_release', expected_version: pending.version })
-    expect(typeof body.idempotency_key).toBe('string')
-    expect(onRefresh).toHaveBeenCalledWith(pending)
+    expect(body).toMatchObject({ decision: 'resume_releases', expected_version: pending.version })
+    expect(body).not.toHaveProperty('fix_sha')
   })
 
   it('откат требует подтверждения в диалоге', async () => {
@@ -457,35 +513,40 @@ describe('ReleaseQueue', () => {
   it('повтор после сетевой ошибки отправляет то же тело после обновления версии', async () => {
     const api = fakeApi()
     let calls = 0
-    api.on(`POST /api/releases/${pending.id}/decisions`, () => {
+    api.on(`POST /api/releases/${published.id}/decisions`, () => {
       calls += 1
       if (calls === 1) throw new TypeError('Failed to fetch')
       return json(200, { decision_id: 'dec_11' })
     })
     const { rerender } = renderQueue(admin)
-    fireEvent.click(screen.getByRole('button', { name: 'Подтвердить выпуск' }))
+    await confirmRollback()
     const retry = await screen.findByRole('button', { name: 'Отправить решение повторно' })
-    rerender(releases.map((release) => (release.id === pending.id ? { ...release, version: 2 } : release)))
+    rerender(releases.map((release) => (release.id === published.id ? { ...release, version: 9 } : release)))
     fireEvent.click(retry)
     await screen.findByText('Решение записано.')
-    const [first, second] = api.bodies(`POST /api/releases/${pending.id}/decisions`)
+    const [first, second] = api.bodies(`POST /api/releases/${published.id}/decisions`)
     expect(second).toEqual(first)
-    expect(first).toMatchObject({ expected_version: pending.version })
+    expect(first).toMatchObject({ expected_version: published.version })
   })
 
   it.each([
-    [403, 'forbidden_role', 'Подтверждение выпуска и откат доступны только администратору.', false],
-    [409, 'version_mismatch', 'Кандидат выпуска изменился. Проверьте новую версию и подтвердите заново.', true],
+    [403, 'forbidden_role', 'Откат и возобновление выпуска доступны только администратору.', false],
+    [409, 'version_mismatch', 'Кандидат выпуска изменился. Проверьте новую версию и примите решение заново.', true],
     [409, 'decision_not_allowed', 'Решение недопустимо в текущем статусе.', true],
   ])('%i %s — сообщение у кандидата', async (status, code, message, refresh) => {
     const api = fakeApi()
-    api.on(`POST /api/releases/${pending.id}/decisions`, () => apiError(status, code, message))
+    api.on(`POST /api/releases/${published.id}/decisions`, () => apiError(status, code, message))
     const { onRefresh } = renderQueue(admin)
-    const button = screen.getByRole('button', { name: 'Подтвердить выпуск' })
-    fireEvent.click(button)
-    const item = button.closest('li') as HTMLElement
+    const item = screen.getByRole('button', { name: 'Откатить' }).closest('li') as HTMLElement
+    await confirmRollback()
     expect(await within(item).findByRole('alert')).toHaveTextContent(message)
-    if (refresh) expect(onRefresh).toHaveBeenCalledWith(pending)
+    if (refresh) expect(onRefresh).toHaveBeenCalledWith(published)
     else expect(onRefresh).not.toHaveBeenCalled()
   })
 })
+
+async function confirmRollback() {
+  fireEvent.click(screen.getByRole('button', { name: 'Откатить' }))
+  const dialog = await screen.findByRole('alertdialog', { name: `Откатить выпуск ${published.id}?` })
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Откатить' }))
+}

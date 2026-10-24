@@ -6,6 +6,7 @@ import type {
   Participant,
   ReleaseCandidate,
   ReleaseDecisionRequest,
+  ReleaseQueueState,
   Slots,
   Task,
   TaskCreate,
@@ -140,5 +141,7 @@ export const listReleases = () => getJson<ReleaseCandidate[]>('/api/releases')
 
 export const decideRelease = (id: string, body: ReleaseDecisionRequest) =>
   postJson<Decision>(`/api/releases/${encodeURIComponent(id)}/decisions`, body)
+
+export const getReleaseQueue = () => getJson<ReleaseQueueState>('/api/release-queue')
 
 export const getSlots = () => getJson<Slots>('/api/slots')

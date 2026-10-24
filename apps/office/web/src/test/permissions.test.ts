@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { Participant, ReleaseCandidate, Task } from '@/api/types'
 import { canAct } from '@/lib/permissions'
-import { participants, releases, tasks } from '@/mocks/data'
+import { blockedRelease, participants, releaseQueue, releases, tasks } from '@/mocks/data'
 
 const byId = (id: string) => participants.find((participant) => participant.id === id) as Participant
 const admin = byId('prt_admin')
@@ -28,11 +28,29 @@ describe('canAct', () => {
     })
   })
 
-  it('разрешает подтверждение выпуска и откат только администратору', () => {
-    expect(canAct(admin, pending, 'approve_release')).toEqual({ allowed: true })
+  it('разрешает откат и возобновление выпуска только администратору', () => {
     expect(canAct(admin, published, 'rollback')).toEqual({ allowed: true })
-    expect(canAct(owner, pending, 'approve_release').allowed).toBe(false)
     expect(canAct(owner, published, 'rollback').allowed).toBe(false)
+    expect(canAct(owner, blockedRelease, 'resume_releases', releaseQueue)).toEqual({
+      allowed: false,
+      reason: 'Откат и возобновление выпуска доступны только администратору.',
+    })
+  })
+
+  it('возобновление доступно для блокировки и остановленного кандидата', () => {
+    expect(canAct(admin, blockedRelease, 'resume_releases', releaseQueue)).toEqual({ allowed: true })
+    expect(canAct(admin, pending, 'resume_releases', releaseQueue).allowed).toBe(false)
+    const halted = { ...pending, blocked_reason: 'Состав выпуска не подтверждён.' }
+    expect(canAct(admin, halted, 'resume_releases', releaseQueue)).toEqual({ allowed: true })
+    expect(
+      canAct(admin, halted, 'resume_releases', { ...releaseQueue, configured: false }).allowed,
+    ).toBe(false)
+    const active = { ...pending, status: 'deploying' as const }
+    const running = { ...releaseQueue, active_release_id: active.id }
+    expect(canAct(admin, active, 'resume_releases', running).allowed).toBe(false)
+    expect(
+      canAct(admin, { ...active, blocked_reason: 'Исход запроса деплоя не установлен.' }, 'resume_releases', running),
+    ).toEqual({ allowed: true })
   })
 
   it('запрещает откат неопубликованного кандидата', () => {
@@ -104,6 +122,14 @@ describe('canAct', () => {
     }
     expect(canAct(owner, pushing, 'retry')).toEqual({ allowed: true })
     expect(canAct(owner, { ...pushing, integration_started: false }, 'retry').allowed).toBe(false)
+  })
+
+  it('разрешает администратору повтор чужой задачи только после начала интеграции', () => {
+    const halted: Task = { ...developing, status: 'needs_attention', integration_started: true }
+    expect(canAct(admin, halted, 'retry')).toEqual({ allowed: true })
+    expect(canAct(observer, halted, 'retry').allowed).toBe(false)
+    expect(canAct(admin, halted, 'cancel').allowed).toBe(false)
+    expect(canAct(admin, { ...halted, integration_started: false }, 'retry').allowed).toBe(false)
   })
 
   it('запрещает повтор при исчерпанном бюджете обращений', () => {

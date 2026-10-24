@@ -1,6 +1,6 @@
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -26,7 +26,8 @@ class GitHubUnavailable(Exception):
 
 
 def send(http: httpx.Client, method: str, path: str, *, token: str, bearer: bool = False,
-         params: dict[str, Any] | None = None, body: dict[str, Any] | None = None) -> Any:
+         params: dict[str, Any] | None = None, body: dict[str, Any] | None = None,
+         links: dict[str, str] | None = None) -> Any:
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": API_VERSION,
@@ -41,6 +42,8 @@ def send(http: httpx.Client, method: str, path: str, *, token: str, bearer: bool
         raise GitHubUnavailable(method, path)
     if response.status_code >= 400:
         raise GitHubError(method, path, response.status_code)
+    if links is not None:
+        links.update({key: str(value["url"]) for key, value in response.links.items()})
     if response.status_code == 204 or not response.content:
         return None
     data = None
@@ -101,8 +104,11 @@ class GitHubClient:
         self.owner = repo.split("/")[0]
 
     def _call(self, method: str, path: str, *, params: dict[str, Any] | None = None,
-              body: dict[str, Any] | None = None) -> Any:
-        return send(self.http, method, f"/repos/{self.repo}{path}", token=self.auth.token(), params=params, body=body)
+              body: dict[str, Any] | None = None, links: dict[str, str] | None = None) -> Any:
+        return send(
+            self.http, method, f"/repos/{self.repo}{path}", token=self.auth.token(), params=params, body=body,
+            links=links,
+        )
 
     def pulls(self, branch: str, state: str) -> list[dict[str, Any]]:
         params = {"head": f"{self.owner}:{branch}", "state": state, "per_page": 100}
@@ -147,6 +153,19 @@ class GitHubClient:
     def suite_app(self, suite_id: int) -> int | None:
         data = self._call("GET", f"/check-suites/{suite_id}")
         return (data.get("app") or {}).get("id")
+
+    def commit_pulls(self, sha: str) -> list[dict[str, Any]]:
+        return self._call("GET", f"/commits/{sha}/pulls", params={"per_page": 100}) or []
+
+    def push_activity(self, pages: int) -> Iterator[dict[str, Any]]:
+        params: dict[str, Any] = {"ref": "refs/heads/main", "activity_type": "push", "per_page": 100}
+        for _ in range(pages):
+            links: dict[str, str] = {}
+            yield from self._call("GET", "/activity", params=params, links=links) or []
+            following = links.get("next")
+            if not following:
+                return
+            params = dict(httpx.URL(following).params)
 
 
 def github_client(

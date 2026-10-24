@@ -1,6 +1,10 @@
 CREATE TABLE IF NOT EXISTS scheduler (
     id INTEGER PRIMARY KEY,
-    next_event_id BIGINT NOT NULL
+    next_event_id BIGINT NOT NULL,
+    active_release_id TEXT,
+    release_blocked_by TEXT,
+    published_sha TEXT,
+    external_wait_since TEXT
 );
 
 CREATE TABLE IF NOT EXISTS participants (
@@ -96,11 +100,18 @@ CREATE TABLE IF NOT EXISTS release_candidates (
     is_published BOOLEAN NOT NULL,
     deploy TEXT,
     pr_review_id TEXT,
-    e2e TEXT
+    e2e TEXT,
+    superseded_by TEXT,
+    origin TEXT NOT NULL DEFAULT 'task',
+    origin_decision_id TEXT,
+    blocked_reason TEXT,
+    verify TEXT,
+    rollback TEXT,
+    revert TEXT
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS release_candidates_release_commit ON release_candidates (task_id, commit_sha)
-WHERE kind = 'release';
+CREATE UNIQUE INDEX IF NOT EXISTS release_candidates_live_commit ON release_candidates (task_id, commit_sha)
+WHERE kind = 'release' AND status <> 'revoked';
 
 CREATE TABLE IF NOT EXISTS pr_reviews (
     id TEXT PRIMARY KEY,

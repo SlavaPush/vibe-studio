@@ -8,6 +8,8 @@ from datetime import datetime, timedelta
 from functools import partial
 from typing import Any
 
+from pydantic import BaseModel
+
 from app.db import Connection, Database, from_text, to_text, utcnow
 from app.errors import not_found, rate_limited
 from app.schemas import (
@@ -21,6 +23,7 @@ from app.schemas import (
     PullRequestReview,
     ReleaseCandidate,
     ReleaseKind,
+    ReleaseOrigin,
     ReleaseStatus,
     Task,
     TaskEvent,
@@ -47,24 +50,26 @@ TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
         {S.developing, S.awaiting_integration, S.cancelled, S.failed, S.needs_attention}
     ),
     S.awaiting_integration: frozenset({S.awaiting_release, S.cancelled, S.failed, S.needs_attention}),
-    S.awaiting_release: frozenset({S.deploying, S.failed, S.needs_attention}),
+    S.awaiting_release: frozenset({S.deploying, S.released, S.failed, S.needs_attention}),
     S.deploying: frozenset({S.released, S.failed, S.needs_attention}),
     S.released: frozenset(),
     S.failed: frozenset({S.queued}),
     S.cancelled: frozenset(),
-    S.needs_attention: frozenset({S.queued, S.awaiting_integration, S.cancelled}),
+    S.needs_attention: frozenset(
+        {S.queued, S.awaiting_integration, S.awaiting_release, S.released, S.failed, S.cancelled}
+    ),
 }
 
 TASK_SELECT = (
     "SELECT t.*, p.display_name AS owner_name, r.id AS review_id, r.head_sha AS review_head_sha, "
     "r.verdict AS review_verdict, r.reasons AS review_reasons, r.required_changes AS review_required_changes, "
     "r.checklist AS review_checklist, r.created_at AS review_created_at, "
-    "EXISTS (SELECT 1 FROM operations o WHERE o.task_id = t.id AND o.kind = 'merge_pr' "
+    "EXISTS (SELECT 1 FROM operations o WHERE o.task_id = t.id AND o.kind = 'merge_pr' AND o.release_id IS NULL "
     "AND o.status IN ('started', 'unknown')) AS merge_pending, "
     "EXISTS (SELECT 1 FROM operations o WHERE o.task_id = t.id) AS has_operations FROM tasks t "
     "JOIN participants p ON p.id = t.owner_id "
     "LEFT JOIN pr_reviews r ON r.id = (SELECT x.id FROM pr_reviews x WHERE x.task_id = t.id "
-    "ORDER BY x.created_at DESC, x.id DESC LIMIT 1)"
+    "AND (t.head_sha IS NULL OR x.head_sha = t.head_sha) ORDER BY x.created_at DESC, x.id DESC LIMIT 1)"
 )
 PR_REVIEW_CALLS_LIMIT = 2
 
@@ -179,12 +184,17 @@ def candidate_from_row(row: dict[str, Any]) -> ReleaseCandidate:
         ci_run_ids=json.loads(row["ci_run_ids"]),
         pr_url=row["pr_url"],
         created_at=from_text(row["created_at"]),
-        approved_by=row["approved_by"],
-        approved_at=from_text(row["approved_at"]) if row["approved_at"] else None,
         is_published=bool(row["is_published"]),
         deploy=json.loads(row["deploy"]) if row["deploy"] else None,
         pr_review_id=row["pr_review_id"],
         e2e=json.loads(row["e2e"]) if row["e2e"] else None,
+        origin=row["origin"],
+        origin_decision_id=row["origin_decision_id"],
+        superseded_by=row["superseded_by"],
+        blocked_reason=row["blocked_reason"],
+        verify=json.loads(row["verify"]) if row["verify"] else None,
+        rollback=json.loads(row["rollback"]) if row["rollback"] else None,
+        revert=json.loads(row["revert"]) if row["revert"] else None,
     )
 
 
@@ -763,6 +773,34 @@ class TaskStore:
             rows = conn.fetchall("SELECT * FROM release_candidates ORDER BY created_at DESC, id DESC")
         return [candidate_from_row(row) for row in rows]
 
+    def get_candidate(self, release_id: str) -> ReleaseCandidate:
+        with self.db.connection() as conn:
+            candidate = self.load_candidate(conn, release_id)
+        if candidate is None:
+            raise not_found("Кандидат выпуска не найден.")
+        return candidate
+
+    def update_candidate(self, conn: Connection, release_id: str, **fields: Any) -> None:
+        values = {
+            name: _json(value.model_dump(mode="json")) if isinstance(value, BaseModel) else value
+            for name, value in fields.items()
+        }
+        assignments = ", ".join(f"{name} = :{name}" for name in values)
+        conn.execute(
+            f"UPDATE release_candidates SET {assignments}, version = version + 1 WHERE id = :release_id",
+            values | {"release_id": release_id},
+        )
+
+    def queue_state(self, conn: Connection) -> dict[str, Any]:
+        return conn.fetchone(
+            "SELECT active_release_id, release_blocked_by, published_sha, external_wait_since FROM scheduler "
+            "WHERE id = 1"
+        )
+
+    def set_queue(self, conn: Connection, **fields: Any) -> None:
+        assignments = ", ".join(f"{name} = :{name}" for name in fields)
+        conn.execute(f"UPDATE scheduler SET {assignments} WHERE id = 1", fields)
+
     def create_candidate(
         self,
         conn: Connection,
@@ -779,14 +817,16 @@ class TaskStore:
         is_published: bool = False,
         pr_review_id: str | None = None,
         e2e: CheckReport | None = None,
+        origin: ReleaseOrigin = ReleaseOrigin.task,
+        origin_decision_id: str | None = None,
     ) -> ReleaseCandidate:
         release_id = new_id("rel")
         conn.execute(
             "INSERT INTO release_candidates (id, task_id, kind, status, version, commit_sha, expected_previous_sha, "
             "spec_hash, suite_hash, ci_run_ids, pr_url, created_at, approved_by, approved_at, is_published, deploy, "
-            "pr_review_id, e2e) "
+            "pr_review_id, e2e, origin, origin_decision_id) "
             "VALUES (:id, :task_id, :kind, :status, 1, :commit_sha, :previous, :spec_hash, :suite_hash, :ci, "
-            ":pr_url, :now, NULL, NULL, :published, NULL, :review, :e2e)",
+            ":pr_url, :now, NULL, NULL, :published, NULL, :review, :e2e, :origin, :decision)",
             {
                 "id": release_id,
                 "task_id": task_id,
@@ -802,6 +842,8 @@ class TaskStore:
                 "published": is_published,
                 "review": pr_review_id,
                 "e2e": _json(e2e.model_dump(mode="json")) if e2e is not None else None,
+                "origin": origin.value,
+                "decision": origin_decision_id,
             },
         )
         self.record_event(

@@ -143,7 +143,7 @@ def test_failed_or_waiting_required_check_does_not_call_reviewer(setup):
 
 def test_branch_violation_blocks_review(setup, monkeypatch):
     worker = checked(setup)
-    monkeypatch.setattr(setup.workspace, "verify_branch", lambda task_id: ["apps/chat/api/main.py: запрещено"])
+    monkeypatch.setattr(setup.workspace, "verify_branch", lambda *args: ["apps/chat/api/main.py: запрещено"])
     drive(worker, setup.task_id)
     assert setup.task().status == TaskStatus.needs_attention
     assert reviews(setup) == []

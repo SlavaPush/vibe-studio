@@ -4,6 +4,7 @@ from app.schemas import (
     Participant,
     ReleaseCandidate,
     ReleaseDecision,
+    ReleaseKind,
     ReleaseStatus,
     Role,
     Task,
@@ -29,10 +30,15 @@ TASK_DECISION_STATUSES: dict[TaskDecision, frozenset[TaskStatus]] = {
 FINAL_FAILURES: dict[FailureKind, str] = {
     FailureKind.checks_failed: "Обязательные проверки PR не пройдены, PR закрыт. Повтор недоступен: поставьте новую задачу.",
     FailureKind.pr_rejected: "Агент ревью отклонил PR. Повтор недоступен: поставьте новую задачу.",
+    FailureKind.deploy_failed: "Деплой выпуска не выполнен. Повтор недоступен: изменение уже в main и войдёт в следующий выпуск.",
+    FailureKind.verify_failed: "Выпуск откатан после проверки. Повтор недоступен: поставьте новую задачу.",
 }
 
 
-def require_task_owner(participant: Participant, task: Task) -> None:
+def require_task_owner(participant: Participant, task: Task, decision: TaskDecision | None = None) -> None:
+    integration = task.status == TaskStatus.needs_attention and task.integration_started
+    if decision == TaskDecision.retry and integration and participant.role == Role.admin:
+        return
     if task.owner_id != participant.id:
         raise OfficeError(
             403,
@@ -46,7 +52,7 @@ def require_admin(participant: Participant) -> None:
         raise OfficeError(
             403,
             ErrorCode.forbidden_role,
-            "Подтверждение выпуска и откат доступны только администратору.",
+            "Откат и возобновление выпуска доступны только администратору.",
         )
 
 
@@ -75,10 +81,10 @@ def check_task_decision(task: Task, decision: TaskDecision) -> None:
         raise not_allowed("Бюджет обращений к моделям исчерпан. Повтор недоступен.")
 
 
-def check_release_decision(candidate: ReleaseCandidate, decision: ReleaseDecision) -> None:
-    if decision == ReleaseDecision.approve_release and candidate.status != ReleaseStatus.pending:
-        raise not_allowed("Подтвердить можно только кандидата в статусе «Ждёт подтверждения».")
+def check_release_decision(candidate: ReleaseCandidate, decision: ReleaseDecision, fix_sha: str | None = None) -> None:
+    if decision == ReleaseDecision.rollback and fix_sha is not None:
+        raise not_allowed("fix_sha указывается только в решении «Возобновить выпуск».")
     if decision == ReleaseDecision.rollback and not (
-        candidate.status == ReleaseStatus.released and candidate.is_published
+        candidate.status == ReleaseStatus.released and candidate.is_published and candidate.kind == ReleaseKind.release
     ):
         raise not_allowed("Откатить можно только опубликованный сейчас выпуск.")

@@ -4,7 +4,7 @@ import { NETWORK_MESSAGE } from '@/api/client'
 import type { Participant, Task } from '@/api/types'
 import App from '@/App'
 import { COOKIE_MISSING } from '@/components/office/AccessGate'
-import { participants, releases, tasks } from '@/mocks/data'
+import { participants, releaseQueue, releases, tasks } from '@/mocks/data'
 import {
   FakeEventSource,
   apiError,
@@ -27,6 +27,7 @@ function backend(participant: Participant | null = maria) {
   api.on('GET /api/me', () => (participant ? json(200, participant) : unauthorized()))
   api.on('GET /api/tasks', tasks)
   api.on('GET /api/releases', releases)
+  api.on('GET /api/release-queue', { ...releaseQueue, release_blocked_by: null, blocked_reason: null })
   api.on('GET /api/slots', { used: 2, total: 3 })
   for (const task of tasks) api.on(`GET /api/tasks/${task.id}`, task)
   return api
@@ -267,6 +268,49 @@ describe('обновление через SSE', () => {
     act(() => source.emit(taskEvent('tsk_102', 'release_candidate', { release_id: 'rel_8' })))
     expect(await screen.findByText('rel_8')).toBeInTheDocument()
     expect(api.count('GET /api/releases')).toBe(before + 1)
+  })
+
+  it.each(['rollback_status', 'release_blocked', 'release_unblocked', 'external_publish'] as const)(
+    'событие %s перечитывает выпуски и состояние очереди',
+    async (type) => {
+      const api = backend()
+      render(<App />)
+      await ready()
+      const source = openStream()
+      const before = api.count('GET /api/release-queue')
+      api.on('GET /api/release-queue', releaseQueue)
+      act(() => source.emit(taskEvent('tsk_102', type, { release_id: 'rel_5' })))
+      expect(await screen.findByText('Выпуск заблокирован после отката rel_5')).toBeInTheDocument()
+      expect(api.count('GET /api/release-queue')).toBe(before + 1)
+    },
+  )
+
+  it.each([
+    { step: 'release', outcome: 'blocked', summary: 'Состав выпуска не подтверждён.', release_id: 'rel_5' },
+    { step: 'release', outcome: 'blocked', summary: 'Исправление после отката остановлено.', revert_of: 'rel_5' },
+  ])('role_finished выпуска или revert-PR перечитывает выпуски и очередь', async (payload) => {
+    const api = backend()
+    render(<App />)
+    await ready()
+    const source = openStream()
+    const before = api.count('GET /api/release-queue')
+    const releasesBefore = api.count('GET /api/releases')
+    api.on('GET /api/release-queue', releaseQueue)
+    act(() => source.emit(taskEvent('tsk_102', 'role_finished', payload)))
+    expect(await screen.findByText('Выпуск заблокирован после отката rel_5')).toBeInTheDocument()
+    expect(api.count('GET /api/release-queue')).toBe(before + 1)
+    expect(api.count('GET /api/releases')).toBe(releasesBefore + 1)
+  })
+
+  it('role_finished без выпуска не перечитывает выпуски', async () => {
+    const api = backend()
+    render(<App />)
+    await ready()
+    const source = openStream()
+    const before = api.count('GET /api/releases')
+    act(() => source.emit(taskEvent('tsk_101', 'role_finished', { step: 'qa', outcome: 'ok', summary: 'QA.' })))
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    expect(api.count('GET /api/releases')).toBe(before)
   })
 
   it('после разрыва перечитывает списки до подключения и повторно после open', async () => {

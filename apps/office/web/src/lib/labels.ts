@@ -3,6 +3,7 @@ import type {
   FailureKind,
   ModelProfile,
   ReleaseDecision,
+  ReleaseOrigin,
   ReleaseStatus,
   Task,
   TaskDecision,
@@ -26,21 +27,30 @@ export const STATUS_LABELS: Record<TaskStatus, string> = {
 }
 
 export const RELEASE_STATUS_LABELS: Record<ReleaseStatus, string> = {
-  pending: 'Ждёт подтверждения',
-  approved: 'Подтверждён',
+  pending: 'Ждёт очереди',
   deploying: 'Деплой',
+  verifying: 'Проверка после деплоя',
+  rolling_back: 'Откат',
   released: 'Опубликован',
   failed: 'Ошибка',
-  rolled_back: 'Откачен',
+  superseded: 'В составе нового выпуска',
   revoked: 'Отозван',
+  rolled_back: 'Откачен',
+}
+
+export const RELEASE_ORIGIN_LABELS: Record<ReleaseOrigin, string> = {
+  task: 'Задача',
+  auto_revert: 'Revert после отката',
+  resume: 'Исправление владельца',
+  manual_rollback: 'Ручной откат',
 }
 
 export const DECISION_LABELS: Record<TaskDecision | ReleaseDecision, string> = {
   approve_spec: 'Утвердить требования',
   cancel: 'Отменить задачу',
   retry: 'Повторить',
-  approve_release: 'Подтвердить выпуск',
   rollback: 'Откатить',
+  resume_releases: 'Возобновить выпуск',
 }
 
 export const AGENT_ROLE_LABELS: Record<AgentRole, string> = {
@@ -72,11 +82,17 @@ export const EVENT_TYPE_LABELS: Record<TaskEventType, string> = {
   pr_review: 'Решение агента ревью PR',
   merge_started: 'Слияние PR начато',
   pr_merged: 'PR слит',
+  rollback_status: 'Статус отката',
+  release_blocked: 'Выпуск заблокирован',
+  release_unblocked: 'Блокировка снята',
+  external_publish: 'Публикация вне офиса',
 }
 
 export const FAILURE_KIND_LABELS: Record<FailureKind, string> = {
   checks_failed: 'Обязательные проверки PR не пройдены, PR закрыт.',
   pr_rejected: 'Агент ревью отклонил PR.',
+  deploy_failed: 'Деплой выпуска на Render не выполнен.',
+  verify_failed: 'Проверка после деплоя не пройдена, выпуск откатан.',
 }
 
 export function failureLabel(task: Task): string | null {

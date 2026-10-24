@@ -1,0 +1,53 @@
+[
+ {
+  "deploy": {
+   "id": "dep-dbeaqtvavr4c73aa26u0",
+   "commit": {
+    "id": "7f9f17c2f72db8226ff9cc040cafe4cc30a4995a",
+    "message": "Чат: кнопки отправки иконками на мобильной ширине",
+    "createdAt": "2026-10-24T13:06:54Z"
+   },
+   "status": "live",
+   "trigger": "api",
+   "createdAt": "2026-10-24T13:07:03.324817Z",
+   "updatedAt": "2026-10-24T14:24:57.005934Z",
+   "startedAt": "2026-10-24T13:07:03.29798Z",
+   "finishedAt": "2026-10-24T13:08:17.796488Z"
+  },
+  "cursor": "MGnaZnWsRB1xdHZhdnI0YzczYWEyNnUw"
+ },
+ {
+  "deploy": {
+   "id": "dep-dbeanncs728c73bkdlmg",
+   "commit": {
+    "id": "e511da6e0148de00652d953f581f3c4efda2cb97",
+    "message": "Чат: мобильная адаптация интерфейса",
+    "createdAt": "2026-10-24T12:59:53Z"
+   },
+   "status": "deactivated",
+   "trigger": "api",
+   "createdAt": "2026-10-24T13:00:13.499129Z",
+   "updatedAt": "2026-10-24T13:08:17.795431Z",
+   "startedAt": "2026-10-24T13:00:13.463961Z",
+   "finishedAt": "2026-10-24T13:01:34.298627Z"
+  },
+  "cursor": "MGnaZnWsRB1ubmNzNzI4YzczYmtkbG1n"
+ },
+ {
+  "deploy": {
+   "id": "dep-dbea7o3ncjis73dj3h30",
+   "commit": {
+    "id": "de4bfc1157f0a1def494d7299e5433de8331f16f",
+    "message": "README чата: сверка версии на Render с commit main\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_011Hh7WdVFbi96zPCM8R8NFh",
+    "createdAt": "2026-10-24T12:21:02Z"
+   },
+   "status": "deactivated",
+   "trigger": "api",
+   "createdAt": "2026-10-24T12:26:08.934944Z",
+   "updatedAt": "2026-10-24T13:01:34.297421Z",
+   "startedAt": "2026-10-24T12:26:08.903789Z",
+   "finishedAt": "2026-10-24T12:27:09.806206Z"
+  },
+  "cursor": "MGnaZnWsRB03bzNuY2ppczczZGozaDMw"
+ }
+]
