@@ -27,6 +27,7 @@ import { TaskCard } from '@/components/office/TaskCard'
 import { TaskForm } from '@/components/office/TaskForm'
 import { TaskStack } from '@/components/office/TaskStack'
 import { Button } from '@/components/ui/button'
+import { AboutDialog } from '@/components/office/AboutDialog'
 import { connectOfficeEvents, type OfficeEvents, type StreamState } from '@/lib/events'
 import { initialOfficeState, officeReducer } from '@/lib/office-state'
 
@@ -267,6 +268,7 @@ function App() {
             <p className="text-sm">
               {participant.display_name} ({participant.role === 'admin' ? 'администратор' : 'участник'})
             </p>
+            <AboutDialog />
             <Button
               type="button"
               variant="outline"

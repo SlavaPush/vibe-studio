@@ -1,5 +1,6 @@
 import { Menu, X } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
+import { AboutDialog } from '@/components/chat/AboutDialog'
 import { ChatThread } from '@/components/chat/ChatThread'
 import { ConversationList } from '@/components/chat/ConversationList'
 import { LoginScreen } from '@/components/chat/LoginScreen'
@@ -141,6 +142,7 @@ export default function App({ store, controller, version = buildVersion() }: App
                     value={state.selectedModel}
                     onChange={store.selectModel}
                   />
+                  <AboutDialog />
                   <ThemeToggle className="shrink-0" />
                 </div>
               </header>
