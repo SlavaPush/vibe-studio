@@ -106,6 +106,36 @@ def test_retry_with_exhausted_budget_is_not_allowed(office, owner):
     assert response.json()["code"] == "decision_not_allowed"
 
 
+@pytest.mark.parametrize("kind", ["checks_failed", "pr_rejected"])
+def test_retry_after_final_release_failure_is_not_allowed(office, owner, kind):
+    client, _, task_id = owner
+    office.set_task(task_id, status="failed", failure_kind=kind)
+    response = decide(client, task_id, "retry", version_of(office, task_id), f"retry-{kind}")
+    assert response.status_code == 409
+    assert response.json()["code"] == "decision_not_allowed"
+
+
+def test_retry_without_release_operations_returns_to_queue(office, owner):
+    client, _, task_id = owner
+    office.set_task(task_id, status="needs_attention")
+    assert decide(client, task_id, "retry", version_of(office, task_id), "retry-graph").status_code == 200
+    assert office.store.get_task(task_id).status == TaskStatus.awaiting_spec_approval
+
+
+def test_retry_with_pushed_head_returns_to_integration(office, owner):
+    client, _, task_id = owner
+    office.set_task(task_id, status="needs_attention", head_sha="a" * 40)
+    assert decide(client, task_id, "retry", version_of(office, task_id), "retry-pushed").status_code == 200
+    assert office.store.get_task(task_id).status == TaskStatus.awaiting_integration
+
+
+def test_cancel_awaiting_integration(office, owner):
+    client, _, task_id = owner
+    office.set_task(task_id, status="awaiting_integration", pr_number=3)
+    assert decide(client, task_id, "cancel", version_of(office, task_id), "cancel-integration").status_code == 200
+    assert office.store.get_task(task_id).status == TaskStatus.cancelled
+
+
 def test_cancel_queued_task(office):
     client, me = office.login()
     for _ in range(3):

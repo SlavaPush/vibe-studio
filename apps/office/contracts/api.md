@@ -28,10 +28,11 @@
 | Перечисление | Значения |
 | --- | --- |
 | `Role` | `participant`, `admin` |
-| `TaskStatus` | `rejected`, `queued`, `awaiting_spec_approval`, `developing`, `reviewing`, `awaiting_integration`, `awaiting_release_approval`, `deploying`, `released`, `failed`, `cancelled`, `needs_attention` |
+| `TaskStatus` | `rejected`, `queued`, `awaiting_spec_approval`, `developing`, `reviewing`, `awaiting_integration`, `awaiting_release`, `deploying`, `released`, `failed`, `cancelled`, `needs_attention` |
 | `ModelProfile` | `local`, `cloud`, `hybrid` |
 | `AgentRole` | `supervisor`, `researcher`, `developer`, `qa`, `critic` |
-| `TaskEventType` | `task_created`, `task_rejected`, `status_changed`, `role_started`, `role_finished`, `tool_called`, `artifact_ready`, `decision_required`, `decision_recorded`, `check_result`, `release_candidate`, `deploy_status` |
+| `TaskEventType` | `task_created`, `task_rejected`, `status_changed`, `role_started`, `role_finished`, `tool_called`, `artifact_ready`, `decision_required`, `decision_recorded`, `check_result`, `release_candidate`, `deploy_status`, `pr_opened`, `checks_status`, `pr_closed`, `operation_unknown` |
+| `FailureKind` | `checks_failed`, `pr_rejected` |
 | `TaskDecision` | `approve_spec`, `cancel`, `retry` |
 | `ReleaseDecision` | `approve_release`, `rollback` |
 | `ReleaseKind` | `release`, `rollback` |
@@ -48,7 +49,7 @@
   "developing",
   "reviewing",
   "awaiting_integration",
-  "awaiting_release_approval",
+  "awaiting_release",
   "deploying",
   "released",
   "failed",
@@ -73,7 +74,11 @@
   "decision_recorded",
   "check_result",
   "release_candidate",
-  "deploy_status"
+  "deploy_status",
+  "pr_opened",
+  "checks_status",
+  "pr_closed",
+  "operation_unknown"
 ]
 ```
 
@@ -86,15 +91,15 @@
 | `awaiting_spec_approval` | Задача заняла слот. Пока `spec = null`, Supervisor готовит требования; после этого требования ждут решения владельца `approve_spec` | да |
 | `developing` | Разработчик изменяет код в worktree задачи | да |
 | `reviewing` | QA и критик проверяют зафиксированную версию | да |
-| `awaiting_integration` | PR в `vibe-studio` открыт, ждёт слияния человеком | да |
-| `awaiting_release_approval` | Кандидат выпуска ждёт решения администратора | да |
-| `deploying` | Выполняется деплой кандидата | да |
+| `awaiting_integration` | Ветка проверена. Офис отправляет её в `vibe-studio`, открывает PR от GitHub App и ждёт обязательных проверок PR; сводка проверок — в поле `checks`. После успешных проверок задача ждёт ревью и слияния PR | нет |
+| `awaiting_release` | PR слит; итоговый commit ждёт очереди выпуска | нет |
+| `deploying` | Выполняется деплой кандидата | нет |
 | `released` | Выпуск опубликован | нет |
-| `failed` | Задача завершилась ошибкой; результат сохранён | нет |
-| `cancelled` | Владелец отменил задачу | нет |
+| `failed` | Задача завершилась ошибкой; результат сохранён. Причина выпуска — в `failure_kind` | нет |
+| `cancelled` | Владелец отменил задачу; открытый PR задачи офис закрывает | нет |
 | `needs_attention` | Исчерпан бюджет исправлений или исход внешней операции неизвестен | нет |
 
-Слот занимают статусы от `awaiting_spec_approval` до `deploying` включительно. Всего слотов три. Задача в `queued` захватывает слот, когда он освобождается.
+Слот занимают статусы от `awaiting_spec_approval` до `reviewing` включительно. Всего слотов три. Задача в `queued` захватывает слот, когда он освобождается. Переход задачи в `awaiting_integration` освобождает слот. Worktree задачи сохраняется до её закрытия (`cancelled`, `released`).
 
 ## Ошибки
 
@@ -150,9 +155,13 @@
 | --- | --- | --- |
 | `approve_spec` | `awaiting_spec_approval` | Требования готовы: `spec` не равно `null` |
 | `cancel` | `queued`, `awaiting_spec_approval`, `developing`, `reviewing`, `awaiting_integration`, `needs_attention` | — |
-| `retry` | `failed`, `needs_attention` | Бюджет обращений не исчерпан: `usage.model_calls` меньше `usage.model_calls_limit` |
+| `retry` | `failed`, `needs_attention` | Бюджет обращений не исчерпан: `usage.model_calls` меньше `usage.model_calls_limit`; для `failed` поле `failure_kind` не равно `checks_failed` и `pr_rejected` |
 
-`retry` возвращает задачу в `queued`; задача заново проходит очередь слотов. `usage` и `fix_cycles` при этом сохраняются: пределы относятся к задаче, а не к попытке.
+`retry` возвращает задачу в `queued`; задача заново проходит очередь слотов. `usage` и `fix_cycles` при этом сохраняются: пределы относятся к задаче, а не к попытке. Исключение: `retry` задачи в `needs_attention`, у которой уже есть операции выпуска (push ветки, создание или закрытие PR) или заполнены `head_sha` или `pr_number`, возвращает её в `awaiting_integration`. Офис сначала сверяет незавершённые операции с GitHub и продолжает с места остановки; если исход по-прежнему не установлен, задача снова получает `needs_attention`.
+
+Задача с `failure_kind` `checks_failed` (обязательные проверки PR не пройдены) или `pr_rejected` (PR отклонён агентом ревью) не повторяется: нужна новая задача.
+
+`cancel` в `awaiting_integration` переводит задачу в `cancelled`; офис закрывает открытый PR задачи и записывает событие `pr_closed`.
 
 Решения по выпуску доступны в статусах:
 
@@ -192,6 +201,10 @@
 | `branch` | string или `null` | Ветка `office/<task_id>` в `vibe-studio` |
 | `base_sha` | string или `null` | Commit, от которого создан worktree |
 | `pr_url` | string или `null` | Адрес PR в `vibe-studio` |
+| `pr_number` | integer или `null` | Номер PR в `vibe-studio` |
+| `head_sha` | string или `null` | Commit ветки `office/<task_id>`, отправленный в `vibe-studio` |
+| `failure_kind` | `FailureKind` или `null` | Причина `failed` на этапе выпуска: `checks_failed` — обязательные проверки PR не пройдены, `pr_rejected` — PR отклонён агентом ревью; `null` для остальных причин |
+| `checks` | `PullRequestChecks` или `null` | Последняя сводка обязательных проверок PR для `head_sha`; `null`, пока PR не проверялся |
 | `changed_files` | string[] | Изменённые файлы относительно `base_sha` |
 | `fix_cycles` | integer | Выполненные циклы исправления, 0–2 |
 | `usage` | `Usage` | Расход задачи |
@@ -199,6 +212,8 @@
 `Spec`: `version` (integer), `spec_hash` (string), `summary` (string), `acceptance_criteria` (string[]), `sources` (массив `{title, url}`).
 
 `Usage`: `model_calls` (integer), `model_calls_limit` (integer, 30), `input_tokens` (integer), `output_tokens` (integer).
+
+`PullRequestChecks`: `head_sha` (string — проверенный commit), `checks` (массив `PullRequestCheck`). `PullRequestCheck`: `name` (string — имя обязательной проверки из ruleset `main`), `status` (string: `missing` — засчитанного запуска нет, `queued`, `in_progress`, `completed` и другие статусы job GitHub Actions), `conclusion` (string или `null` — итог job для `completed`: `success`, `failure`, `cancelled`, `timed_out`, `action_required`, `skipped` и другие), `url` (string или `null` — страница job). Проверка пройдена только при `conclusion = success`.
 
 ### `TaskEvent`
 
@@ -228,6 +243,10 @@
 | `check_result` | `command`, `exit_code`, `duration_ms` |
 | `release_candidate` | `release_id`, `commit_sha` |
 | `deploy_status` | `release_id`, `render_deploy_id`, `render_status` |
+| `pr_opened` | `pr_number`, `pr_url` — PR задачи создан или найден |
+| `checks_status` | `head_sha`, `checks` — новая сводка обязательных проверок PR (модель `PullRequestChecks`) |
+| `pr_closed` | `pr_number` — офис закрыл PR задачи |
+| `operation_unknown` | `kind` (`push`, `create_pr`, `close_pr`), `pr_number`, `reason` — исход внешней операции закрытой задачи не установлен, офис её больше не повторяет |
 
 ### `CheckReport`
 
@@ -390,6 +409,10 @@
     "branch": null,
     "base_sha": null,
     "pr_url": null,
+    "pr_number": null,
+    "head_sha": null,
+    "failure_kind": null,
+    "checks": null,
     "changed_files": [],
     "fix_cycles": 0,
     "usage": {
@@ -430,6 +453,10 @@
     "branch": "office/tsk_101",
     "base_sha": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
     "pr_url": null,
+    "pr_number": null,
+    "head_sha": null,
+    "failure_kind": null,
+    "checks": null,
     "changed_files": [
       "web/src/components/chat/MessageActions.tsx",
       "web/src/components/chat/AssistantMessage.tsx"
@@ -446,7 +473,7 @@
     "id": "tsk_102",
     "title": "Переключатель тёмной темы в настройках",
     "text": "Добавить в настройки чата переключатель светлой и тёмной темы с сохранением выбора в браузере.",
-    "status": "awaiting_release_approval",
+    "status": "awaiting_release",
     "profile": "cloud",
     "owner_id": "prt_admin",
     "owner_name": "Вячеслав",
@@ -468,6 +495,21 @@
     "branch": "office/tsk_102",
     "base_sha": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
     "pr_url": "https://github.com/SlavaPush/vibe-studio/pull/12",
+    "pr_number": 12,
+    "head_sha": "b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f80",
+    "failure_kind": null,
+    "checks": {
+      "head_sha": "b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f80",
+      "checks": [
+        {"name": "chat-api", "status": "completed", "conclusion": "success", "url": "https://github.com/SlavaPush/vibe-studio/actions/runs/18342200001/job/52010000001"},
+        {"name": "chat-web", "status": "completed", "conclusion": "success", "url": "https://github.com/SlavaPush/vibe-studio/actions/runs/18342200001/job/52010000002"},
+        {"name": "chat-containers", "status": "completed", "conclusion": "success", "url": "https://github.com/SlavaPush/vibe-studio/actions/runs/18342200001/job/52010000003"},
+        {"name": "office-api", "status": "completed", "conclusion": "success", "url": "https://github.com/SlavaPush/vibe-studio/actions/runs/18342200001/job/52010000004"},
+        {"name": "office-web", "status": "completed", "conclusion": "success", "url": "https://github.com/SlavaPush/vibe-studio/actions/runs/18342200001/job/52010000005"},
+        {"name": "office-sandbox", "status": "completed", "conclusion": "success", "url": "https://github.com/SlavaPush/vibe-studio/actions/runs/18342200001/job/52010000006"},
+        {"name": "office-paths", "status": "completed", "conclusion": "success", "url": "https://github.com/SlavaPush/vibe-studio/actions/runs/18342200002/job/52010000007"}
+      ]
+    },
     "changed_files": [
       "web/src/components/settings/ThemeSwitch.tsx",
       "web/src/components/settings/SettingsDialog.tsx"
@@ -499,7 +541,7 @@
 }
 ```
 
-Ответ `201`: модель `Task` в статусе `queued`, поля `spec`, `branch`, `base_sha`, `pr_url` равны `null`, `changed_files` пуст. Пример отклонённой задачи — первая задача в ответе `GET /api/tasks`.
+Ответ `201`: модель `Task` в статусе `queued`, поля `spec`, `branch`, `base_sha`, `pr_url`, `pr_number`, `head_sha`, `failure_kind`, `checks` равны `null`, `changed_files` пуст. Пример отклонённой задачи — первая задача в ответе `GET /api/tasks`.
 
 Ошибки: `401 unauthorized`; `422 validation_error`, если `text` короче 20 или длиннее 4000 символов; `429 rate_limited`, если у участника уже пять задач за последний час.
 
@@ -666,6 +708,76 @@ data: {"event_id":211,"task_id":"tsk_101","seq":11,"type":"check_result", ...}
     "payload": {"command": "npm run build", "exit_code": 0, "duration_ms": 18420}
   }
 ]
+```
+
+Фрагмент журнала задачи `tsk_102` (PR открыт, обязательные проверки PR пройдены):
+
+<!-- example: TaskEvent[] -->
+```json
+[
+  {
+    "event_id": 215,
+    "task_id": "tsk_102",
+    "seq": 35,
+    "type": "pr_opened",
+    "timestamp": "2026-10-23T10:20:00Z",
+    "role": null,
+    "tool": null,
+    "artifact": null,
+    "payload": {"pr_number": 12, "pr_url": "https://github.com/SlavaPush/vibe-studio/pull/12"}
+  },
+  {
+    "event_id": 216,
+    "task_id": "tsk_102",
+    "seq": 36,
+    "type": "checks_status",
+    "timestamp": "2026-10-23T10:31:00Z",
+    "role": null,
+    "tool": null,
+    "artifact": null,
+    "payload": {
+      "head_sha": "b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f80",
+      "checks": [
+        {"name": "office-web", "status": "completed", "conclusion": "success", "url": "https://github.com/SlavaPush/vibe-studio/actions/runs/18342200001/job/52010000005"},
+        {"name": "office-paths", "status": "in_progress", "conclusion": null, "url": "https://github.com/SlavaPush/vibe-studio/actions/runs/18342200002/job/52010000007"}
+      ]
+    }
+  }
+]
+```
+
+Отменённая задача `tsk_104`: офис закрыл её PR.
+
+<!-- example: TaskEvent -->
+```json
+{
+  "event_id": 240,
+  "task_id": "tsk_104",
+  "seq": 30,
+  "type": "pr_closed",
+  "timestamp": "2026-10-23T12:00:00Z",
+  "role": null,
+  "tool": null,
+  "artifact": null,
+  "payload": {"pr_number": 14}
+}
+```
+
+Отменённая задача `tsk_105`: исход закрытия PR не установлен за предел сверки, офис больше не повторяет операцию.
+
+<!-- example: TaskEvent -->
+```json
+{
+  "event_id": 250,
+  "task_id": "tsk_105",
+  "seq": 28,
+  "type": "operation_unknown",
+  "timestamp": "2026-10-23T12:40:00Z",
+  "role": null,
+  "tool": null,
+  "artifact": null,
+  "payload": {"kind": "close_pr", "pr_number": 15, "reason": "Исход операции не установлен: GitHub недоступен."}
+}
 ```
 
 Фрагмент журнала задачи `tsk_102` (кандидат выпуска ждёт администратора):

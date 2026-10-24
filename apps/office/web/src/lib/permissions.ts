@@ -6,7 +6,7 @@ import type {
   TaskDecision,
   TaskStatus,
 } from '@/api/types'
-import { STATUS_LABELS } from '@/lib/labels'
+import { FAILURE_KIND_LABELS, STATUS_LABELS } from '@/lib/labels'
 
 export type Permission = { allowed: true } | { allowed: false; reason: string }
 
@@ -45,6 +45,12 @@ export function canAct(
     }
     if (action === 'approve_spec' && target.spec === null) {
       return { allowed: false, reason: 'Требования ещё не подготовлены.' }
+    }
+    if (action === 'retry' && target.status === 'failed' && target.failure_kind !== null) {
+      return {
+        allowed: false,
+        reason: `${FAILURE_KIND_LABELS[target.failure_kind]} Повтор недоступен: поставьте новую задачу.`,
+      }
     }
     if (action === 'retry' && target.usage.model_calls >= target.usage.model_calls_limit) {
       return { allowed: false, reason: 'Бюджет обращений к моделям исчерпан. Повтор недоступен.' }

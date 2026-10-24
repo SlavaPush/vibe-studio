@@ -1,5 +1,6 @@
 import type {
   AgentRole,
+  FailureKind,
   ModelProfile,
   ReleaseDecision,
   ReleaseStatus,
@@ -15,7 +16,7 @@ export const STATUS_LABELS: Record<TaskStatus, string> = {
   developing: 'Разработка',
   reviewing: 'Проверка',
   awaiting_integration: 'Ждёт слияния PR',
-  awaiting_release_approval: 'Ждёт подтверждения выпуска',
+  awaiting_release: 'Ждёт выпуска',
   deploying: 'Деплой',
   released: 'Выпущена',
   failed: 'Ошибка',
@@ -62,6 +63,22 @@ export const EVENT_TYPE_LABELS: Record<TaskEventType, string> = {
   check_result: 'Результат проверки',
   release_candidate: 'Кандидат выпуска',
   deploy_status: 'Статус деплоя',
+  pr_opened: 'PR открыт',
+  checks_status: 'Проверки PR',
+  pr_closed: 'PR закрыт',
+  operation_unknown: 'Исход операции неизвестен',
+}
+
+export const FAILURE_KIND_LABELS: Record<FailureKind, string> = {
+  checks_failed: 'Обязательные проверки PR не пройдены, PR закрыт.',
+  pr_rejected: 'Агент ревью отклонил PR.',
+}
+
+export const CHECK_STATUS_LABELS: Record<string, string> = {
+  missing: 'Нет запуска',
+  queued: 'В очереди',
+  in_progress: 'Выполняется',
+  completed: 'Завершена',
 }
 
 export const PROFILE_LABELS: Record<ModelProfile, string> = {

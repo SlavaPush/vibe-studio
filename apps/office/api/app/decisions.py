@@ -144,7 +144,14 @@ def decide_task(
                 "participant_id": participant.id,
             },
         )
-        store.transition(conn, task_id, TASK_TARGETS[request.decision], expected_from=task.status)
+        target = TASK_TARGETS[request.decision]
+        if (
+            request.decision == TaskDecision.retry
+            and task.status == TaskStatus.needs_attention
+            and (task.head_sha or task.pr_number is not None or store.has_operations(conn, task_id))
+        ):
+            target = TaskStatus.awaiting_integration
+        store.transition(conn, task_id, target, expected_from=task.status)
         store.signal(conn, SIGNAL_DECISION_RECORDED, task_id)
     if request.decision == TaskDecision.retry:
         store.promote_queue()

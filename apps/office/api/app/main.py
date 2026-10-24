@@ -15,8 +15,11 @@ from app.db import Database
 from app.decisions import decide_release, decide_task
 from app.errors import ErrorCode, error_response, install_error_handlers, not_found
 from app.events import EventNotifier, parse_last_event_id, stream_events
+from app.github import github_client
 from app.intake import UNAVAILABLE, IntakeFilter
 from app.models_gateway import ModelsGateway
+from app.release import ReleaseWorker
+from app.required_checks import load_required_checks
 from app.runner import Checkpoints, Runner
 from app.sandbox import Sandbox
 from app.schemas import (
@@ -88,14 +91,36 @@ def create_app(
     office_runner = None
     if runner and office_workspace is not None and sandbox is not None:
         office_runner = Runner(settings, store, office_workspace, sandbox, models, Checkpoints(settings.database_url))
+    office_release = None
+    if office_runner is not None and office_workspace is not None:
+        if settings.github_app_configured:
+            github = github_client(
+                settings.github_app_id,
+                settings.github_app_installation_id,
+                settings.github_app_private_key_path,
+                settings.github_repo,
+                base_url=settings.github_api_url,
+            )
+            office_release = ReleaseWorker(
+                settings, store, office_workspace, github, load_required_checks(settings.checkout_root)
+            )
+        else:
+            logger.warning(
+                "GitHub App не настроен (GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID, GITHUB_APP_PRIVATE_KEY_PATH): "
+                "PR задач не создаются, задачи ждут в awaiting_integration."
+            )
     if office_workspace is not None:
         office_workspace.recover()
     if office_runner is not None:
         office_runner.recover()
+    if office_release is not None and office_workspace is not None:
+        office_workspace.submit(office_release.start)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
+        if office_release is not None:
+            office_release.shutdown()
         if office_runner is not None:
             office_runner.shutdown()
         if office_workspace is not None:
@@ -110,6 +135,7 @@ def create_app(
     app.state.workspace = office_workspace
     app.state.sandbox = sandbox
     app.state.runner = office_runner
+    app.state.release = office_release
     install_error_handlers(app)
     app.add_middleware(OriginGuard, hosts=settings.allowed_hosts, origins=settings.allowed_origins)
 

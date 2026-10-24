@@ -17,7 +17,7 @@ class TaskStatus(StrEnum):
     developing = "developing"
     reviewing = "reviewing"
     awaiting_integration = "awaiting_integration"
-    awaiting_release_approval = "awaiting_release_approval"
+    awaiting_release = "awaiting_release"
     deploying = "deploying"
     released = "released"
     failed = "failed"
@@ -30,13 +30,25 @@ SLOT_STATUSES = frozenset(
         TaskStatus.awaiting_spec_approval,
         TaskStatus.developing,
         TaskStatus.reviewing,
+    }
+)
+
+WORKTREE_STATUSES = SLOT_STATUSES | frozenset(
+    {
         TaskStatus.awaiting_integration,
-        TaskStatus.awaiting_release_approval,
+        TaskStatus.awaiting_release,
         TaskStatus.deploying,
+        TaskStatus.failed,
+        TaskStatus.needs_attention,
     }
 )
 
 SLOTS_TOTAL = 3
+
+
+class FailureKind(StrEnum):
+    checks_failed = "checks_failed"
+    pr_rejected = "pr_rejected"
 
 
 class ModelProfile(StrEnum):
@@ -66,6 +78,10 @@ class TaskEventType(StrEnum):
     check_result = "check_result"
     release_candidate = "release_candidate"
     deploy_status = "deploy_status"
+    pr_opened = "pr_opened"
+    checks_status = "checks_status"
+    pr_closed = "pr_closed"
+    operation_unknown = "operation_unknown"
 
 
 class TaskDecision(StrEnum):
@@ -135,6 +151,18 @@ class TaskCreate(ContractModel):
     profile: ModelProfile
 
 
+class PullRequestCheck(ContractModel):
+    name: str
+    status: str
+    conclusion: str | None
+    url: str | None
+
+
+class PullRequestChecks(ContractModel):
+    head_sha: str
+    checks: list[PullRequestCheck]
+
+
 class Task(ContractModel):
     id: str
     title: str = Field(max_length=80)
@@ -151,6 +179,10 @@ class Task(ContractModel):
     branch: str | None
     base_sha: str | None
     pr_url: str | None
+    pr_number: int | None
+    head_sha: str | None
+    failure_kind: FailureKind | None
+    checks: PullRequestChecks | None
     changed_files: list[str]
     fix_cycles: int = Field(ge=0, le=2)
     usage: Usage

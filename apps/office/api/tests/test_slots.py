@@ -10,9 +10,6 @@ SLOT_STATUSES = {
     "awaiting_spec_approval",
     "developing",
     "reviewing",
-    "awaiting_integration",
-    "awaiting_release_approval",
-    "deploying",
 }
 
 
@@ -25,7 +22,14 @@ def test_count_slots_for_each_status(status):
 def test_count_slots_sums_tasks():
     tasks = [
         fixtures.TASKS[0].model_copy(update={"status": status})
-        for status in (TaskStatus.queued, TaskStatus.developing, TaskStatus.deploying, TaskStatus.released)
+        for status in (
+            TaskStatus.queued,
+            TaskStatus.developing,
+            TaskStatus.reviewing,
+            TaskStatus.awaiting_integration,
+            TaskStatus.deploying,
+            TaskStatus.released,
+        )
     ]
     assert count_slots(tasks) == 2
 
@@ -131,6 +135,21 @@ def test_queued_task_takes_slot_in_new_app_instance(office):
     assert office.store.get_task(task_id).status == TaskStatus.queued
     app = office.new_app()
     assert app.state.store.get_task(task_id).status == TaskStatus.awaiting_spec_approval
+
+
+def test_awaiting_integration_frees_slot_for_queued_task(office):
+    _, me = office.login()
+    ids = [office.queued_task(me["id"]) for _ in range(4)]
+    office.store.promote_queue()
+    assert office.store.get_task(ids[3]).status == TaskStatus.queued
+    office.set_task(ids[0], status="reviewing")
+    signals = []
+    office.store.signal_handlers.append(lambda name, task_id: signals.append((name, task_id)))
+    assert office.store.ensure_status(ids[0], TaskStatus.reviewing, TaskStatus.awaiting_integration)
+    assert office.store.get_task(ids[3]).status == TaskStatus.awaiting_spec_approval
+    assert office.store.slots_used() == 3
+    assert ("slot_released", ids[0]) in signals
+    assert (SIGNAL_SLOT_ACQUIRED, ids[3]) in signals
 
 
 def test_retry_takes_free_slot_without_other_requests(office):

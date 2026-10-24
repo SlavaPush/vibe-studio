@@ -1,5 +1,6 @@
 from app.errors import ErrorCode, OfficeError
 from app.schemas import (
+    FailureKind,
     Participant,
     ReleaseCandidate,
     ReleaseDecision,
@@ -23,6 +24,11 @@ TASK_DECISION_STATUSES: dict[TaskDecision, frozenset[TaskStatus]] = {
         }
     ),
     TaskDecision.retry: frozenset({TaskStatus.failed, TaskStatus.needs_attention}),
+}
+
+FINAL_FAILURES: dict[FailureKind, str] = {
+    FailureKind.checks_failed: "Обязательные проверки PR не пройдены, PR закрыт. Повтор недоступен: поставьте новую задачу.",
+    FailureKind.pr_rejected: "Агент ревью отклонил PR. Повтор недоступен: поставьте новую задачу.",
 }
 
 
@@ -57,6 +63,8 @@ def check_task_decision(task: Task, decision: TaskDecision) -> None:
         raise not_allowed("Решение недопустимо в текущем статусе задачи.")
     if decision == TaskDecision.approve_spec and task.spec is None:
         raise not_allowed("Требования ещё не подготовлены.")
+    if decision == TaskDecision.retry and task.status == TaskStatus.failed and task.failure_kind in FINAL_FAILURES:
+        raise not_allowed(FINAL_FAILURES[task.failure_kind])
     if decision == TaskDecision.retry and task.usage.model_calls >= task.usage.model_calls_limit:
         raise not_allowed("Бюджет обращений к моделям исчерпан. Повтор недоступен.")
 

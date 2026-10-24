@@ -8,7 +8,7 @@ export const TASK_STATUSES = [
   'developing',
   'reviewing',
   'awaiting_integration',
-  'awaiting_release_approval',
+  'awaiting_release',
   'deploying',
   'released',
   'failed',
@@ -17,14 +17,10 @@ export const TASK_STATUSES = [
 ] as const
 export type TaskStatus = (typeof TASK_STATUSES)[number]
 
-export const SLOT_STATUSES: readonly TaskStatus[] = [
-  'awaiting_spec_approval',
-  'developing',
-  'reviewing',
-  'awaiting_integration',
-  'awaiting_release_approval',
-  'deploying',
-]
+export const SLOT_STATUSES: readonly TaskStatus[] = ['awaiting_spec_approval', 'developing', 'reviewing']
+
+export const FAILURE_KINDS = ['checks_failed', 'pr_rejected'] as const
+export type FailureKind = (typeof FAILURE_KINDS)[number]
 
 export const SLOTS_TOTAL = 3
 
@@ -47,6 +43,10 @@ export const TASK_EVENT_TYPES = [
   'check_result',
   'release_candidate',
   'deploy_status',
+  'pr_opened',
+  'checks_status',
+  'pr_closed',
+  'operation_unknown',
 ] as const
 export type TaskEventType = (typeof TASK_EVENT_TYPES)[number]
 
@@ -107,6 +107,18 @@ export interface TaskCreate {
   profile: ModelProfile
 }
 
+export interface PullRequestCheck {
+  name: string
+  status: string
+  conclusion: string | null
+  url: string | null
+}
+
+export interface PullRequestChecks {
+  head_sha: string
+  checks: PullRequestCheck[]
+}
+
 export interface Task {
   id: string
   title: string
@@ -123,6 +135,10 @@ export interface Task {
   branch: string | null
   base_sha: string | null
   pr_url: string | null
+  pr_number: number | null
+  head_sha: string | null
+  failure_kind: FailureKind | null
+  checks: PullRequestChecks | null
   changed_files: string[]
   fix_cycles: number
   usage: Usage

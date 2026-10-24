@@ -1,0 +1,684 @@
+import base64
+import json
+import logging
+import secrets
+import subprocess
+import threading
+import time
+from dataclasses import replace
+from datetime import timedelta
+from types import SimpleNamespace
+
+import httpx
+import pytest
+
+from app import workspace as workspace_module
+from app.config import CHECKOUT_ROOT
+from app.db import utcnow
+from app.github import GitHubError, GitHubUnavailable, github_client
+from app.operations import OperationLog, OpStatus
+from app.release import ReleaseWorker
+from app.required_checks import load_required_checks
+from app.schemas import AgentRole, FailureKind, TaskEventType, TaskStatus
+from app.workspace import PushResult, Workspace
+from conftest import FakeGitHub, git
+
+SPEC = {
+    "version": 1,
+    "spec_hash": "sha256:spec",
+    "summary": "Под ответом ассистента появляется кнопка копирования.",
+    "acceptance_criteria": ["Кнопка копирования видна под ответом.", "Нажатие копирует текст ответа."],
+    "sources": [],
+}
+REQUIRED = load_required_checks(CHECKOUT_ROOT)
+TABLES = (
+    "participants", "sessions", "tasks", "task_events", "decisions", "release_candidates", "check_reports",
+    "intake_reservations", "operations",
+)
+
+
+class Crash(BaseException):
+    pass
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.offset = timedelta()
+
+    def __call__(self):
+        return utcnow() + self.offset
+
+
+class Setup(SimpleNamespace):
+    def worker(self) -> ReleaseWorker:
+        if getattr(self, "current", None) is not None:
+            self.current.shutdown()
+        self.current = ReleaseWorker(self.settings, self.store, self.workspace, self.github, REQUIRED, self.clock)
+        return self.current
+
+    def task(self):
+        return self.store.get_task(self.task_id)
+
+    def events(self, kind=None):
+        return [event for event in self.store.events_after(self.task_id, 0, 1000) if kind is None or event.type == kind]
+
+    def ops(self):
+        with self.store.db.connection() as conn:
+            return conn.fetchall("SELECT * FROM operations WHERE task_id = :id ORDER BY started_at", {"id": self.task_id})
+
+    def remote(self):
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "-q", f"refs/heads/office/{self.task_id}"],
+            cwd=self.origin.bare, capture_output=True, text=True,
+        )
+        return result.stdout.strip() or None
+
+
+def drive(worker: ReleaseWorker, task_id: str, limit: int = 12) -> int:
+    for count in range(limit):
+        if not worker.step(task_id):
+            return count
+    raise AssertionError("worker does not settle")
+
+
+@pytest.fixture
+def setup(office, origin, tmp_path, app_key, monkeypatch):
+    app = office.workspace_app(origin, tmp_path)
+    store = app.state.store
+    workspace = app.state.workspace
+    client, me = office.login(app=app)
+    task_id = office.start_tasks(app, me["id"])[0]
+    path = workspace.worktree_path(task_id)
+    (path / "apps/chat/web/src/App.tsx").write_text("export function App() {\n  return 'copy button'\n}\n", encoding="utf-8")
+    head = workspace.commit(task_id, "Кнопка копирования ответа")
+    assert head is not None
+    office.set_task(task_id, status="awaiting_integration", spec=json.dumps(SPEC))
+    store.add_event(task_id, TaskEventType.role_finished, {"step": "qa", "outcome": "ok", "summary": "QA: тест проходит."},
+                    role=AgentRole.qa)
+    store.add_event(task_id, TaskEventType.role_finished,
+                    {"step": "review", "outcome": "ok", "summary": "Вердикт pass, замечаний: 0."}, role=AgentRole.critic)
+    token = secrets.token_hex(16)
+    fake = FakeGitHub(origin.bare, token)
+    github = github_client("5452356", "174735588", app_key.path, "SlavaPush/vibe-studio",
+                           transport=httpx.MockTransport(fake.handler))
+    settings = replace(app.state.settings, github_push_url=origin.url)
+    pushes = []
+    real_push = workspace.push
+
+    def counted_push(*args, **kwargs):
+        pushes.append(args)
+        return real_push(*args, **kwargs)
+
+    monkeypatch.setattr(workspace, "push", counted_push)
+    result = Setup(
+        office=office, origin=origin, app=app, store=store, workspace=workspace, client=client, me=me,
+        task_id=task_id, head=head, fake=fake, github=github, settings=settings, clock=Clock(), pushes=pushes,
+        token=token, current=None,
+    )
+    yield result
+    if result.current is not None:
+        result.current.shutdown()
+
+
+def opened(setup) -> ReleaseWorker:
+    worker = setup.worker()
+    drive(worker, setup.task_id)
+    assert setup.task().pr_number == 1
+    return worker
+
+
+def decide(setup, decision, key):
+    task = setup.task()
+    return setup.client.post(
+        f"/api/tasks/{setup.task_id}/decisions",
+        json={"decision": decision, "expected_version": task.version, "idempotency_key": key},
+    )
+
+
+def test_task_reaches_open_pr_and_passed_checks(setup):
+    worker = setup.worker()
+    assert worker.candidates() == [setup.task_id]
+    calls = []
+    for _ in range(6):
+        before = len(setup.fake.mutations()) + len(setup.pushes)
+        progressed = worker.step(setup.task_id)
+        calls.append(len(setup.fake.mutations()) + len(setup.pushes) - before)
+        if not progressed:
+            break
+    assert max(calls) == 1
+    task = setup.task()
+    assert setup.remote() == setup.head
+    assert (task.status, task.head_sha, task.pr_number) == (TaskStatus.awaiting_integration, setup.head, 1)
+    assert task.pr_url == "https://github.com/SlavaPush/vibe-studio/pull/1"
+    pr = setup.fake.prs[1]
+    assert (pr["head"]["ref"], pr["base"]["ref"], pr["title"]) == (f"office/{setup.task_id}", "main", task.title)
+    for text in (SPEC["summary"], *SPEC["acceptance_criteria"], "QA: тест проходит.", "Вердикт pass, замечаний: 0."):
+        assert text in pr["body"]
+    assert "Generated" not in pr["body"] and "Co-Authored" not in pr["body"]
+    assert [event.payload for event in setup.events(TaskEventType.pr_opened)] == [
+        {"pr_number": 1, "pr_url": task.pr_url}
+    ]
+    assert task.checks.head_sha == setup.head
+    assert {check.status for check in task.checks.checks} == {"missing"}
+    assert len(setup.events(TaskEventType.checks_status)) == 1
+    assert setup.store.slots_used() == 0
+
+    setup.fake.add_pr_runs(setup.head, 1)
+    assert drive(worker, setup.task_id) == 0
+    task = setup.task()
+    assert task.status == TaskStatus.awaiting_integration
+    assert [(check.status, check.conclusion) for check in task.checks.checks] == [("completed", "success")] * 7
+    assert len(setup.events(TaskEventType.checks_status)) == 2
+    drive(worker, setup.task_id)
+    assert len(setup.events(TaskEventType.checks_status)) == 2
+    assert setup.fake.mutations() == [("POST", "/repos/SlavaPush/vibe-studio/pulls")]
+    assert len(setup.pushes) == 1
+    assert {row["kind"]: row["status"] for row in setup.ops()} == {"push": "succeeded", "create_pr": "succeeded"}
+
+
+def test_failed_check_closes_pr_and_fails_task(setup):
+    worker = opened(setup)
+    setup.fake.add_pr_runs(setup.head, 1, office_web="failure")
+    drive(worker, setup.task_id)
+    task = setup.task()
+    assert (task.status, task.failure_kind) == (TaskStatus.failed, FailureKind.checks_failed)
+    assert setup.fake.prs[1]["state"] == "closed"
+    assert [event.payload for event in setup.events(TaskEventType.pr_closed)] == [{"pr_number": 1}]
+    reason = [event for event in setup.events(TaskEventType.role_finished) if event.payload["step"] == "pr_checks"]
+    assert "office-web (failure)" in reason[-1].payload["summary"]
+    response = decide(setup, "retry", "retry-checks-failed")
+    assert response.status_code == 409
+    assert response.json()["code"] == "decision_not_allowed"
+    assert worker.candidates() == []
+
+
+@pytest.mark.parametrize("conclusion", ["cancelled", "timed_out", "action_required", "skipped", "neutral"])
+def test_non_success_conclusions_fail_checks(setup, conclusion):
+    worker = opened(setup)
+    setup.fake.add_pr_runs(setup.head, 1, office_paths=conclusion)
+    drive(worker, setup.task_id)
+    assert setup.task().failure_kind == FailureKind.checks_failed
+
+
+def test_runs_of_other_pr_head_attempt_or_app_are_not_counted(setup):
+    worker = opened(setup)
+    head = setup.head
+    setup.fake.add_run("ci.yml", "pull_request", head, [7], {name: "success" for name in ("chat-api",)})
+    setup.fake.add_run("ci.yml", "pull_request", head, [], {"chat-web": "success"})
+    setup.fake.add_run("ci.yml", "pull_request", "f" * 40, [1], {"chat-containers": "success"})
+    setup.fake.add_run("ci.yml", "push", head, [1], {"office-api": "success"})
+    setup.fake.add_run("ci.yml", "pull_request", head, [1], {"office-sandbox": "success"}, app_id=99)
+    setup.fake.add_run("office-paths.yml", "pull_request_target", head, [1], {"office-paths": "success"},
+                       run_number=4, run_attempt=1)
+    setup.fake.add_run("office-paths.yml", "pull_request_target", head, [1], {"office-paths": None},
+                       run_number=4, run_attempt=2)
+    summary = {check.name: check.status for check in worker.summary(setup.task()).checks}
+    assert summary == {
+        "chat-api": "missing", "chat-web": "missing", "chat-containers": "missing", "office-api": "missing",
+        "office-web": "missing", "office-sandbox": "missing", "office-paths": "in_progress",
+    }
+    setup.fake.add_run("ci.yml", "pull_request", head, [1], {"office-web": "success"}, run_number=2)
+    checks = {check.name: (check.status, check.conclusion) for check in worker.summary(setup.task()).checks}
+    assert checks["office-web"] == ("completed", "success")
+
+
+def test_missing_runs_after_timeout_need_attention(setup):
+    worker = opened(setup)
+    setup.clock.offset = timedelta(minutes=29)
+    drive(worker, setup.task_id)
+    assert setup.task().status == TaskStatus.awaiting_integration
+    setup.clock.offset = timedelta(minutes=31)
+    drive(worker, setup.task_id)
+    assert setup.task().status == TaskStatus.needs_attention
+    assert setup.fake.prs[1]["state"] == "open"
+
+
+def test_cancel_closes_pr_once(setup):
+    worker = opened(setup)
+    assert decide(setup, "cancel", "cancel-open-pr").status_code == 200
+    assert setup.task().status == TaskStatus.cancelled
+    assert worker.candidates() == [setup.task_id]
+    drive(worker, setup.task_id)
+    assert setup.fake.prs[1]["state"] == "closed"
+    assert setup.task().status == TaskStatus.cancelled
+    assert len(setup.events(TaskEventType.pr_closed)) == 1
+    assert worker.candidates() == []
+    assert setup.fake.mutations().count(("PATCH", "/repos/SlavaPush/vibe-studio/pulls/1")) == 1
+
+
+def test_push_crash_before_call_is_repeated_after_restart(setup, monkeypatch):
+    real = setup.workspace.push
+    monkeypatch.setattr(setup.workspace, "push", lambda *args: (_ for _ in ()).throw(Crash()))
+    with pytest.raises(Crash):
+        setup.worker().step(setup.task_id)
+    assert [row["status"] for row in setup.ops()] == ["started"]
+    assert setup.remote() is None
+    monkeypatch.setattr(setup.workspace, "push", real)
+    drive(setup.worker(), setup.task_id)
+    assert setup.remote() == setup.head
+    row = setup.ops()[0]
+    assert (row["status"], row["attempt"]) == ("succeeded", 2)
+    assert setup.task().pr_number == 1
+
+
+def test_push_crash_after_call_is_not_repeated(setup, monkeypatch):
+    worker = setup.worker()
+    monkeypatch.setattr(worker, "_apply_push", lambda *args: (_ for _ in ()).throw(Crash()))
+    with pytest.raises(Crash):
+        worker.step(setup.task_id)
+    assert setup.remote() == setup.head
+    assert len(setup.pushes) == 1
+    drive(setup.worker(), setup.task_id)
+    assert len(setup.pushes) == 1
+    assert setup.task().head_sha == setup.head
+    assert setup.ops()[0]["attempt"] == 1
+
+
+def test_lost_push_with_foreign_remote_change_needs_attention(setup, monkeypatch):
+    worker = setup.worker()
+    monkeypatch.setattr(worker, "_apply_push", lambda *args: (_ for _ in ()).throw(Crash()))
+    with pytest.raises(Crash):
+        worker.step(setup.task_id)
+    other = setup.origin.work
+    git(other, "fetch", "-q", str(setup.origin.bare), f"office/{setup.task_id}")
+    git(other, "checkout", "-q", "-B", "foreign", "FETCH_HEAD")
+    setup.origin.write("apps/chat/web/src/Foreign.tsx", "export {}\n")
+    git(other, "add", "-A")
+    git(other, "commit", "-q", "-m", "foreign")
+    git(other, "push", "-q", "-f", str(setup.origin.bare), f"foreign:office/{setup.task_id}")
+    drive(setup.worker(), setup.task_id)
+    assert setup.task().status == TaskStatus.needs_attention
+    assert setup.ops()[0]["status"] == "unknown"
+    assert len(setup.pushes) == 1
+    assert decide(setup, "retry", "retry-diverged").status_code == 200
+    assert setup.task().status == TaskStatus.awaiting_integration
+    drive(setup.worker(), setup.task_id)
+    assert setup.task().status == TaskStatus.needs_attention
+    assert len(setup.pushes) == 1
+
+
+def test_rejected_push_needs_attention(setup):
+    other = setup.origin.work
+    git(other, "checkout", "-q", "-b", "elsewhere")
+    setup.origin.write("apps/chat/web/src/Other.tsx", "export {}\n")
+    git(other, "add", "-A")
+    git(other, "commit", "-q", "-m", "other")
+    git(other, "push", "-q", str(setup.origin.bare), f"elsewhere:office/{setup.task_id}")
+    drive(setup.worker(), setup.task_id)
+    assert setup.task().status == TaskStatus.needs_attention
+    assert setup.ops()[0]["status"] == "failed"
+    assert setup.fake.mutations() == []
+
+
+def test_branch_violation_blocks_push(setup, monkeypatch):
+    monkeypatch.setattr(setup.workspace, "verify_branch", lambda task_id: ["apps/chat/api/main.py: запрещено"])
+    drive(setup.worker(), setup.task_id)
+    assert setup.task().status == TaskStatus.needs_attention
+    assert setup.pushes == []
+    assert setup.ops() == []
+
+
+def test_create_crash_before_call_creates_one_pr(setup, monkeypatch):
+    worker = setup.worker()
+    drive_until_pushed(worker, setup)
+    monkeypatch.setattr(worker.github, "create_pr", lambda *args: (_ for _ in ()).throw(Crash()))
+    with pytest.raises(Crash):
+        worker.step(setup.task_id)
+    assert setup.fake.prs == {}
+    monkeypatch.undo()
+    drive(setup.worker(), setup.task_id)
+    assert list(setup.fake.prs) == [1]
+    assert setup.task().pr_number == 1
+
+
+def drive_until_pushed(worker, setup):
+    while setup.task().head_sha is None:
+        assert worker.step(setup.task_id)
+
+
+def test_create_crash_after_call_finds_pr(setup, monkeypatch):
+    worker = setup.worker()
+    drive_until_pushed(worker, setup)
+    monkeypatch.setattr(worker, "_apply_pr", lambda *args: (_ for _ in ()).throw(Crash()))
+    with pytest.raises(Crash):
+        worker.step(setup.task_id)
+    assert list(setup.fake.prs) == [1]
+    assert setup.task().pr_number is None
+    drive(setup.worker(), setup.task_id)
+    assert list(setup.fake.prs) == [1]
+    assert setup.task().pr_number == 1
+    assert setup.fake.mutations().count(("POST", "/repos/SlavaPush/vibe-studio/pulls")) == 1
+
+
+def test_create_timeout_with_created_pr_does_not_create_second(setup):
+    worker = setup.worker()
+    drive_until_pushed(worker, setup)
+    setup.fake.lose_create = True
+    assert not worker.step(setup.task_id)
+    assert {row["kind"]: row["status"] for row in setup.ops()}["create_pr"] == "started"
+    setup.fake.lose_create = False
+    drive(worker, setup.task_id)
+    assert list(setup.fake.prs) == [1]
+    assert setup.task().pr_number == 1
+    assert setup.fake.mutations().count(("POST", "/repos/SlavaPush/vibe-studio/pulls")) == 1
+
+
+def test_failed_result_transaction_keeps_operation_started(setup, monkeypatch):
+    worker = setup.worker()
+    drive_until_pushed(worker, setup)
+    real = setup.store.record_event
+
+    def broken(conn, task_id, event_type, payload, **kwargs):
+        if event_type == TaskEventType.pr_opened:
+            raise RuntimeError("database failure")
+        return real(conn, task_id, event_type, payload, **kwargs)
+
+    monkeypatch.setattr(setup.store, "record_event", broken)
+    with pytest.raises(RuntimeError):
+        worker.step(setup.task_id)
+    assert {row["kind"]: row["status"] for row in setup.ops()}["create_pr"] == "started"
+    assert setup.task().pr_number is None
+    monkeypatch.undo()
+    drive(worker, setup.task_id)
+    assert setup.task().pr_number == 1
+    assert len(setup.fake.prs) == 1
+
+
+def test_lost_create_then_cancel_and_restart_closes_found_pr(setup, monkeypatch):
+    worker = setup.worker()
+    drive_until_pushed(worker, setup)
+    monkeypatch.setattr(worker, "_apply_pr", lambda *args: (_ for _ in ()).throw(Crash()))
+    with pytest.raises(Crash):
+        worker.step(setup.task_id)
+    assert decide(setup, "cancel", "cancel-lost-pr").status_code == 200
+    restarted = setup.worker()
+    assert restarted.candidates() == [setup.task_id]
+    drive(restarted, setup.task_id)
+    task = setup.task()
+    assert (task.status, task.pr_number) == (TaskStatus.cancelled, 1)
+    assert setup.fake.prs[1]["state"] == "closed"
+    assert restarted.candidates() == []
+
+
+@pytest.mark.parametrize("moment", ["before", "after"])
+def test_close_crash_is_reconciled_after_restart(setup, monkeypatch, moment):
+    worker = opened(setup)
+    setup.fake.add_pr_runs(setup.head, 1, office_web="failure")
+    if moment == "before":
+        monkeypatch.setattr(worker.github, "close_pr", lambda *args: (_ for _ in ()).throw(Crash()))
+    else:
+        monkeypatch.setattr(worker, "_apply_close", lambda *args: (_ for _ in ()).throw(Crash()))
+    with pytest.raises(Crash):
+        worker.step(setup.task_id)
+    assert setup.fake.prs[1]["state"] == ("open" if moment == "before" else "closed")
+    monkeypatch.undo()
+    drive(setup.worker(), setup.task_id)
+    task = setup.task()
+    assert (task.status, task.failure_kind) == (TaskStatus.failed, FailureKind.checks_failed)
+    assert setup.fake.prs[1]["state"] == "closed"
+    patches = setup.fake.mutations().count(("PATCH", "/repos/SlavaPush/vibe-studio/pulls/1"))
+    assert patches == 1
+    close = [row for row in setup.ops() if row["kind"] == "close_pr"][0]
+    assert (close["status"], close["attempt"]) == ("succeeded", 2 if moment == "before" else 1)
+
+
+def test_unavailable_github_reaches_reconcile_limit(setup):
+    worker = setup.worker()
+    drive_until_pushed(worker, setup)
+    setup.fake.lose_create = True
+    worker.step(setup.task_id)
+    setup.fake.down = True
+    for _ in range(3):
+        assert not worker.step(setup.task_id)
+    assert setup.task().status == TaskStatus.awaiting_integration
+    setup.clock.offset = timedelta(minutes=31)
+    worker.step(setup.task_id)
+    assert setup.task().status == TaskStatus.needs_attention
+    assert {row["kind"]: row["status"] for row in setup.ops()}["create_pr"] == "unknown"
+    setup.fake.down = False
+    setup.clock.offset = timedelta()
+    assert decide(setup, "retry", "retry-after-outage").status_code == 200
+    assert setup.task().status == TaskStatus.awaiting_integration
+    drive(worker, setup.task_id)
+    assert setup.task().pr_number == 1
+    assert len(setup.fake.prs) == 1
+
+
+def test_unavailable_github_for_cancelled_task_records_unknown_and_stops(setup):
+    worker = opened(setup)
+    assert decide(setup, "cancel", "cancel-outage").status_code == 200
+    setup.fake.down = True
+    assert not worker.step(setup.task_id)
+    assert not worker.step(setup.task_id)
+    close =[row for row in setup.ops() if row["kind"] == "close_pr"][0]
+    assert close["status"] == "started"
+    setup.clock.offset = timedelta(minutes=31)
+    worker.step(setup.task_id)
+    assert setup.task().status == TaskStatus.cancelled
+    unknown = setup.events(TaskEventType.operation_unknown)
+    assert [(event.payload["kind"], event.payload["pr_number"]) for event in unknown] == [("close_pr", 1)]
+    assert worker.candidates() == []
+
+
+def test_retry_routes_by_operation_log(setup):
+    worker = opened(setup)
+    setup.office.set_task(setup.task_id, status="needs_attention")
+    assert decide(setup, "retry", "retry-with-pr").status_code == 200
+    assert setup.task().status == TaskStatus.awaiting_integration
+    assert worker.candidates() == [setup.task_id]
+
+
+def test_operation_log_states(setup):
+    log = OperationLog(setup.store.db)
+    first, allowed = log.begin("push", "push:k", setup.task_id)
+    assert (first.status, first.attempt, allowed) == (OpStatus.started, 1, True)
+    again, allowed = log.begin("push", "push:k", setup.task_id)
+    assert (again.id, allowed) == (first.id, False)
+    log.mark(first, OpStatus.failed, detail="not found")
+    retried, allowed = log.begin("push", "push:k", setup.task_id)
+    assert (retried.status, retried.attempt, allowed) == (OpStatus.started, 2, True)
+    log.mark(retried, OpStatus.succeeded)
+    done, allowed = log.begin("push", "push:k", setup.task_id)
+    assert (done.status, allowed) == (OpStatus.succeeded, False)
+    log.mark(done, OpStatus.unknown)
+    assert log.begin("push", "push:k", setup.task_id)[1] is False
+
+
+def test_secrets_do_not_leak(setup, monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    calls = []
+    real_run = subprocess.run
+
+    def recording(args, **kwargs):
+        calls.append((list(args), dict(kwargs.get("env") or {})))
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(workspace_module.subprocess, "run", recording)
+    worker = setup.worker()
+    drive(worker, setup.task_id)
+    setup.fake.status[("GET", "/repos/SlavaPush/vibe-studio/actions/runs")] = 500
+    errors = []
+    assert not worker.step(setup.task_id)
+    with pytest.raises(GitHubError) as failed:
+        worker.github.runs(setup.head)
+    errors.append(failed.value)
+    worker.run_once()
+    setup.fake.status.clear()
+    setup.fake.down = True
+    assert not worker.step(setup.task_id)
+    with pytest.raises(GitHubUnavailable) as unavailable:
+        worker.github.get_pr(1)
+    errors.append(unavailable.value)
+    worker.run_once()
+    jwt_value = setup.fake.jwts[0]
+    basic = base64.b64encode(f"x-access-token:{setup.token}".encode()).decode()
+    secrets_list = [setup.token, jwt_value, basic]
+    push_calls = [call for call in calls if call[0][:2] == ["git", "push"]]
+    assert len(push_calls) == 1
+    assert push_calls[0][1]["GIT_CONFIG_VALUE_0"] == f"AUTHORIZATION: basic {basic}"
+    assert push_calls[0][1]["GIT_CONFIG_KEY_0"] == "http.https://github.com/.extraheader"
+    for call in calls:
+        args, env = call
+        for secret in secrets_list:
+            assert all(secret not in arg for arg in args)
+            if call is not push_calls[0]:
+                assert all(secret not in value for value in env.values())
+    config = (setup.workspace.clone / ".git" / "config").read_text()
+    with setup.store.db.connection() as conn:
+        rows = [conn.fetchall(f"SELECT * FROM {table}") for table in TABLES]
+    texts = [config, caplog.text, json.dumps(rows, default=str)]
+    texts += [json.dumps(event.payload, ensure_ascii=False) for event in setup.events()]
+    for error in errors:
+        assert error.__cause__ is None and error.__context__ is None
+        texts.append(f"{error} {error!r}")
+    for text in texts:
+        for secret in secrets_list:
+            assert secret not in text
+
+
+def test_push_to_bare_repository_keeps_token_out_of_clone(setup):
+    result = setup.workspace.push(setup.task_id, setup.origin.url, setup.token, setup.head)
+    assert result == PushResult.ok
+    assert setup.remote() == setup.head
+    assert setup.token not in (setup.workspace.clone / ".git" / "config").read_text()
+    found = subprocess.run(
+        ["git", "config", "--get-regexp", "extraheader"],
+        cwd=setup.workspace.worktree_path(setup.task_id), capture_output=True, text=True,
+    )
+    assert found.stdout == ""
+
+
+def test_worktree_survives_background_preparation_after_gate(setup):
+    path = setup.workspace.worktree_path(setup.task_id)
+    setup.workspace.ensure_worktree(setup.task_id)
+    assert setup.workspace.is_task_worktree(path, setup.task_id)
+    setup.workspace.recover()
+    setup.workspace.wait_idle()
+    assert setup.workspace.is_task_worktree(path, setup.task_id)
+
+
+def test_create_app_without_github_app_warns_once(office, origin, tmp_path, caplog):
+    caplog.set_level(logging.WARNING, logger="office")
+    app = office.new_app(workspace=True, runner=True, target_repo_url=origin.url, workspace_dir=tmp_path / "ws")
+    assert app.state.release is None
+    warnings = [record for record in caplog.records if "GitHub App" in record.getMessage()]
+    assert len(warnings) == 1
+    client, _ = office.login(app=app)
+    assert client.get("/api/slots").status_code == 200
+
+
+def test_worker_starts_after_worktree_recovery(office, origin, tmp_path, app_key, monkeypatch):
+    gate = threading.Event()
+    order = []
+    real = Workspace._recover
+
+    def delayed(self):
+        gate.wait(10)
+        real(self)
+        order.append("recovered")
+
+    monkeypatch.setattr(Workspace, "_recover", delayed)
+    monkeypatch.setattr(ReleaseWorker, "start", lambda self: order.append(("started", self)))
+    app = office.new_app(
+        workspace=True, runner=True, target_repo_url=origin.url, workspace_dir=tmp_path / "ws",
+        github_app_id="1", github_app_installation_id="2", github_app_private_key_path=app_key.path,
+    )
+    assert app.state.release is not None
+    time.sleep(0.2)
+    assert order == []
+    gate.set()
+    app.state.workspace.wait_idle()
+    assert order == ["recovered", ("started", app.state.release)]
+
+
+def test_foreign_push_to_pr_branch_needs_attention(setup):
+    worker = opened(setup)
+    setup.fake.add_pr_runs(setup.head, 1, office_web="failure")
+    other = setup.origin.work
+    git(other, "fetch", "-q", str(setup.origin.bare), f"office/{setup.task_id}")
+    git(other, "checkout", "-q", "-B", "foreign", "FETCH_HEAD")
+    setup.origin.write("apps/chat/web/src/Foreign.tsx", "export {}\n")
+    git(other, "add", "-A")
+    git(other, "commit", "-q", "-m", "foreign")
+    git(other, "push", "-q", str(setup.origin.bare), f"foreign:office/{setup.task_id}")
+    before = setup.task().checks
+    drive(worker, setup.task_id)
+    task = setup.task()
+    assert task.status == TaskStatus.needs_attention
+    assert task.checks == before
+    assert setup.fake.prs[1]["state"] == "open"
+    assert ("PATCH", "/repos/SlavaPush/vibe-studio/pulls/1") not in setup.fake.mutations()
+
+
+def test_pr_closed_outside_office_needs_attention(setup):
+    worker = opened(setup)
+    setup.fake.prs[1]["state"] = "closed"
+    drive(worker, setup.task_id)
+    assert setup.task().status == TaskStatus.needs_attention
+
+
+@pytest.mark.parametrize("failure", ["forbidden", "down"])
+def test_unreadable_checks_need_attention_after_timeout(setup, failure):
+    worker = opened(setup)
+    if failure == "down":
+        setup.fake.down = True
+    else:
+        setup.fake.status[("GET", "/repos/SlavaPush/vibe-studio/actions/runs")] = 403
+    assert not worker.step(setup.task_id)
+    assert setup.task().status == TaskStatus.awaiting_integration
+    setup.clock.offset = timedelta(minutes=31)
+    assert not worker.step(setup.task_id)
+    assert setup.task().status == TaskStatus.needs_attention
+
+
+def test_cancel_after_unknown_close_closes_pr(setup):
+    worker = opened(setup)
+    setup.fake.add_pr_runs(setup.head, 1, office_web="failure")
+    setup.fake.status[("PATCH", "/repos/SlavaPush/vibe-studio/pulls/1")] = 403
+    drive(worker, setup.task_id)
+    assert setup.task().status == TaskStatus.needs_attention
+    assert [row["status"] for row in setup.ops() if row["kind"] == "close_pr"] == ["unknown"]
+    setup.fake.status.clear()
+    assert decide(setup, "cancel", "cancel-after-unknown").status_code == 200
+    assert worker.candidates() == [setup.task_id]
+    drive(worker, setup.task_id)
+    assert setup.fake.prs[1]["state"] == "closed"
+    assert setup.task().status == TaskStatus.cancelled
+    assert len(setup.events(TaskEventType.pr_closed)) == 1
+    assert setup.events(TaskEventType.operation_unknown) == []
+    assert worker.candidates() == []
+
+
+def test_cancel_during_push_reconcile_still_closes_pr(setup, monkeypatch):
+    worker = opened(setup)
+    log = OperationLog(setup.store.db)
+    log.begin("push", f"push:{setup.task_id}:{'e' * 40}", setup.task_id)
+    real = setup.github.branch_sha
+
+    def cancel_during_read(branch):
+        sha = real(branch)
+        assert decide(setup, "cancel", "cancel-during-reconcile").status_code == 200
+        return sha
+
+    monkeypatch.setattr(setup.github, "branch_sha", cancel_during_read)
+    assert not worker.step(setup.task_id)
+    assert setup.task().status == TaskStatus.cancelled
+    assert [row["status"] for row in setup.ops() if row["kind"] == "push"] == ["succeeded", "unknown"]
+    assert setup.events(TaskEventType.operation_unknown) == []
+    monkeypatch.setattr(setup.github, "branch_sha", real)
+    assert worker.candidates() == [setup.task_id]
+    drive(worker, setup.task_id)
+    assert setup.fake.prs[1]["state"] == "closed"
+    assert worker.candidates() == []
+
+
+def test_unknown_push_does_not_block_closing_known_pr(setup):
+    worker = opened(setup)
+    log = OperationLog(setup.store.db)
+    operation, _ = log.begin("push", f"push:{setup.task_id}:{'e' * 40}", setup.task_id)
+    log.mark(operation, OpStatus.unknown, detail="diverged")
+    setup.office.set_task(setup.task_id, status="needs_attention")
+    assert decide(setup, "cancel", "cancel-unknown-push").status_code == 200
+    drive(worker, setup.task_id)
+    assert setup.fake.prs[1]["state"] == "closed"
+    assert worker.candidates() == []

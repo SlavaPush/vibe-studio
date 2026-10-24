@@ -19,7 +19,7 @@ PLAN_STATUSES = [
     "developing",
     "reviewing",
     "awaiting_integration",
-    "awaiting_release_approval",
+    "awaiting_release",
     "deploying",
     "released",
     "failed",
@@ -40,6 +40,10 @@ PLAN_EVENT_TYPES = [
     "check_result",
     "release_candidate",
     "deploy_status",
+    "pr_opened",
+    "checks_status",
+    "pr_closed",
+    "operation_unknown",
 ]
 
 

@@ -40,7 +40,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     model_calls_limit INTEGER NOT NULL,
     input_tokens BIGINT NOT NULL,
     output_tokens BIGINT NOT NULL,
-    event_seq INTEGER NOT NULL
+    event_seq INTEGER NOT NULL,
+    pr_number INTEGER,
+    head_sha TEXT,
+    failure_kind TEXT,
+    checks TEXT
 );
 
 CREATE INDEX IF NOT EXISTS tasks_status_created ON tasks (status, created_at);
@@ -100,6 +104,22 @@ CREATE TABLE IF NOT EXISTS check_reports (
     suite_hash TEXT,
     checks TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS operations (
+    id TEXT PRIMARY KEY,
+    task_id TEXT REFERENCES tasks (id),
+    release_id TEXT,
+    kind TEXT NOT NULL,
+    key TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    external_ref TEXT,
+    detail TEXT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS operations_task ON operations (task_id);
 
 CREATE TABLE IF NOT EXISTS intake_reservations (
     id TEXT PRIMARY KEY,

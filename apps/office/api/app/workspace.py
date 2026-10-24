@@ -1,20 +1,32 @@
+import base64
 import io
 import logging
 import os
 import shutil
+import subprocess
 import tarfile
 import tempfile
 import threading
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from enum import StrEnum
 from pathlib import Path
 
-from app.branch_check import GIT_TIMEOUT, RawChange, WorkspaceError, check_change, check_range, parse_raw, run_git
+from app.branch_check import (
+    GIT_TIMEOUT,
+    RawChange,
+    WorkspaceError,
+    check_change,
+    check_range,
+    git_env,
+    parse_raw,
+    run_git,
+)
 from app.config import APP_DIR, Settings
 from app.errors import ErrorCode, OfficeError, not_found
 from app.paths import PathDenied, PathPolicy
-from app.schemas import SLOT_STATUSES, AgentRole, Task, TaskEventType, TaskStatus
+from app.schemas import SLOT_STATUSES, WORKTREE_STATUSES, AgentRole, Task, TaskEventType, TaskStatus
 from app.tasks import CLOSED_STATUSES, SIGNAL_SLOT_ACQUIRED, SIGNAL_TASK_CLOSED, TaskStore
 
 logger = logging.getLogger("office.workspace")
@@ -32,14 +44,41 @@ COMMIT_ENV = {
     "GIT_CONFIG_KEY_0": "core.hooksPath",
     "GIT_CONFIG_VALUE_0": os.devnull,
 }
+PUSH_HEADER_KEY = "http.https://github.com/.extraheader"
 
 
 class SparseUnsafe(WorkspaceError):
     pass
 
 
+class PushResult(StrEnum):
+    ok = "ok"
+    rejected = "rejected"
+    error = "error"
+
+
 def branch_name(task_id: str) -> str:
     return f"office/{task_id}"
+
+
+def push_env(token: str) -> dict[str, str]:
+    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode("ascii")
+    env = git_env(
+        {
+            "GIT_CONFIG_COUNT": "4",
+            "GIT_CONFIG_KEY_0": PUSH_HEADER_KEY,
+            "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}",
+            "GIT_CONFIG_KEY_1": "core.hooksPath",
+            "GIT_CONFIG_VALUE_1": os.devnull,
+            "GIT_CONFIG_KEY_2": "credential.helper",
+            "GIT_CONFIG_VALUE_2": "",
+            "GIT_CONFIG_KEY_3": "core.askPass",
+            "GIT_CONFIG_VALUE_3": "",
+        }
+    )
+    for name in ("GIT_ASKPASS", "SSH_ASKPASS", "GIT_CONFIG_PARAMETERS"):
+        env.pop(name, None)
+    return env
 
 
 class Workspace:
@@ -118,7 +157,7 @@ class Workspace:
                     except WorkspaceError:
                         logger.exception("cannot remove worktree of %s", task.id)
         for task in sorted(tasks.values(), key=lambda item: (item.created_at, item.id)):
-            if task.status in SLOT_STATUSES:
+            if task.status in WORKTREE_STATUSES:
                 self.ensure_worktree(task.id)
 
     def git(self, *args: str, cwd: Path | None = None, env: dict[str, str] | None = None,
@@ -234,7 +273,7 @@ class Workspace:
             task = self.store.get_task(task_id)
         except OfficeError:
             return
-        if task.status not in SLOT_STATUSES:
+        if task.status not in WORKTREE_STATUSES:
             return
         try:
             with self.lock:
@@ -336,6 +375,36 @@ class Workspace:
 
     def head(self, task_id: str) -> str:
         return self.git("rev-parse", "HEAD", cwd=self.task_worktree(task_id))
+
+    def is_ancestor(self, ancestor: str, sha: str) -> bool:
+        try:
+            self.git("merge-base", "--is-ancestor", ancestor, sha)
+        except WorkspaceError:
+            return False
+        return True
+
+    def push(self, task_id: str, url: str, token: str, sha: str) -> PushResult:
+        path = self.task_worktree(task_id)
+        argv = ["git", "push", "--porcelain", url, f"{sha}:refs/heads/{branch_name(task_id)}"]
+        proc = None
+        try:
+            proc = subprocess.run(
+                argv,
+                cwd=path,
+                env=push_env(token),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=NETWORK_TIMEOUT,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        if proc is None:
+            return PushResult.error
+        if proc.returncode == 0:
+            return PushResult.ok
+        if b"rejected]" in proc.stdout:
+            return PushResult.rejected
+        return PushResult.error
 
     def trailer(self, task_id: str, sha: str, key: str) -> str:
         path = self.task_worktree(task_id)

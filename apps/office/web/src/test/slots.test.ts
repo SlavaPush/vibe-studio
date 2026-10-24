@@ -3,14 +3,7 @@ import { TASK_STATUSES } from '@/api/types'
 import { countSlots } from '@/lib/slots'
 import { tasks } from '@/mocks/data'
 
-const OCCUPYING = [
-  'awaiting_spec_approval',
-  'developing',
-  'reviewing',
-  'awaiting_integration',
-  'awaiting_release_approval',
-  'deploying',
-]
+const OCCUPYING = ['awaiting_spec_approval', 'developing', 'reviewing']
 
 describe('countSlots', () => {
   it.each(TASK_STATUSES)('считает статус %s', (status) => {
@@ -18,6 +11,6 @@ describe('countSlots', () => {
   })
 
   it('считает занятые слоты тестовых задач', () => {
-    expect(countSlots(tasks)).toBe(2)
+    expect(countSlots(tasks)).toBe(1)
   })
 })

@@ -13,6 +13,12 @@ from psycopg_pool import ConnectionPool
 SCHEMA = Path(__file__).with_name("schema.sql")
 PARAM = re.compile(r"(?<!:):([A-Za-z_][A-Za-z0-9_]*)")
 TIME_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
+ADDED_COLUMNS = (
+    ("tasks", "pr_number", "INTEGER"),
+    ("tasks", "head_sha", "TEXT"),
+    ("tasks", "failure_kind", "TEXT"),
+    ("tasks", "checks", "TEXT"),
+)
 
 logger = logging.getLogger("office.db")
 
@@ -150,6 +156,20 @@ class Database:
             for statement in statements:
                 if statement:
                     conn.execute(statement)
+            self._upgrade(conn)
+
+    def _upgrade(self, conn: Connection) -> None:
+        for table, column, ddl in ADDED_COLUMNS:
+            if self.dialect == "postgres":
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {ddl}")
+                continue
+            names = {row["name"] for row in conn.fetchall(f"PRAGMA table_info({table})")}
+            if column not in names:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+        conn.execute(
+            "UPDATE tasks SET status = 'needs_attention', version = version + 1 "
+            "WHERE status = 'awaiting_release_approval'"
+        )
 
     def close(self) -> None:
         if self._pool is not None:

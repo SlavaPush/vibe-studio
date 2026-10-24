@@ -13,8 +13,10 @@ from app.errors import not_found, rate_limited
 from app.schemas import (
     SLOT_STATUSES,
     SLOTS_TOTAL,
+    WORKTREE_STATUSES,
     AgentRole,
     CheckReport,
+    FailureKind,
     ModelProfile,
     ReleaseCandidate,
     ReleaseKind,
@@ -43,15 +45,13 @@ TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
     S.reviewing: frozenset(
         {S.developing, S.awaiting_integration, S.cancelled, S.failed, S.needs_attention}
     ),
-    S.awaiting_integration: frozenset(
-        {S.awaiting_release_approval, S.cancelled, S.failed, S.needs_attention}
-    ),
-    S.awaiting_release_approval: frozenset({S.deploying, S.failed, S.needs_attention}),
+    S.awaiting_integration: frozenset({S.awaiting_release, S.cancelled, S.failed, S.needs_attention}),
+    S.awaiting_release: frozenset({S.deploying, S.failed, S.needs_attention}),
     S.deploying: frozenset({S.released, S.failed, S.needs_attention}),
     S.released: frozenset(),
     S.failed: frozenset({S.queued}),
     S.cancelled: frozenset(),
-    S.needs_attention: frozenset({S.queued, S.cancelled}),
+    S.needs_attention: frozenset({S.queued, S.awaiting_integration, S.cancelled}),
 }
 
 TASK_SELECT = (
@@ -109,6 +109,10 @@ def task_from_row(row: dict[str, Any]) -> Task:
         branch=row["branch"],
         base_sha=row["base_sha"],
         pr_url=row["pr_url"],
+        pr_number=row["pr_number"],
+        head_sha=row["head_sha"],
+        failure_kind=row["failure_kind"],
+        checks=json.loads(row["checks"]) if row["checks"] else None,
         changed_files=json.loads(row["changed_files"]),
         fix_cycles=row["fix_cycles"],
         usage={
@@ -291,7 +295,7 @@ class TaskStore:
     def record_worktree(self, task_id: str, branch: str, base_sha: str, created: bool) -> bool:
         with self.db.locked_transaction() as conn:
             task = self.load_task(conn, task_id)
-            if task is None or task.status not in SLOT_STATUSES:
+            if task is None or task.status not in WORKTREE_STATUSES:
                 return False
             if (task.branch, task.base_sha) != (branch, base_sha):
                 conn.execute(
@@ -490,21 +494,46 @@ class TaskStore:
         role: AgentRole | None,
         step: str,
         reason: str,
+        failure_kind: FailureKind | None = None,
     ) -> bool:
         with self.db.locked_transaction() as conn:
-            task = self.load_task(conn, task_id)
-            if task is None or task.status not in statuses:
-                return False
-            outcome = "blocked" if target == TaskStatus.needs_attention else "error"
-            self.record_event(
-                conn,
-                task_id,
-                TaskEventType.role_finished,
-                {"step": step, "outcome": outcome, "summary": reason[:300]},
-                role=role,
+            return self.halt_in(
+                conn, task_id, target, statuses=statuses, role=role, step=step, reason=reason,
+                failure_kind=failure_kind,
             )
-            self.transition(conn, task_id, target, expected_from=task.status)
-            return True
+
+    def halt_in(
+        self,
+        conn: Connection,
+        task_id: str,
+        target: TaskStatus,
+        *,
+        statuses: frozenset[TaskStatus],
+        role: AgentRole | None,
+        step: str,
+        reason: str,
+        failure_kind: FailureKind | None = None,
+    ) -> bool:
+        task = self.load_task(conn, task_id)
+        if task is None or task.status not in statuses:
+            return False
+        outcome = "blocked" if target == TaskStatus.needs_attention else "error"
+        self.record_event(
+            conn,
+            task_id,
+            TaskEventType.role_finished,
+            {"step": step, "outcome": outcome, "summary": reason[:300]},
+            role=role,
+        )
+        if failure_kind is not None:
+            conn.execute(
+                "UPDATE tasks SET failure_kind = :kind WHERE id = :id", {"kind": failure_kind.value, "id": task_id}
+            )
+        self.transition(conn, task_id, target, expected_from=task.status)
+        return True
+
+    def has_operations(self, conn: Connection, task_id: str) -> bool:
+        return conn.fetchone("SELECT id FROM operations WHERE task_id = :id LIMIT 1", {"id": task_id}) is not None
 
     def _promote(self, conn: Connection) -> list[str]:
         promoted: list[str] = []

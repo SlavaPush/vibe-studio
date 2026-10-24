@@ -5,12 +5,13 @@ import subprocess
 import pytest
 from conftest import ORIGIN_FILES, git
 
+from app.branch_check import git_env
 from app.config import REPO_ROOT
 from app.main import create_app
 from app.paths import PathDenied
 from app.schemas import ModelProfile, TaskStatus
 from app.tasks import IntakeOutcome
-from app.workspace import Workspace
+from app.workspace import Workspace, push_env
 
 
 OPEN_POLICY = """max_file_bytes: 204800
@@ -444,3 +445,43 @@ def test_verify_branch_rejects_direct_commits(office, app, owner, rel, content, 
     assert found and all(item.startswith(f"{rel}: ") for item in found)
     for text in expected:
         assert any(text in item for item in found), found
+
+
+def test_push_env_disables_credential_helpers_and_askpass(tmp_path, monkeypatch):
+    marker = tmp_path / "called"
+    script = tmp_path / "helper.sh"
+    script.write_text(
+        f'#!/bin/sh\necho "$0 $*" >> "{marker}"\necho username=owner\necho password=owner-secret\n'
+    )
+    script.chmod(0o755)
+    config = tmp_path / "gitconfig"
+    config.write_text(
+        f'[credential]\n\thelper = "{script}"\n'
+        f'[credential "https://github.com"]\n\thelper = "{script}"\n'
+        f'[core]\n\taskPass = "{script}"\n'
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_ASKPASS", str(script))
+    monkeypatch.setenv("SSH_ASKPASS", str(script))
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", f"'credential.helper'='{script}'")
+    request = "protocol=https\nhost=github.com\n\n"
+
+    def fill(env):
+        return subprocess.run(
+            ["git", "credential", "fill"], cwd=tmp_path, env=env, input=request,
+            capture_output=True, text=True, timeout=30,
+        )
+
+    control = fill(git_env())
+    assert control.returncode == 0
+    assert "password=owner-secret" in control.stdout
+    assert marker.exists()
+    marker.unlink()
+
+    env = push_env("app-token")
+    assert not {"GIT_ASKPASS", "SSH_ASKPASS", "GIT_CONFIG_PARAMETERS"} & env.keys()
+    reset = fill(env)
+    assert reset.returncode != 0
+    assert "password=" not in reset.stdout
+    assert not marker.exists()

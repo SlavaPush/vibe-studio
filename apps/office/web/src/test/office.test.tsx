@@ -36,6 +36,65 @@ function renderCard(participant: Participant, task: Task = developing) {
   return { onRefresh, rerender }
 }
 
+describe('TaskCard: PR задачи', () => {
+  const integrating: Task = {
+    ...developing,
+    status: 'awaiting_integration',
+    pr_number: 7,
+    pr_url: 'https://github.com/SlavaPush/vibe-studio/pull/7',
+    head_sha: 'b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f80',
+    checks: {
+      head_sha: 'b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f80',
+      checks: [
+        { name: 'office-web', status: 'completed', conclusion: 'success', url: 'https://github.com/job/1' },
+        { name: 'chat-api', status: 'completed', conclusion: 'failure', url: 'https://github.com/job/2' },
+        { name: 'office-paths', status: 'in_progress', conclusion: null, url: null },
+        { name: 'chat-web', status: 'missing', conclusion: null, url: null },
+      ],
+    },
+  }
+
+  it('показывает ссылку на PR и сводку обязательных проверок без вкладки журнала', () => {
+    fakeApi()
+    renderCard(maria, integrating)
+    expect(screen.getByRole('link', { name: 'PR #7' })).toHaveAttribute('href', integrating.pr_url)
+    const list = screen.getByRole('list', { name: 'Обязательные проверки PR' })
+    const items = within(list).getAllByRole('listitem')
+    expect(items.map((item) => item.textContent)).toEqual([
+      'office-websuccessЖурнал',
+      'chat-apifailureЖурнал',
+      'office-pathsВыполняется',
+      'chat-webНет запуска',
+    ])
+    expect(within(list).getByRole('link', { name: 'Журнал проверки chat-api' })).toHaveAttribute(
+      'href',
+      'https://github.com/job/2',
+    )
+    expect(FakeEventSource.all('/api/tasks/tsk_101/events')).toHaveLength(0)
+  })
+
+  it('показывает причину ошибки выпуска и запрещает повтор', () => {
+    fakeApi()
+    renderCard(maria, { ...integrating, status: 'failed', failure_kind: 'checks_failed' })
+    expect(
+      screen.getByText('Причина ошибки: Обязательные проверки PR не пройдены, PR закрыт.'),
+    ).toBeInTheDocument()
+    const retry = screen.getByRole('button', { name: 'Повторить' })
+    expect(retry).toBeDisabled()
+    expect(retry).toHaveAccessibleDescription(
+      'Обязательные проверки PR не пройдены, PR закрыт. Повтор недоступен: поставьте новую задачу.',
+    )
+  })
+
+  it('отмена задачи с открытым PR предупреждает о закрытии PR', async () => {
+    fakeApi()
+    renderCard(maria, integrating)
+    fireEvent.click(screen.getByRole('button', { name: 'Отменить задачу' }))
+    const dialog = await screen.findByRole('alertdialog', { name: 'Отменить задачу?' })
+    expect(dialog).toHaveTextContent('офис закрывает PR задачи')
+  })
+})
+
 describe('TaskCard: действия', () => {
   it('владелец отменяет задачу только после подтверждения в диалоге', async () => {
     const api = fakeApi()

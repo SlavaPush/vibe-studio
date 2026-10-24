@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+CHECKOUT_ROOT = REPO_ROOT.parents[1]
 POLICIES_DIR = REPO_ROOT / "policies"
 SANDBOX_DIR = REPO_ROOT / "docker" / "sandbox"
 APP_DIR = "apps/chat"
@@ -50,6 +51,26 @@ class Settings:
     ollama_url: str = "http://127.0.0.1:11434"
     model_timeout_seconds: float | None = None
     task_time_limit_minutes: float = 60.0
+    github_app_id: str = ""
+    github_app_installation_id: str = ""
+    github_app_private_key_path: Path | None = None
+    github_repo: str = "SlavaPush/vibe-studio"
+    github_api_url: str = "https://api.github.com"
+    github_push_url: str = ""
+    checkout_root: Path = CHECKOUT_ROOT
+    release_poll_seconds: float = 20.0
+    checks_timeout_minutes: float = 30.0
+    reconcile_timeout_minutes: float = 30.0
+    render_api_key: str | None = None
+    render_service_id: str = ""
+
+    @property
+    def github_app_configured(self) -> bool:
+        return bool(self.github_app_id and self.github_app_installation_id and self.github_app_private_key_path)
+
+    @property
+    def push_url(self) -> str:
+        return self.github_push_url or f"https://github.com/{self.github_repo}.git"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -75,4 +96,19 @@ class Settings:
             task_time_limit_minutes=float(
                 env.get("OFFICE_TASK_TIME_LIMIT_MINUTES") or cls.task_time_limit_minutes
             ),
+            github_app_id=env.get("GITHUB_APP_ID", ""),
+            github_app_installation_id=env.get("GITHUB_APP_INSTALLATION_ID", ""),
+            github_app_private_key_path=Path(env["GITHUB_APP_PRIVATE_KEY_PATH"])
+            if env.get("GITHUB_APP_PRIVATE_KEY_PATH")
+            else None,
+            github_repo=env.get("OFFICE_GITHUB_REPO") or cls.github_repo,
+            release_poll_seconds=float(env.get("OFFICE_RELEASE_POLL_SECONDS") or cls.release_poll_seconds),
+            checks_timeout_minutes=float(
+                env.get("OFFICE_CHECKS_TIMEOUT_MINUTES") or cls.checks_timeout_minutes
+            ),
+            reconcile_timeout_minutes=float(
+                env.get("OFFICE_RECONCILE_TIMEOUT_MINUTES") or cls.reconcile_timeout_minutes
+            ),
+            render_api_key=env.get("RENDER_API_KEY") or None,
+            render_service_id=env.get("RENDER_SERVICE_ID", ""),
         )

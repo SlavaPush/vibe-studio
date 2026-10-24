@@ -13,6 +13,7 @@ import {
   TASK_DECISIONS,
   type CheckReport,
   type Participant,
+  type PullRequestCheck,
   type Task,
   type TaskDecision,
   type TaskEvent,
@@ -25,8 +26,10 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { openTaskEvents, type StreamState } from '@/lib/events'
 import {
   AGENT_ROLE_LABELS,
+  CHECK_STATUS_LABELS,
   DECISION_LABELS,
   EVENT_TYPE_LABELS,
+  FAILURE_KIND_LABELS,
   PROFILE_LABELS,
   STATUS_LABELS,
   formatDateTime,
@@ -139,6 +142,12 @@ export function TaskCard({ task, participant, run, onRefresh }: TaskCardProps) {
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4">
+        {task.status === 'failed' && task.failure_kind && (
+          <p className="text-sm text-destructive">
+            Причина ошибки: {FAILURE_KIND_LABELS[task.failure_kind]}
+          </p>
+        )}
+        {(task.pr_url || task.checks) && <PullRequestPanel task={task} />}
         {actions.length > 0 && (
           <div className="grid gap-2">
             <div className="flex flex-wrap gap-2">
@@ -152,7 +161,11 @@ export function TaskCard({ task, participant, run, onRefresh }: TaskCardProps) {
                       key={action}
                       label={DECISION_LABELS[action]}
                       title="Отменить задачу?"
-                      description="Отмена необратима: работа над задачей останавливается, слот освобождается."
+                      description={
+                        task.pr_url
+                          ? 'Отмена необратима: работа над задачей останавливается, офис закрывает PR задачи.'
+                          : 'Отмена необратима: работа над задачей останавливается, слот освобождается.'
+                      }
                       disabled={disabled}
                       describedBy={describedBy}
                       onConfirm={() => start(action)}
@@ -259,6 +272,64 @@ export function TaskCard({ task, participant, run, onRefresh }: TaskCardProps) {
         </Tabs>
       </CardContent>
     </Card>
+  )
+}
+
+function checkVariant(check: PullRequestCheck): 'secondary' | 'destructive' | 'outline' {
+  if (check.status !== 'completed') return 'outline'
+  return check.conclusion === 'success' ? 'secondary' : 'destructive'
+}
+
+function checkLabel(check: PullRequestCheck): string {
+  if (check.status === 'completed') return check.conclusion ?? MISSING
+  return CHECK_STATUS_LABELS[check.status] ?? check.status
+}
+
+function PullRequestPanel({ task }: { task: Task }) {
+  return (
+    <section aria-labelledby="task-pr-heading" className="grid gap-2 text-sm">
+      <h3 id="task-pr-heading" className="font-medium">
+        Pull request
+      </h3>
+      {task.pr_url ? (
+        <a
+          href={task.pr_url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="w-fit underline underline-offset-4"
+        >
+          PR #{task.pr_number}
+        </a>
+      ) : (
+        <p className="text-muted-foreground">PR ещё не открыт.</p>
+      )}
+      {task.checks && (
+        <div className="grid gap-1">
+          <p className="text-muted-foreground">
+            Обязательные проверки для <code className="font-mono">{task.checks.head_sha.slice(0, 7)}</code>
+          </p>
+          <ul aria-label="Обязательные проверки PR" className="grid gap-1">
+            {task.checks.checks.map((check) => (
+              <li key={check.name} className="flex flex-wrap items-center gap-2">
+                <code className="font-mono">{check.name}</code>
+                <Badge variant={checkVariant(check)}>{checkLabel(check)}</Badge>
+                {check.url && (
+                  <a
+                    href={check.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label={`Журнал проверки ${check.name}`}
+                    className="underline underline-offset-4"
+                  >
+                    Журнал
+                  </a>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </section>
   )
 }
 

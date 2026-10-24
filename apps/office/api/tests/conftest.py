@@ -11,8 +11,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import psycopg
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -439,11 +442,171 @@ class Office:
 
     def close(self) -> None:
         for app in self.apps:
+            if getattr(app.state, "release", None) is not None:
+                app.state.release.shutdown(timeout=10)
             if app.state.runner is not None:
                 app.state.runner.shutdown(timeout=10)
             if app.state.workspace is not None:
                 app.state.workspace.shutdown()
             app.state.store.db.close()
+
+
+REPO_PATH = "/repos/SlavaPush/vibe-studio"
+CI_JOBS = ("chat-api", "chat-web", "chat-containers", "office-api", "office-web", "office-sandbox")
+
+
+class FakeGitHub:
+    def __init__(self, bare: Path, token: str) -> None:
+        self.bare = bare
+        self.token = token
+        self.prs: dict[int, dict[str, Any]] = {}
+        self.runs: list[dict[str, Any]] = []
+        self.jobs: dict[int, list[dict[str, Any]]] = {}
+        self.suites: dict[int, int] = {}
+        self.requests: list[httpx.Request] = []
+        self.down = False
+        self.lose_create = False
+        self.status: dict[tuple[str, str], int] = {}
+        self.jwts: list[str] = []
+        self.lock = threading.Lock()
+
+    def mutations(self) -> list[tuple[str, str]]:
+        return [
+            (request.method, request.url.path) for request in self.requests
+            if request.method in ("POST", "PATCH") and request.url.path.startswith(REPO_PATH)
+        ]
+
+    def ref(self, branch: str) -> str | None:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "-q", f"refs/heads/{branch}"], cwd=self.bare, capture_output=True, text=True
+        )
+        return result.stdout.strip() if result.returncode == 0 else None
+
+    def pr(self, number: int) -> dict[str, Any]:
+        pr = self.prs[number]
+        if pr["state"] == "open":
+            pr["head"]["sha"] = self.ref(pr["head"]["ref"])
+        return pr
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        with self.lock:
+            self.requests.append(request)
+        if self.down:
+            raise httpx.ConnectError("connection refused", request=request)
+        method, path = request.method, request.url.path
+        for (status_method, prefix), code in self.status.items():
+            if method == status_method and path.startswith(prefix):
+                return httpx.Response(code, json={"message": "error"})
+        if path.startswith("/app/installations/"):
+            self.jwts.append(request.headers["Authorization"].removeprefix("Bearer "))
+            return httpx.Response(201, json={"token": self.token, "expires_at": "2099-01-01T00:00:00Z"})
+        rel = path.removeprefix(REPO_PATH)
+        body = json.loads(request.content) if request.content else {}
+        if rel == "/pulls" and method == "GET":
+            head = request.url.params["head"].split(":", 1)[1]
+            state = request.url.params["state"]
+            found = [
+                self.pr(number) for number, pr in self.prs.items()
+                if pr["head"]["ref"] == head and state in ("all", pr["state"])
+            ]
+            return httpx.Response(200, json=found)
+        if rel == "/pulls" and method == "POST":
+            number = len(self.prs) + 1
+            pr = {
+                "number": number,
+                "html_url": f"https://github.com/SlavaPush/vibe-studio/pull/{number}",
+                "state": "open",
+                "head": {"ref": body["head"]},
+                "base": {"ref": body["base"]},
+                "title": body["title"],
+                "body": body["body"],
+            }
+            self.prs[number] = pr
+            if self.lose_create:
+                raise httpx.ReadTimeout("timed out", request=request)
+            return httpx.Response(201, json=self.pr(number))
+        match = re.fullmatch(r"/pulls/(\d+)", rel)
+        if match:
+            number = int(match.group(1))
+            if number not in self.prs:
+                return httpx.Response(404, json={"message": "Not Found"})
+            pr = self.pr(number)
+            if method == "PATCH":
+                pr["state"] = body["state"]
+            return httpx.Response(200, json=pr)
+        match = re.fullmatch(r"/git/ref/heads/(.+)", rel)
+        if match:
+            sha = self.ref(match.group(1))
+            if sha is None:
+                return httpx.Response(404, json={"message": "Not Found"})
+            return httpx.Response(200, json={"object": {"sha": sha}})
+        if rel == "/actions/runs":
+            sha = request.url.params["head_sha"]
+            return httpx.Response(200, json={"workflow_runs": [run for run in self.runs if run["head_sha"] == sha]})
+        match = re.fullmatch(r"/actions/runs/(\d+)/jobs", rel)
+        if match:
+            return httpx.Response(200, json={"jobs": self.jobs.get(int(match.group(1)), [])})
+        match = re.fullmatch(r"/check-suites/(\d+)", rel)
+        if match:
+            return httpx.Response(200, json={"app": {"id": self.suites.get(int(match.group(1)), 15368)}})
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    def add_run(
+        self,
+        workflow: str,
+        event: str,
+        sha: str,
+        pr_numbers: list[int],
+        jobs: dict[str, str | None],
+        *,
+        run_number: int = 1,
+        run_attempt: int = 1,
+        app_id: int = 15368,
+    ) -> int:
+        run_id = 1000 + len(self.runs)
+        self.runs.append(
+            {
+                "id": run_id,
+                "path": f".github/workflows/{workflow}",
+                "event": event,
+                "head_sha": sha,
+                "run_number": run_number,
+                "run_attempt": run_attempt,
+                "status": "completed" if all(jobs.values()) else "in_progress",
+                "check_suite_id": 5000 + run_id,
+                "pull_requests": [{"number": number} for number in pr_numbers],
+                "html_url": f"https://github.com/SlavaPush/vibe-studio/actions/runs/{run_id}",
+            }
+        )
+        self.suites[5000 + run_id] = app_id
+        self.jobs[run_id] = [
+            {
+                "name": name,
+                "status": "completed" if conclusion else "in_progress",
+                "conclusion": conclusion,
+                "html_url": f"https://github.com/SlavaPush/vibe-studio/actions/runs/{run_id}/job/{index}",
+            }
+            for index, (name, conclusion) in enumerate(jobs.items())
+        ]
+        return run_id
+
+    def add_pr_runs(self, sha: str, number: int, conclusion: str | None = "success", **overrides: str | None) -> None:
+        jobs = {name: overrides.get(name.replace("-", "_"), conclusion) for name in CI_JOBS}
+        self.add_run("ci.yml", "pull_request", sha, [number], jobs)
+        self.add_run(
+            "office-paths.yml", "pull_request_target", sha, [number],
+            {"office-paths": overrides.get("office_paths", conclusion)},
+        )
+
+
+@pytest.fixture(scope="session")
+def app_key(tmp_path_factory: pytest.TempPathFactory) -> SimpleNamespace:
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    path = tmp_path_factory.mktemp("github-app") / "app.pem"
+    path.write_bytes(
+        key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
+    )
+    return SimpleNamespace(path=path, public=key.public_key())
 
 
 @pytest.fixture(params=["sqlite", "postgres"])

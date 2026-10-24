@@ -50,6 +50,24 @@ describe('canAct', () => {
     })
   })
 
+  it('запрещает повтор задачи с непройденными проверками PR или отклонённым PR', () => {
+    const failed: Task = { ...developing, status: 'failed', failure_kind: 'checks_failed' }
+    expect(canAct(owner, failed, 'retry')).toEqual({
+      allowed: false,
+      reason:
+        'Обязательные проверки PR не пройдены, PR закрыт. Повтор недоступен: поставьте новую задачу.',
+    })
+    expect(canAct(owner, { ...failed, failure_kind: 'pr_rejected' }, 'retry').allowed).toBe(false)
+    expect(canAct(owner, { ...failed, status: 'needs_attention' }, 'retry')).toEqual({
+      allowed: true,
+    })
+  })
+
+  it('разрешает отмену задачи с открытым PR', () => {
+    const integrating: Task = { ...developing, status: 'awaiting_integration', pr_number: 3 }
+    expect(canAct(owner, integrating, 'cancel')).toEqual({ allowed: true })
+  })
+
   it('запрещает повтор при исчерпанном бюджете обращений', () => {
     const failed: Task = { ...developing, status: 'failed' }
     expect(canAct(owner, failed, 'retry')).toEqual({ allowed: true })
