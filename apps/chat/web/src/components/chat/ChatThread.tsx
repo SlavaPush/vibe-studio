@@ -144,7 +144,7 @@ export function ChatThread({ store, actions, loadAssetUrl, queue }: ChatThreadPr
               id="composer-input"
               aria-label="Сообщение"
               aria-describedby={noConversation ? undefined : COMPOSER_HINT_ID}
-              placeholder="Спросите что-нибудь…"
+              placeholder="Напишите сообщение"
               rows={1}
               onKeyDown={(event) => {
                 if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return
