@@ -39,14 +39,16 @@ def test_normalize_rejects(path):
 @pytest.mark.parametrize(
     "path",
     [
-        "API/main.py",
-        "Api/x.ts",
-        "web/SRC/test/setup.ts",
-        "web/src/App.TEST.tsx",
-        "web/src/.ENV",
-        "WEB/package.json",
-        "web/Package-Lock.json",
-        "web/VITE.config.ts",
+        "apps/chat/API/main.py",
+        "apps/chat/Api/x.ts",
+        "apps/chat/web/SRC/test/setup.ts",
+        "apps/chat/web/src/App.TEST.tsx",
+        "apps/chat/web/src/.ENV",
+        "apps/chat/WEB/package.json",
+        "apps/chat/web/Package-Lock.json",
+        "apps/chat/web/VITE.config.ts",
+        "apps/chat/web/src/API/client.ts",
+        "Apps/Office/policies/paths.yaml",
     ],
 )
 def test_case_variants_are_denied(path):
@@ -54,20 +56,68 @@ def test_case_variants_are_denied(path):
         POLICY.check_write(AgentRole.developer, path, 10)
 
 
+@pytest.mark.parametrize(
+    ("role", "path"),
+    [
+        (AgentRole.developer, "apps/chat/web/src/a/B.tsx"),
+        (AgentRole.developer, "apps/chat/web/src/components/chat/Copy.tsx"),
+        (AgentRole.developer, "apps/chat/web/public/icon.svg"),
+        (AgentRole.developer, "apps/chat/web/index.html"),
+        (AgentRole.qa, "apps/chat/web/e2e/office/a.pw.ts"),
+        (AgentRole.qa, "apps/chat/web/e2e/office/sub/a.pw.ts"),
+    ],
+)
+def test_monorepo_paths_allowed(role, path):
+    assert POLICY.check_write(role, path, 10) == path
+    assert POLICY.check_any_writer(path, 10) == path
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "apps/office/policies/paths.yaml",
+        "apps/office/api/app/workspace.py",
+        "apps/office/web/src/App.tsx",
+        ".github/workflows/ci.yml",
+        ".github/workflows/office-paths.yml",
+        "apps/chat/web/src/api/client.ts",
+        "apps/chat/web/src/mocks/contract-examples.ts",
+        "apps/chat/web/src/test/setup.ts",
+        "apps/chat/web/src/App.test.tsx",
+        "apps/chat/api/app/main.py",
+        "apps/chat/contracts/api.md",
+        "apps/chat/infra/Dockerfile",
+        "apps/chat/web/package.json",
+        "apps/chat/web/package-lock.json",
+        "apps/chat/web/vite.config.ts",
+        "apps/chat/web/e2e/office/a.ts",
+        "apps/chat/web/e2e/smoke.pw.ts",
+        "apps/chat/web/.env.local",
+        "web/src/App.tsx",
+        "README.md",
+        "CODEOWNERS",
+        "package.json",
+    ],
+)
+def test_monorepo_paths_denied(path):
+    for role in (AgentRole.developer, AgentRole.qa):
+        with pytest.raises(PathDenied):
+            POLICY.check_write(role, path, 10)
+    with pytest.raises(PathDenied):
+        POLICY.check_any_writer(path, 10)
+
+
 def test_role_rules():
-    assert POLICY.check_write(AgentRole.developer, "web/src/a/B.tsx", 10) == "web/src/a/B.tsx"
-    assert POLICY.check_write(AgentRole.qa, "web/e2e/office/a.pw.ts", 10) == "web/e2e/office/a.pw.ts"
     for role, path in [
-        (AgentRole.qa, "web/src/a.ts"),
-        (AgentRole.developer, "web/e2e/office/a.pw.ts"),
-        (AgentRole.critic, "web/src/a.ts"),
-        (AgentRole.developer, "web/src/a.sh"),
+        (AgentRole.qa, "apps/chat/web/src/a.ts"),
+        (AgentRole.developer, "apps/chat/web/e2e/office/a.pw.ts"),
+        (AgentRole.critic, "apps/chat/web/src/a.ts"),
+        (AgentRole.developer, "apps/chat/web/src/a.sh"),
     ]:
         with pytest.raises(PathDenied):
             POLICY.check_write(role, path, 10)
     with pytest.raises(PathDenied):
-        POLICY.check_write(AgentRole.developer, "web/src/a.ts", POLICY.max_file_bytes + 1)
-    assert POLICY.check_any_writer("web/e2e/office/a.pw.ts") == "web/e2e/office/a.pw.ts"
+        POLICY.check_write(AgentRole.developer, "apps/chat/web/src/a.ts", POLICY.max_file_bytes + 1)
 
 
 def test_symlink_component_is_rejected(tmp_path):

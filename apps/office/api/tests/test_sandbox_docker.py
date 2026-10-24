@@ -11,7 +11,7 @@ from app.sandbox import Sandbox
 from app.schemas import AgentRole, TaskStatus
 from app.tools import WorkspaceTools
 
-TARGET = os.environ.get("OFFICE_TEST_TARGET_REPO", "https://github.com/SlavaPush/vibe-chat.git")
+TARGET = os.environ.get("OFFICE_TEST_TARGET_REPO", "https://github.com/SlavaPush/vibe-studio.git")
 FEATURE_TEST = """import { test, expect } from "@playwright/test";
 
 test("заголовок новой версии", async ({ page }, testInfo) => {
@@ -80,10 +80,11 @@ def test_real_sandbox_on_vibe_chat(real, tmp_path):
     assert owner.stdout.strip() == "10001"
 
     developer = WorkspaceTools(store, workspace, task_id, AgentRole.developer)
-    page = (root / "web/index.html").read_text().replace("<title>vibe-chat</title>", "<title>vibe-chat office</title>")
-    assert developer.write_file("web/index.html", page).result == "ok"
+    page = (root / "apps/chat/web/index.html").read_text()
+    page = page.replace("<title>vibe-chat</title>", "<title>vibe-chat office</title>")
+    assert developer.write_file("apps/chat/web/index.html", page).result == "ok"
     qa = WorkspaceTools(store, workspace, task_id, AgentRole.qa)
-    assert qa.write_file("web/e2e/office/title.pw.ts", FEATURE_TEST).result == "ok"
+    assert qa.write_file("apps/chat/web/e2e/office/title.pw.ts", FEATURE_TEST).result == "ok"
     commit = workspace.commit(task_id, "Заголовок офиса")
 
     before = sandbox.run_suite(task_id, base, commit, require_e2e=True)
@@ -107,7 +108,7 @@ def test_real_sandbox_on_vibe_chat(real, tmp_path):
     assert image.content.startswith(b"\x89PNG")
     [unmocked] = [url for url in urls if url.endswith("unmocked-api.txt")]
     assert "GET /api/" in client.get(unmocked).text
-    outcome = sandbox.e2e_result(task_id, after, "web/e2e/office/title.pw.ts")
+    outcome = sandbox.e2e_result(task_id, after, "apps/chat/web/e2e/office/title.pw.ts")
     assert outcome.status == "invalid" and "page.route" in outcome.reason
 
     policy = yaml.safe_load(app.state.settings.commands_policy.read_text(encoding="utf-8"))

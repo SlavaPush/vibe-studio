@@ -15,37 +15,37 @@ def started(office, origin, tmp_path):
 
 def test_diff_includes_changed_and_new_files(started):
     _, client, task_id, root = started
-    (root / "web/src/App.tsx").write_text("export function App() {\n  return 'Привет'\n}\n")
-    (root / "web/src/New.tsx").write_text("export const created = true\n")
+    (root / "apps/chat/web/src/App.tsx").write_text("export function App() {\n  return 'Привет'\n}\n")
+    (root / "apps/chat/web/src/New.tsx").write_text("export const created = true\n")
     response = client.get(f"/api/tasks/{task_id}/diff")
     assert response.status_code == 200
     assert response.headers["content-type"] == "text/plain; charset=utf-8"
     text = response.text
-    assert "diff --git a/web/src/App.tsx b/web/src/App.tsx" in text
+    assert "diff --git a/apps/chat/web/src/App.tsx b/apps/chat/web/src/App.tsx" in text
     assert "+  return 'Привет'" in text
-    assert "diff --git a/web/src/New.tsx b/web/src/New.tsx\nnew file mode 100644" in text
+    assert "diff --git a/apps/chat/web/src/New.tsx b/apps/chat/web/src/New.tsx\nnew file mode 100644" in text
     assert "+export const created = true" in text
 
 
 def test_diff_includes_commits_since_base(started):
     app, client, task_id, root = started
-    (root / "web/src/Committed.tsx").write_text("export {}\n")
+    (root / "apps/chat/web/src/Committed.tsx").write_text("export {}\n")
     app.state.workspace.commit(task_id, "feature")
-    assert "b/web/src/Committed.tsx" in client.get(f"/api/tasks/{task_id}/diff").text
+    assert "b/apps/chat/web/src/Committed.tsx" in client.get(f"/api/tasks/{task_id}/diff").text
 
 
 def test_diff_keeps_worktree_index(started):
     _, client, task_id, root = started
-    (root / "web/src/App.tsx").write_text("staged\n")
-    git(root, "add", "web/src/App.tsx")
-    (root / "web/src/Untracked.tsx").write_text("new\n")
+    (root / "apps/chat/web/src/App.tsx").write_text("staged\n")
+    git(root, "add", "apps/chat/web/src/App.tsx")
+    (root / "apps/chat/web/src/Untracked.tsx").write_text("new\n")
     index = root / git(root, "rev-parse", "--git-path", "index")
     index_before = index.read_bytes()
     cached_before = git(root, "diff", "--cached")
     status_before = git(root, "status", "--porcelain")
     response = client.get(f"/api/tasks/{task_id}/diff")
     assert response.status_code == 200
-    assert "b/web/src/Untracked.tsx" in response.text
+    assert "b/apps/chat/web/src/Untracked.tsx" in response.text
     assert index.read_bytes() == index_before
     assert git(root, "diff", "--cached") == cached_before
     assert git(root, "status", "--porcelain") == status_before
@@ -53,7 +53,7 @@ def test_diff_keeps_worktree_index(started):
 
 def test_large_diff_is_rejected(started):
     _, client, task_id, root = started
-    (root / "web/src/Large.tsx").write_text(("x" * 99 + "\n") * (DIFF_LIMIT // 100 + 10))
+    (root / "apps/chat/web/src/Large.tsx").write_text(("x" * 99 + "\n") * (DIFF_LIMIT // 100 + 10))
     response = client.get(f"/api/tasks/{task_id}/diff")
     assert response.status_code == 413
     assert response.json()["code"] == "diff_too_large"

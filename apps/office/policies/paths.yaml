@@ -2,9 +2,10 @@ max_file_bytes: 204800
 max_list_entries: 500
 
 deny:
-  - api/**
-  - contracts/**
-  - infra/**
+  - apps/office/**
+  - apps/chat/api/**
+  - apps/chat/contracts/**
+  - apps/chat/infra/**
   - .git
   - .git/**
   - .github/**
@@ -20,13 +21,15 @@ deny:
   - "**/pyproject.toml"
   - "**/Dockerfile"
   - "**/docker-compose*.yml"
-  - web/vite.config.*
-  - web/vitest.config.*
-  - web/tsconfig*.json
-  - web/components.json
-  - web/.oxlintrc.json
-  - web/scripts/**
-  - web/src/test/**
+  - apps/chat/web/vite.config.*
+  - apps/chat/web/vitest.config.*
+  - apps/chat/web/tsconfig*.json
+  - apps/chat/web/components.json
+  - apps/chat/web/.oxlintrc.json
+  - apps/chat/web/scripts/**
+  - apps/chat/web/src/api/**
+  - apps/chat/web/src/mocks/**
+  - apps/chat/web/src/test/**
   - "**/*.test.*"
   - "**/*.spec.*"
   - "**/migrations/**"
@@ -39,11 +42,11 @@ read_deny:
 roles:
   developer:
     write:
-      - web/src/**
-      - web/public/**
-      - web/index.html
+      - apps/chat/web/src/**
+      - apps/chat/web/public/**
+      - apps/chat/web/index.html
     extensions: [.ts, .tsx, .css, .json, .svg, .md, .html]
   qa:
     write:
-      - web/e2e/office/**/*.pw.ts
+      - apps/chat/web/e2e/office/**/*.pw.ts
     extensions: [.ts]

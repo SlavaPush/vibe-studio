@@ -86,7 +86,7 @@
 | `awaiting_spec_approval` | Задача заняла слот. Пока `spec = null`, Supervisor готовит требования; после этого требования ждут решения владельца `approve_spec` | да |
 | `developing` | Разработчик изменяет код в worktree задачи | да |
 | `reviewing` | QA и критик проверяют зафиксированную версию | да |
-| `awaiting_integration` | PR в `vibe-chat` открыт, ждёт слияния человеком | да |
+| `awaiting_integration` | PR в `vibe-studio` открыт, ждёт слияния человеком | да |
 | `awaiting_release_approval` | Кандидат выпуска ждёт решения администратора | да |
 | `deploying` | Выполняется деплой кандидата | да |
 | `released` | Выпуск опубликован | нет |
@@ -189,9 +189,9 @@
 | `created_at`, `updated_at` | string (дата-время) | Время создания и последнего изменения |
 | `rejection_reason` | string или `null` | Причина отказа для статуса `rejected` |
 | `spec` | `Spec` или `null` | Требования, когда Supervisor их подготовил |
-| `branch` | string или `null` | Ветка `office/<task_id>` в `vibe-chat` |
+| `branch` | string или `null` | Ветка `office/<task_id>` в `vibe-studio` |
 | `base_sha` | string или `null` | Commit, от которого создан worktree |
-| `pr_url` | string или `null` | Адрес PR в `vibe-chat` |
+| `pr_url` | string или `null` | Адрес PR в `vibe-studio` |
 | `changed_files` | string[] | Изменённые файлы относительно `base_sha` |
 | `fix_cycles` | integer | Выполненные циклы исправления, 0–2 |
 | `usage` | `Usage` | Расход задачи |
@@ -467,7 +467,7 @@
     },
     "branch": "office/tsk_102",
     "base_sha": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
-    "pr_url": "https://github.com/SlavaPush/vibe-chat/pull/12",
+    "pr_url": "https://github.com/SlavaPush/vibe-studio/pull/12",
     "changed_files": [
       "web/src/components/settings/ThemeSwitch.tsx",
       "web/src/components/settings/SettingsDialog.tsx"
@@ -941,7 +941,7 @@ HTML-отчёт Playwright с этими заголовками не работ�
     "spec_hash": "sha256:9c1e4b7a2d3f5e60",
     "suite_hash": "sha256:71c0d2e93a4b5f18",
     "ci_run_ids": ["18342210771"],
-    "pr_url": "https://github.com/SlavaPush/vibe-chat/pull/12",
+    "pr_url": "https://github.com/SlavaPush/vibe-studio/pull/12",
     "created_at": "2026-10-23T10:49:00Z",
     "approved_by": null,
     "approved_at": null,
@@ -959,7 +959,7 @@ HTML-отчёт Playwright с этими заголовками не работ�
     "spec_hash": "sha256:2a7f0c3e9b1d4865",
     "suite_hash": "sha256:71c0d2e93a4b5f18",
     "ci_run_ids": ["18339906512"],
-    "pr_url": "https://github.com/SlavaPush/vibe-chat/pull/9",
+    "pr_url": "https://github.com/SlavaPush/vibe-studio/pull/9",
     "created_at": "2026-10-22T17:40:00Z",
     "approved_by": "prt_admin",
     "approved_at": "2026-10-22T18:02:00Z",

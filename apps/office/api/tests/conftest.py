@@ -33,14 +33,18 @@ UI_TASK = "Добавить под каждым ответом ассистен�
 
 
 ORIGIN_FILES = {
-    "web/src/App.tsx": "export function App() {\n  return null\n}\n",
-    "web/src/App.test.tsx": "import { test } from 'vitest'\n\ntest('app', () => {})\n",
-    "web/src/test/setup.ts": "export {}\n",
-    "web/package.json": '{"name": "web"}\n',
-    "web/package-lock.json": '{"name": "web", "lockfileVersion": 3}\n',
-    "web/index.html": "<title>vibe-chat</title>\n",
-    "api/main.py": "app = None\n",
-    "contracts/api.md": "# API\n",
+    "apps/chat/web/src/App.tsx": "export function App() {\n  return null\n}\n",
+    "apps/chat/web/src/App.test.tsx": "import { test } from 'vitest'\n\ntest('app', () => {})\n",
+    "apps/chat/web/src/test/setup.ts": "export {}\n",
+    "apps/chat/web/package.json": '{"name": "web"}\n',
+    "apps/chat/web/package-lock.json": '{"name": "web", "lockfileVersion": 3}\n',
+    "apps/chat/web/index.html": "<title>vibe-chat</title>\n",
+    "apps/chat/api/main.py": "app = None\n",
+    "apps/chat/contracts/api.md": "# API\n",
+    "apps/office/policies/paths.yaml": "deny: []\n",
+    "apps/office/web/src/Panel.test.tsx": "export {}\n",
+    ".github/workflows/ci.yml": "name: CI\n",
+    "README.md": "# vibe-studio\n",
 }
 
 
@@ -158,7 +162,7 @@ class FakeOpenAI:
         )
 
 
-QA_FILE = re.compile(r"web/e2e/office/tsk_[0-9a-f]+\.pw\.ts")
+QA_FILE = re.compile(r"apps/chat/web/e2e/office/tsk_[0-9a-f]+\.pw\.ts")
 QA_TEST = 'import { test, expect } from "@playwright/test";\n\ntest("feature", async ({ page }) => {\n  await page.goto("/");\n});\n'
 SPEC_ANSWER = {
     "summary": "Под ответом ассистента появляется кнопка копирования.",
@@ -168,7 +172,7 @@ SPEC_ANSWER = {
 }
 
 
-def developer_answer(content: str, path: str = "web/src/App.tsx", done: bool = True) -> dict[str, Any]:
+def developer_answer(content: str, path: str = "apps/chat/web/src/App.tsx", done: bool = True) -> dict[str, Any]:
     return {
         "actions": [{"kind": "write_file", "path": path, "content": content, "step": None}],
         "done": done,
@@ -380,7 +384,7 @@ class Office:
             "spec_hash": "sha256:spec",
             "suite_hash": "sha256:suite",
             "ci_run_ids": ["101"],
-            "pr_url": "https://github.com/SlavaPush/vibe-chat/pull/1",
+            "pr_url": "https://github.com/SlavaPush/vibe-studio/pull/1",
         } | overrides
         with self.store.db.locked_transaction() as conn:
             return self.store.create_candidate(conn, **fields)

@@ -60,6 +60,8 @@ def test_unrelated_frontend_class_is_rejected(office):
     "text",
     [
         "Поменять обработчик в api/routes/chat.py, чтобы он отвечал быстрее.",
+        "Поменять обработчик в apps/chat/api/app/main.py, чтобы он отвечал быстрее.",
+        "Изменить политику путей в apps/office/policies/paths.yaml для интерфейса.",
         "Обновить зависимости в package.json интерфейса vibe-chat.",
         "Добавить в интерфейс кнопку, которая выполняет curl на внешний сервер.",
         "Удалить всё через rm -rf и создать интерфейс чата заново.",

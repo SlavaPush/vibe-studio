@@ -145,7 +145,7 @@ def setup(office, origin, tmp_path):
 
 
 def ready(docker, sandbox, app, task_id):
-    lock = app.state.workspace.worktree_path(task_id) / "web" / "package-lock.json"
+    lock = app.state.workspace.worktree_path(task_id) / "apps/chat/web/package-lock.json"
     volume = sandbox.volume_prefix + hashlib.sha256(lock.read_bytes()).hexdigest()[:16]
     docker.volumes[volume] = True
     return volume
@@ -185,7 +185,7 @@ def test_docker_arguments_for_install_and_check(setup, monkeypatch):
     app, _, docker, make, start = setup
     sandbox = make()
     [task_id] = start()
-    src = app.state.workspace.worktree_path(task_id)
+    src = app.state.workspace.worktree_path(task_id) / "apps/chat"
     result = sandbox.run_step(task_id, "lint", AgentRole.developer)
     assert result.exit_code == 0
     [install] = docker.runs("install")
@@ -343,9 +343,9 @@ def test_suite_runs_same_qa_on_base_and_task_commit(setup):
     ready(docker, sandbox, app, task_id)
     workspace = app.state.workspace
     root = workspace.worktree_path(task_id)
-    (root / "web/e2e/office").mkdir(parents=True)
-    (root / "web/e2e/office/feature.pw.ts").write_text("test('feature')\n")
-    (root / "web/src/Feature.tsx").write_text("export {}\n")
+    (root / "apps/chat/web/e2e/office").mkdir(parents=True)
+    (root / "apps/chat/web/e2e/office/feature.pw.ts").write_text("test('feature')\n")
+    (root / "apps/chat/web/src/Feature.tsx").write_text("export {}\n")
     commit = workspace.commit(task_id, "feature")
     base = app.state.store.get_task(task_id).base_sha
 
@@ -356,7 +356,7 @@ def test_suite_runs_same_qa_on_base_and_task_commit(setup):
     after = sandbox.run_suite(task_id, commit, commit, require_e2e=True)
     second_e2e = docker.runs("e2e")[1]
     assert mounts(second_e2e)["/src"][1] != str(root)
-    assert first_qa == docker.qa_files == {"web/e2e/office/feature.pw.ts": "test('feature')\n"}
+    assert first_qa == docker.qa_files == {"apps/chat/web/e2e/office/feature.pw.ts": "test('feature')\n"}
     assert before.commit_sha == base and after.commit_sha == commit
     assert before.suite_hash == after.suite_hash
     assert [check.command for check in after.checks][-1].startswith("playwright test")
@@ -378,8 +378,8 @@ def test_suite_without_required_e2e_skips_existing_qa_test(setup):
     ready(docker, sandbox, app, task_id)
     workspace = app.state.workspace
     root = workspace.worktree_path(task_id)
-    (root / "web/e2e/office").mkdir(parents=True)
-    (root / "web/e2e/office/old.pw.ts").write_text("test('old attempt')\n")
+    (root / "apps/chat/web/e2e/office").mkdir(parents=True)
+    (root / "apps/chat/web/e2e/office/old.pw.ts").write_text("test('old attempt')\n")
     commit = workspace.commit(task_id, "qa test of previous attempt")
     docker.exit_codes["e2e"] = 1
 
@@ -391,6 +391,20 @@ def test_suite_without_required_e2e_skips_existing_qa_test(setup):
     assert report.suite_hash != full.suite_hash
 
 
+def test_suite_hash_covers_base_tests_of_chat_app(setup):
+    app, _, docker, make, start = setup
+    sandbox = make()
+    [task_id] = start()
+    ready(docker, sandbox, app, task_id)
+    root = app.state.workspace.worktree_path(task_id)
+    base = git_head(root)
+    (root / "apps/chat/web/src/test/setup.ts").write_text("export const changed = 1\n")
+    git(root, "commit", "-q", "--no-verify", "-am", "base test")
+    changed = git_head(root)
+    hashes = [sandbox.run_suite(task_id, sha, sha).suite_hash for sha in (base, changed)]
+    assert hashes[0] != hashes[1]
+
+
 def test_suite_checks_committed_content_while_worktree_changes(setup):
     app, _, docker, make, start = setup
     sandbox = make()
@@ -398,13 +412,13 @@ def test_suite_checks_committed_content_while_worktree_changes(setup):
     ready(docker, sandbox, app, task_id)
     workspace = app.state.workspace
     root = workspace.worktree_path(task_id)
-    (root / "web/src/App.tsx").write_text("committed\n")
+    (root / "apps/chat/web/src/App.tsx").write_text("committed\n")
     commit = workspace.commit(task_id, "feature")
-    (root / "web/src/Draft.tsx").write_text("draft\n")
+    (root / "apps/chat/web/src/Draft.tsx").write_text("draft\n")
     seen = {}
 
     def edit_worktree(args):
-        (root / "web/src/App.tsx").write_text("changed between steps\n")
+        (root / "apps/chat/web/src/App.tsx").write_text("changed between steps\n")
 
     def read_source(args):
         src = Path(mounts(args)["/src"][1])

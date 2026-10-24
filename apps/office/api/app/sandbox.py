@@ -18,7 +18,7 @@ from typing import Any, BinaryIO, Literal
 import yaml
 
 from app.artifacts import check_name
-from app.config import SANDBOX_DIR, Settings
+from app.config import APP_DIR, SANDBOX_DIR, Settings
 from app.errors import OfficeError
 from app.schemas import AgentRole, CheckReport, CheckResult, TaskEventType
 from app.tasks import TaskStore
@@ -39,7 +39,7 @@ ASSERTION = re.compile(r"^(Error: )?(expect(\.soft)?\(|Timed out \d+ms waiting f
 SANDBOX_USER = "10001:10001"
 MARKER = "/deps/.office-complete"
 UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
-BASE_TEST = re.compile(r"(^|/)[^/]+\.(test|spec)\.[^/]+$|^web/src/test/")
+BASE_TEST = re.compile(rf"(^|/)[^/]+\.(test|spec)\.[^/]+$|^{re.escape(APP_DIR)}/web/src/test/")
 UNAVAILABLE = "Sandbox недоступен: образ не найден или Docker не запущен. Соберите образ командой из README."
 
 MAX_CONTAINERS = 2
@@ -467,7 +467,7 @@ class Sandbox:
     ) -> tuple[str, CheckResult | None]:
         lock_file = src / "web" / "package-lock.json"
         if lock_file.is_symlink() or not lock_file.is_file():
-            raise SandboxError("В рабочей копии нет web/package-lock.json.")
+            raise SandboxError(f"В рабочей копии нет {APP_DIR}/web/package-lock.json.")
         volume = self.volume_prefix + hashlib.sha256(lock_file.read_bytes()).hexdigest()[:16]
         with self._install_lock(volume):
             if self.volume_ready(task_id, volume):
@@ -499,7 +499,8 @@ class Sandbox:
             raise self.deny(task_id, step_name, role, "Шаг недоступен этой роли.")
         self.check_cancelled(task_id)
         self.require_image()
-        src = self.workspace.task_worktree(task_id)
+        root = self.workspace.task_worktree(task_id)
+        src = root / APP_DIR
         volume, install = self.ensure_deps(task_id, src)
         if install is not None and install.exit_code != 0:
             return install
@@ -507,7 +508,7 @@ class Sandbox:
             qa = None
             if step.name == "e2e":
                 qa = Path(tmp) / "qa"
-                if not self._copy_qa(src, qa):
+                if not self._copy_qa(root, qa):
                     raise SandboxError("Набор тестов QA пуст.")
             return self._run(task_id, step, src=src, volume=volume, qa=qa, role=role)
 
@@ -565,7 +566,7 @@ class Sandbox:
                 raise SandboxError("Набор тестов QA пуст.")
             suite_hash = self.suite_hash(app, qa if qa_files else None)
             context = {"commit_sha": app_full, "qa_sha": qa_full}
-            volume, install = self.ensure_deps(task_id, app, context)
+            volume, install = self.ensure_deps(task_id, app / APP_DIR, context)
             if install is not None:
                 checks.append(install)
             if install is None or install.exit_code == 0:
@@ -577,7 +578,7 @@ class Sandbox:
                         self._run(
                             task_id,
                             self.policy.steps[name],
-                            src=app,
+                            src=app / APP_DIR,
                             volume=volume,
                             qa=qa if name == "e2e" else None,
                             context=context,

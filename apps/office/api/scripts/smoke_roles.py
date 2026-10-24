@@ -20,8 +20,8 @@ TASK = "Добавить под каждым ответом ассистента
 FIXED = [
     Entry("Текст задачи участника", TASK, required=True),
     Entry("Требования", "Кнопка копирования видна под ответом ассистента.\n\nКритерии приёмки:\n1. Кнопка видна.", required=True),
-    Entry("Файл теста QA", "web/e2e/office/tsk_smoke.pw.ts", required=True),
-    Entry("Файлы web/src", "web/src/App.tsx\nweb/src/components/chat/MessageActions.tsx"),
+    Entry("Файл теста QA", "apps/chat/web/e2e/office/tsk_smoke.pw.ts", required=True),
+    Entry("Файлы apps/chat/web/src", "apps/chat/web/src/App.tsx\napps/chat/web/src/components/chat/MessageActions.tsx"),
 ]
 
 

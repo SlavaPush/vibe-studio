@@ -1,0 +1,29 @@
+name: Office paths
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  office-paths:
+    if: startsWith(github.head_ref, 'office/')
+    runs-on: ubuntu-latest
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: git fetch --no-tags origin "$HEAD_SHA"
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          working-directory: apps/office/api
+      - run: uv sync --locked
+        working-directory: apps/office/api
+      - run: uv run python -m scripts.check_branch --repo "$GITHUB_WORKSPACE" --base "$BASE_SHA" --head "$HEAD_SHA"
+        working-directory: apps/office/api

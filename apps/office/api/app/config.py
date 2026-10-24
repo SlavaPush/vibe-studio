@@ -5,6 +5,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 POLICIES_DIR = REPO_ROOT / "policies"
 SANDBOX_DIR = REPO_ROOT / "docker" / "sandbox"
+APP_DIR = "apps/chat"
 
 DEFAULT_HOSTS = ("127.0.0.1:8001", "localhost:8001", "127.0.0.1:5173", "localhost:5173")
 DEFAULT_ORIGINS = (

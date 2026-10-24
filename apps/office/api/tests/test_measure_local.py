@@ -91,7 +91,8 @@ def test_all_steps_go_to_ollama_with_role_context(bench, capsys):
     assert f"read_file {COMPONENT_PATH}" in developer["messages"][1]["content"]
     assert "export function MessageComposer" in developer["messages"][1]["content"]
     assert "diff --git" in ollama.chats[6]["messages"][1]["content"]
-    assert "web/e2e/office/tsk_measure.pw.ts" in ollama.chats[4]["messages"][1]["content"]
+    assert "apps/chat/web/e2e/office/tsk_measure.pw.ts" in ollama.chats[4]["messages"][1]["content"]
+    assert "Файлы apps/chat/web/src" in ollama.chats[4]["messages"][1]["content"]
 
     output = capsys.readouterr().out
     assert output.splitlines()[0] == "загруженные модели: qwen3:8b"

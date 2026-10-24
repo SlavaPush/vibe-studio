@@ -1,5 +1,7 @@
 forbidden_patterns:
   - '(?<![\w/.-])api/'
+  - '\bapps/chat/(api|contracts|infra)\b'
+  - '\bapps/office\b'
   - '\.github'
   - '\.env\b'
   - '\bpackage(-lock)?\.json\b'

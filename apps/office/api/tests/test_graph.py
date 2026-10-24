@@ -110,7 +110,7 @@ def test_full_pass_reaches_awaiting_integration(office, origin, graph):
     assert app.state.gateway.role_calls("developer") == []
 
     clone = app.state.workspace.clone
-    moved = origin.push("web/src/Other.tsx", "export {}\n")
+    moved = origin.push("apps/chat/web/src/Other.tsx", "export {}\n")
     git(clone, "fetch", "-q", "origin")
     git(clone, "update-ref", "refs/heads/main", moved)
     git(clone, "symbolic-ref", "HEAD", "refs/heads/main")
@@ -128,7 +128,7 @@ def test_full_pass_reaches_awaiting_integration(office, origin, graph):
     [dev_sha] = office_commits(app, task_id, "developer")
     [qa_sha] = office_commits(app, task_id, "qa")
     assert git(root, "rev-parse", "HEAD") == qa_sha
-    assert git(root, "show", f"{dev_sha}:web/src/App.tsx").startswith("export function App()")
+    assert git(root, "show", f"{dev_sha}:apps/chat/web/src/App.tsx").startswith("export function App()")
     assert git(root, "log", "-1", "--format=%(trailers:key=Office-Round,valueonly)", dev_sha) == "0-1"
     assert git(clone, "rev-parse", "HEAD") == moved != dev_sha
     base = store.get_task(task_id).base_sha
@@ -229,7 +229,7 @@ def test_restart_during_develop_continues_from_checkpoint(office, origin, tmp_pa
     release.set()
     wait_for(lambda: not app.state.runner.active(task_id), 10, "old run stopped")
     root = worktree(second, task_id)
-    assert "stale" not in (root / "web/src/App.tsx").read_text()
+    assert "stale" not in (root / "apps/chat/web/src/App.tsx").read_text()
     assert len(office_commits(second, task_id, "developer")) == 1
     writes = [event for event in events(second, task_id, "tool_called") if event.tool == "write_file" and event.role == "developer"]
     assert len(writes) == 1
@@ -267,7 +267,7 @@ def test_crash_after_transition_does_not_repeat_it(office, origin, tmp_path, gra
     original = store.ensure_status
     if target == "developing":
         reviews = iter([{"verdict": "changes_requested", "findings": [
-            {"blocking": True, "criterion": 1, "file": "web/src/App.tsx", "line": 2, "text": "Кнопки нет."}
+            {"blocking": True, "criterion": 1, "file": "apps/chat/web/src/App.tsx", "line": 2, "text": "Кнопки нет."}
         ]}])
         app.state.gateway.handlers["critic"] = lambda call: next(reviews, {"verdict": "pass", "findings": []})
 
@@ -515,7 +515,7 @@ def test_three_graphs_run_and_fourth_waits(graph):
 
 def test_blocking_critic_finding_returns_to_developer_until_limit(graph):
     app, client, me = graph
-    finding = {"blocking": True, "criterion": None, "file": "web/src/App.tsx", "line": 2, "text": "Кнопка не подписана."}
+    finding = {"blocking": True, "criterion": None, "file": "apps/chat/web/src/App.tsx", "line": 2, "text": "Кнопка не подписана."}
     app.state.gateway.handlers["critic"] = lambda call: {"verdict": "changes_requested", "findings": [finding]}
     task_id = create(app, me["id"])
     approve(client, app, task_id)
@@ -525,7 +525,7 @@ def test_blocking_critic_finding_returns_to_developer_until_limit(graph):
     assert transitions(app, task_id).count(("reviewing", "developing")) == 2
     developer = app.state.gateway.role_calls("developer")
     assert len(developer) == 3
-    assert "Кнопка не подписана." in developer[1].user and "web/src/App.tsx" in developer[1].user
+    assert "Кнопка не подписана." in developer[1].user and "apps/chat/web/src/App.tsx" in developer[1].user
     artifact = json.loads((app.state.settings.artifacts_dir / task_id / "review-0-critic.json").read_text())
     [saved] = artifact["findings"]
     assert Finding.model_validate(saved).model_dump() == saved
@@ -583,7 +583,7 @@ def test_retry_without_changes_from_base_needs_attention(graph):
     app, client, me = graph
     gateway = app.state.gateway
     gateway.handlers["developer"] = lambda call: {
-        "actions": [{"kind": "write_file", "path": "web/src/App.tsx", "content": "export const x = 1\n"}],
+        "actions": [{"kind": "write_file", "path": "apps/chat/web/src/App.tsx", "content": "export const x = 1\n"}],
         "done": True,
         "summary": "x",
     }
@@ -607,7 +607,7 @@ def test_retry_without_changes_from_base_needs_attention(graph):
 def test_fix_cycle_without_new_changes_rechecks_same_version(graph):
     app, client, me = graph
     gateway = app.state.gateway
-    finding = {"blocking": True, "criterion": None, "file": "web/src/App.tsx", "line": 2, "text": "Кнопка не подписана."}
+    finding = {"blocking": True, "criterion": None, "file": "apps/chat/web/src/App.tsx", "line": 2, "text": "Кнопка не подписана."}
     gateway.handlers["critic"] = lambda call: {"verdict": "changes_requested", "findings": [finding]}
     answers = iter([developer_answer("export function App() {\n  return 'ok'\n}\n")])
     gateway.handlers["developer"] = lambda call: next(answers, NO_CHANGE)
@@ -655,7 +655,7 @@ def test_qa_failure_on_task_version_becomes_blocking_finding(graph):
         "source": "qa",
         "blocking": True,
         "criterion": 2,
-        "file": f"web/e2e/office/{task_id}.pw.ts",
+        "file": f"apps/chat/web/e2e/office/{task_id}.pw.ts",
         "line": 7,
         "text": "Expected visible button",
     }
@@ -768,8 +768,8 @@ def test_unmocked_api_twice_needs_attention_without_developer_finding(graph):
 
 def test_qa_gets_api_files_and_unmocked_note_from_own_run(origin, graph):
     app, client, me = graph
-    origin.push("contracts/api.md", "# Контракт\n")
-    origin.push("web/src/api/client.ts", "export {}\n")
+    origin.push("apps/chat/contracts/api.md", "# Контракт\n")
+    origin.push("apps/chat/web/src/api/client.ts", "export {}\n")
     directory = app.state.settings.artifacts_dir
 
     def run_step(task_id, step, role):
@@ -790,8 +790,8 @@ def test_qa_gets_api_files_and_unmocked_note_from_own_run(origin, graph):
     approve(client, app, task_id)
     wait_status(app, task_id, TaskStatus.awaiting_integration)
     first, second = app.state.gateway.role_calls("qa")
-    assert "Контракт API vibe-chat, клиент и примеры ответов\ncontracts/api.md\nweb/src/api/client.ts\n" in first.user
-    assert "web/src/api/types.ts" not in first.user
+    assert "Контракт API vibe-chat, клиент и примеры ответов\napps/chat/contracts/api.md\napps/chat/web/src/api/client.ts\n" in first.user
+    assert "apps/chat/web/src/api/types.ts" not in first.user
     assert "Тест QA обратился к API vibe-chat без подмены: GET /api/conversations." in second.user
 
 
@@ -854,7 +854,7 @@ def test_cancel_during_model_answer_discards_it(graph):
     approve(client, app, task_id)
     assert entered.wait(30)
     root = worktree(app, task_id)
-    before = (root / "web/src/App.tsx").read_text()
+    before = (root / "apps/chat/web/src/App.tsx").read_text()
     decide(client, app, task_id, "cancel")
     threading.Event().wait(0.3)
     assert root.is_dir()
@@ -954,14 +954,14 @@ def test_retry_waits_for_running_branch_and_keeps_usage(graph):
 def test_invalid_model_answer_is_not_executed(graph):
     app, client, me = graph
     app.state.gateway.handlers["developer"] = lambda call: {
-        "actions": [{"kind": "write_file", "path": "web/src/App.tsx", "content": "export const x = 1\n"}],
+        "actions": [{"kind": "write_file", "path": "apps/chat/web/src/App.tsx", "content": "export const x = 1\n"}],
         "done": True,
         "summary": "x",
     }
     task_id = create(app, me["id"])
     approve(client, app, task_id)
     wait_status(app, task_id, TaskStatus.failed)
-    assert "x = 1" not in (worktree(app, task_id) / "web/src/App.tsx").read_text()
+    assert "x = 1" not in (worktree(app, task_id) / "apps/chat/web/src/App.tsx").read_text()
     assert not [event for event in events(app, task_id, "tool_called") if event.tool == "write_file"]
     assert events(app, task_id, "role_finished")[-1].payload["summary"].startswith("Ответ модели не соответствует схеме")
 
@@ -971,8 +971,8 @@ def test_denied_write_is_returned_to_model(graph):
     answers = iter([
         {
             "actions": [
-                {"kind": "write_file", "path": "api/main.py", "content": "evil = 1\n", "step": None},
-                {"kind": "read_file", "path": "web/src/App.tsx", "content": None, "step": None},
+                {"kind": "write_file", "path": "apps/chat/api/main.py", "content": "evil = 1\n", "step": None},
+                {"kind": "read_file", "path": "apps/chat/web/src/App.tsx", "content": None, "step": None},
             ],
             "done": False,
             "summary": "Первый ход",
@@ -984,9 +984,46 @@ def test_denied_write_is_returned_to_model(graph):
     approve(client, app, task_id)
     wait_status(app, task_id, TaskStatus.awaiting_integration)
     second = app.state.gateway.role_calls("developer")[1]
-    assert "write_file api/main.py\ndenied" in second.user
+    assert "write_file apps/chat/api/main.py\ndenied" in second.user
     assert "export function App()" in second.user
-    assert not (worktree(app, task_id) / "api/main.py").read_text().startswith("evil")
+    assert not (worktree(app, task_id) / "apps/chat/api/main.py").read_text().startswith("evil")
+
+
+def test_lint_disable_comment_stops_before_integration(graph):
+    app, client, me = graph
+    content = "// eslint-disable-next-line no-console\nexport function App() {\n  return 'ok'\n}\n"
+    app.state.gateway.handlers["developer"] = lambda call: developer_answer(content)
+    task_id = create(app, me["id"])
+    approve(client, app, task_id)
+    wait_status(app, task_id, TaskStatus.needs_attention, TaskStatus.awaiting_integration, TaskStatus.failed)
+    assert status(app, task_id) == TaskStatus.needs_attention
+    assert ("reviewing", "needs_attention") in transitions(app, task_id)
+    [denied] = [event for event in events(app, task_id, "tool_called") if event.tool == "verify_branch"]
+    assert denied.payload["result"] == "denied"
+    assert "apps/chat/web/src/App.tsx" in denied.payload["reason"] and "eslint-disable" in denied.payload["reason"]
+    last = events(app, task_id, "role_finished")[-1]
+    assert last.payload["step"] == "verify_branch" and last.payload["outcome"] == "blocked"
+
+
+def test_commit_outside_office_stops_before_integration(graph):
+    app, client, me = graph
+    root = {}
+
+    def sneak(task_id, app_sha, qa_sha, require_e2e):
+        if require_e2e and "done" not in root:
+            root["done"] = True
+            path = worktree(app, task_id)
+            (path / "apps/chat/web/vite.config.ts").write_text("export default {}\n")
+            git(path, "add", "apps/chat/web/vite.config.ts")
+            git(path, "commit", "-q", "--no-verify", "-m", "outside office")
+
+    app.state.suite.on_suite = sneak
+    task_id = create(app, me["id"])
+    approve(client, app, task_id)
+    wait_status(app, task_id, TaskStatus.needs_attention, TaskStatus.awaiting_integration, TaskStatus.failed)
+    assert status(app, task_id) == TaskStatus.needs_attention
+    [denied] = [event for event in events(app, task_id, "tool_called") if event.tool == "verify_branch"]
+    assert "apps/chat/web/vite.config.ts" in denied.payload["reason"]
 
 
 def test_task_text_is_passed_between_delimiters(graph):

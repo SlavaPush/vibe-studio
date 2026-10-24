@@ -17,7 +17,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, ValidationError
 
-from app.config import Settings
+from app.config import APP_DIR, Settings
 from app.models_gateway import ModelCall, ModelsGateway, ProviderError
 from app.roles import (
     CRITIC,
@@ -51,7 +51,8 @@ SPEC = (
 )
 
 LISTING = "\n".join(
-    [
+    f"{APP_DIR}/{rel}"
+    for rel in [
         "web/src/App.test.tsx",
         "web/src/App.tsx",
         "web/src/api/client.ts",
@@ -97,7 +98,7 @@ LISTING = "\n".join(
     ]
 )
 
-COMPONENT_PATH = "web/src/components/chat/MessageComposer.tsx"
+COMPONENT_PATH = f"{APP_DIR}/web/src/components/chat/MessageComposer.tsx"
 
 COMPONENT = """import { ImageIcon, SendHorizontal, Square } from 'lucide-react'
 import {
@@ -253,10 +254,10 @@ CHECKS = "\n".join(
     ]
 )
 
-DIFF = """diff --git a/web/src/components/chat/MessageComposer.tsx b/web/src/components/chat/MessageComposer.tsx
+DIFF = """diff --git a/apps/chat/web/src/components/chat/MessageComposer.tsx b/apps/chat/web/src/components/chat/MessageComposer.tsx
 index 3f2a9c1..8b7e4d0 100644
---- a/web/src/components/chat/MessageComposer.tsx
-+++ b/web/src/components/chat/MessageComposer.tsx
+--- a/apps/chat/web/src/components/chat/MessageComposer.tsx
++++ b/apps/chat/web/src/components/chat/MessageComposer.tsx
 @@ -19,6 +19,7 @@ import { cn } from '@/lib/utils'
 
  const MAX_ROWS = 8
@@ -304,10 +305,10 @@ index 3f2a9c1..8b7e4d0 100644
      </form>
    )
  }
-diff --git a/web/src/components/chat/MessageComposer.test.tsx b/web/src/components/chat/MessageComposer.test.tsx
+diff --git a/apps/chat/web/src/components/chat/MessageComposer.test.tsx b/apps/chat/web/src/components/chat/MessageComposer.test.tsx
 index 51c0d2e..a4f1b93 100644
---- a/web/src/components/chat/MessageComposer.test.tsx
-+++ b/web/src/components/chat/MessageComposer.test.tsx
+--- a/apps/chat/web/src/components/chat/MessageComposer.test.tsx
++++ b/apps/chat/web/src/components/chat/MessageComposer.test.tsx
 @@ -41,3 +41,22 @@ describe('MessageComposer', () => {
      expect(onSend).toHaveBeenCalledWith('Привет')
    })
@@ -354,7 +355,7 @@ STEPS = [
         "spec",
         SUPERVISOR,
         SpecDraft,
-        [Entry("Текст задачи участника", TASK_TEXT, required=True), Entry("Файлы web/src", LISTING)],
+        [Entry("Текст задачи участника", TASK_TEXT, required=True), Entry("Файлы apps/chat/web/src", LISTING)],
         [],
     ),
     Step(
@@ -363,7 +364,7 @@ STEPS = [
         "implement",
         DEVELOPER,
         Turn,
-        spec_entries() + [Entry("Файлы web/src", LISTING)],
+        spec_entries() + [Entry("Файлы apps/chat/web/src", LISTING)],
         [
             [
                 Entry("Ход 1: ответ роли", "Читаю компонент поля ввода сообщения."),
@@ -378,7 +379,7 @@ STEPS = [
         QA,
         QaTurn,
         spec_entries()
-        + [Entry("Файл теста QA", f"{QA_TEST_DIR}/tsk_measure.pw.ts", required=True), Entry("Файлы web/src", LISTING)],
+        + [Entry("Файл теста QA", f"{QA_TEST_DIR}/tsk_measure.pw.ts", required=True), Entry("Файлы apps/chat/web/src", LISTING)],
         [],
     ),
     Step(

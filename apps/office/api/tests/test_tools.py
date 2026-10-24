@@ -39,16 +39,16 @@ def snapshot(root):
 
 def test_allowed_write_creates_file(task):
     _, _, root = task
-    outcome = tools(task).write_file("web/src/components/chat/Copy.tsx", "export const copy = 1\n")
+    outcome = tools(task).write_file("apps/chat/web/src/components/chat/Copy.tsx", "export const copy = 1\n")
     assert outcome.result == "ok"
-    target = root / "web/src/components/chat/Copy.tsx"
+    target = root / "apps/chat/web/src/components/chat/Copy.tsx"
     assert target.read_text() == "export const copy = 1\n"
     assert stat.S_IMODE(target.stat().st_mode) == 0o644
     event = last_event(task)
     assert event.type == "tool_called"
     assert event.role == AgentRole.developer
     assert event.tool == "write_file"
-    assert event.payload == {"arguments": "web/src/components/chat/Copy.tsx (22 байт)", "result": "ok"}
+    assert event.payload == {"arguments": "apps/chat/web/src/components/chat/Copy.tsx (22 байт)", "result": "ok"}
     assert [name for name in os.listdir(target.parent) if name.startswith(".office-")] == []
 
 
@@ -61,22 +61,28 @@ def test_allowed_write_creates_file(task):
         ".git",
         ".github/workflows/ci.yml",
         ".env",
-        "web/.env.local",
-        "web/src/.env",
-        "web/package.json",
-        "web/package-lock.json",
-        "web/vite.config.ts",
-        "web/tsconfig.app.json",
-        "web/src/App.test.tsx",
-        "web/src/test/setup.ts",
-        "web/src/new.spec.ts",
+        "apps/chat/web/.env.local",
+        "apps/chat/web/src/.env",
+        "apps/chat/web/package.json",
+        "apps/chat/web/package-lock.json",
+        "apps/chat/web/vite.config.ts",
+        "apps/chat/web/tsconfig.app.json",
+        "apps/chat/web/src/App.test.tsx",
+        "apps/chat/web/src/test/setup.ts",
+        "apps/chat/web/src/new.spec.ts",
         "contracts/api.md",
+        "apps/chat/api/main.py",
+        "apps/chat/contracts/api.md",
+        "apps/chat/web/src/api/client.ts",
+        "apps/chat/web/src/mocks/data.ts",
+        "apps/office/policies/paths.yaml",
+        "README.md",
         "../outside.ts",
-        "web/src/../../api/x.ts",
+        "apps/chat/web/src/../../api/x.ts",
         "/tmp/office-absolute.ts",
-        "web/src/script.sh",
-        "web/src/App.TEST.tsx",
-        "web/e2e/office/a.pw.ts",
+        "apps/chat/web/src/script.sh",
+        "apps/chat/web/src/App.TEST.tsx",
+        "apps/chat/web/e2e/office/a.pw.ts",
     ],
 )
 def test_forbidden_write_is_denied(task, path):
@@ -95,9 +101,9 @@ def test_forbidden_write_is_denied(task, path):
 
 def test_oversized_write_is_denied(task):
     _, _, root = task
-    outcome = tools(task).write_file("web/src/Big.ts", "x" * 204801)
+    outcome = tools(task).write_file("apps/chat/web/src/Big.ts", "x" * 204801)
     assert outcome.result == "denied"
-    assert not (root / "web/src/Big.ts").exists()
+    assert not (root / "apps/chat/web/src/Big.ts").exists()
 
 
 @pytest.mark.parametrize("kind", ["directory", "file"])
@@ -107,11 +113,11 @@ def test_symlink_is_denied(task, tmp_path, kind):
     outside.mkdir()
     (outside / "target.ts").write_text("original\n")
     if kind == "directory":
-        os.symlink(outside, root / "web/src/linked")
-        path = "web/src/linked/target.ts"
+        os.symlink(outside, root / "apps/chat/web/src/linked")
+        path = "apps/chat/web/src/linked/target.ts"
     else:
-        os.symlink(outside / "target.ts", root / "web/src/target.ts")
-        path = "web/src/target.ts"
+        os.symlink(outside / "target.ts", root / "apps/chat/web/src/target.ts")
+        path = "apps/chat/web/src/target.ts"
     outcome = tools(task).write_file(path, "changed\n")
     assert outcome.result == "denied"
     assert (outside / "target.ts").read_text() == "original\n"
@@ -121,32 +127,33 @@ def test_symlink_is_denied(task, tmp_path, kind):
 def test_qa_writes_only_own_directory(task):
     _, _, root = task
     qa = tools(task, AgentRole.qa)
-    assert qa.write_file("web/e2e/office/copy.pw.ts", "import { test } from '@playwright/test'\n").result == "ok"
-    assert (root / "web/e2e/office/copy.pw.ts").is_file()
-    for path in ["web/src/App.tsx", "web/e2e/office/helper.ts", "web/e2e/other.pw.ts"]:
+    assert qa.write_file("apps/chat/web/e2e/office/copy.pw.ts", "import { test } from '@playwright/test'\n").result == "ok"
+    assert (root / "apps/chat/web/e2e/office/copy.pw.ts").is_file()
+    for path in ["apps/chat/web/src/App.tsx", "apps/chat/web/e2e/office/helper.ts", "apps/chat/web/e2e/other.pw.ts"]:
         assert qa.write_file(path, "x\n").result == "denied"
-    assert (root / "web/src/App.tsx").read_text().startswith("export function App")
+    assert (root / "apps/chat/web/src/App.tsx").read_text().startswith("export function App")
 
 
 def test_read_and_list(task):
     _, _, root = task
     developer = tools(task)
-    assert developer.read_file("web/src/App.tsx").output.startswith("export function App")
+    assert developer.read_file("apps/chat/web/src/App.tsx").output.startswith("export function App")
     assert developer.read_file(".git").result == "denied"
     (root / ".env").write_text("SECRET=1\n")
     assert developer.read_file(".env").result == "denied"
     listing = developer.list_dir(".").output.splitlines()
-    assert "web/" in listing
-    assert ".git" not in listing and ".env" not in listing
-    assert developer.list_dir("web/src").output.splitlines() == ["App.test.tsx", "App.tsx", "test/"]
-    assert developer.read_file("web/src/Missing.tsx").result == "error"
+    assert listing == ["README.md", "apps/"]
+    assert developer.list_dir("apps").output.splitlines() == ["chat/"]
+    assert developer.list_dir("apps/chat/web/src").output.splitlines() == ["App.test.tsx", "App.tsx", "test/"]
+    assert developer.read_file("apps/office/policies/paths.yaml").result == "error"
+    assert developer.read_file("apps/chat/web/src/Missing.tsx").result == "error"
 
 
 def test_delete_file(task):
     _, _, root = task
     developer = tools(task)
-    assert developer.write_file("web/src/Old.tsx", "x\n").result == "ok"
-    assert developer.delete_file("web/src/Old.tsx").result == "ok"
-    assert not (root / "web/src/Old.tsx").exists()
-    assert developer.delete_file("web/src/App.test.tsx").result == "denied"
-    assert (root / "web/src/App.test.tsx").is_file()
+    assert developer.write_file("apps/chat/web/src/Old.tsx", "x\n").result == "ok"
+    assert developer.delete_file("apps/chat/web/src/Old.tsx").result == "ok"
+    assert not (root / "apps/chat/web/src/Old.tsx").exists()
+    assert developer.delete_file("apps/chat/web/src/App.test.tsx").result == "denied"
+    assert (root / "apps/chat/web/src/App.test.tsx").is_file()

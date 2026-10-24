@@ -8,8 +8,8 @@
 
 | Секрет | Где хранится | Кто использует | Права |
 | --- | --- | --- | --- |
-| Токен GitHub | `.env` офиса | Релизный адаптер | Fine-grained token только для репозитория `SlavaPush/vibe-chat`: Contents — read and write, Pull requests — read and write, Commit statuses — read, Checks — read, Actions — read |
-| Ключ Render API | `.env` офиса | Релизный адаптер | Доступ к сервису `vibe-chat` |
+| Токен GitHub | `.env` офиса | Релизный адаптер | Fine-grained token только для репозитория `SlavaPush/vibe-studio`: Contents — read and write, Pull requests — read and write, Commit statuses — read, Checks — read, Actions — read |
+| Ключ Render API | `.env` офиса | Релизный адаптер | Доступ к сервису Render `elbrus-vibe-chat` (`srv-dbdtap5g1s2s73b13edg`), который публикует `vibe-chat` из `apps/chat` |
 
 Sandbox, агенты и CI не получают эти секреты. Агент не может изменить workflow GitHub Actions, настройки деплоя и политику путей.
 
@@ -17,22 +17,32 @@ Sandbox, агенты и CI не получают эти секреты. Аге�
 
 ### Рабочая копия и ветка задачи
 
-1. Офис держит клон `https://github.com/SlavaPush/vibe-chat.git` в `workspace/vibe-chat` (каталог в `.gitignore`).
-2. Для новой задачи выполняются `git fetch origin` и `git worktree add workspace/wt/<task_id> -b office/<task_id> origin/main`. SHA `origin/main` записывается в поле задачи `base_sha`.
-3. Разработчик меняет файлы только внутри `workspace/wt/<task_id>` и только в разрешённых путях `vibe-chat/web/`.
-4. По завершении или отмене задачи worktree удаляется. Ветка `office/<task_id>` остаётся до слияния или закрытия PR.
+1. Офис держит клон монорепозитория `https://github.com/SlavaPush/vibe-studio.git` в `workspace/vibe-studio` (каталог в `.gitignore`). Целевое приложение — `apps/chat`.
+2. Для новой задачи выполняются `git fetch origin` и `git worktree add --no-checkout workspace/wt/<task_id> -b office/<task_id> origin/main`, затем в worktree включается sparse checkout в режиме cone только для `apps/chat/` и выполняется checkout ветки. Каталогов `apps/office/` и `.github/` в worktree нет. SHA `origin/main` записывается в поле задачи `base_sha`.
+3. Разработчик и QA меняют файлы только внутри `workspace/wt/<task_id>` и только в разрешённых путях `apps/chat/web/` (`apps/chat/web/src/**`, `apps/chat/web/public/**`, `apps/chat/web/index.html`; тесты QA — `apps/chat/web/e2e/office/**/*.pw.ts`). Пути политики заданы относительно корня монорепозитория.
+4. Политику путей и собственный код офис читает только из своего checkout (`apps/office/policies/paths.yaml` каталога, из которого запущен офис), никогда из клона или worktree задачи. Изменение политики в ветке задачи не меняет решений офиса.
+5. Перед переходом задачи в `awaiting_integration` офис повторно проверяет всю ветку `base_sha..HEAD`: каждый изменённый путь допустим для одной из ролей, режим файла обычный (`100644`), содержимое не двоичное, добавленные строки не содержат комментариев отключения проверок (`eslint-disable`, `oxlint-disable`, `@ts-ignore`, `@ts-nocheck`, `@ts-expect-error`). Нарушение переводит задачу в `needs_attention` с причиной, PR не создаётся. Та же проверка (`app/branch_check.py`) выполняется релизным этапом перед выпуском.
+6. По завершении или отмене задачи worktree удаляется. Ветка `office/<task_id>` остаётся до слияния или закрытия PR.
 
 ### Pull request
 
 1. Офис отправляет ветку `office/<task_id>` в `origin` по HTTPS с токеном. Push в `main`, force push и изменение защиты веток не выполняются.
-2. PR создаётся запросом `POST /repos/SlavaPush/vibe-chat/pulls` с `head = office/<task_id>` и `base = main`. Адрес PR сохраняется в поле задачи `pr_url`, задача переходит в `awaiting_integration`.
+2. PR создаётся запросом `POST /repos/SlavaPush/vibe-studio/pulls` с `head = office/<task_id>` и `base = main`. Адрес PR сохраняется в поле задачи `pr_url`, задача переходит в `awaiting_integration`.
 3. Слияние PR выполняет человек в GitHub. Офис не разрешает конфликты автоматически и не обходит защиту веток.
-4. После слияния офис читает PR (`GET /repos/SlavaPush/vibe-chat/pulls/{number}`) и берёт итоговый `merge_commit_sha`. Дальнейшие проверки и выпуск относятся к этому commit.
+4. После слияния офис читает PR (`GET /repos/SlavaPush/vibe-studio/pulls/{number}`) и берёт итоговый `merge_commit_sha`. Дальнейшие проверки и выпуск относятся к этому commit.
+
+### Проверка путей `office-paths`
+
+1. Workflow `.github/workflows/office-paths.yml` запускается событием `pull_request_target` (`opened`, `synchronize`, `reopened`). Job `office-paths` выполняется только для веток `office/*`.
+2. Checkout берёт базовую ветку без `ref` и с `persist-credentials: false`: код проверки и политика путей — доверенные. Объекты head PR получаются `git fetch` только как данные. Код из head не выполняется: ни скрипты, ни зависимости, ни конфигурации.
+3. Проверка — скрипт офиса `apps/office/api/scripts/check_branch.py` из базовой ревизии (`uv run python -m scripts.check_branch`). Он использует ту же функцию, что повторная проверка ветки, и считает diff от merge-base базового commit и head PR.
+4. У workflow `permissions: contents: read`, секретов нет. SHA базового commit и head PR передаются через `env`, а не подстановкой в текст скрипта.
+5. На этапе `P4a` любые пути вне зоны интерфейса отклоняются. Серверный контур с одобрением владельца добавляется на этапе `P5`.
 
 ### Обязательные проверки итогового commit
 
-1. Офис читает результаты запусков для итогового commit: `GET /repos/SlavaPush/vibe-chat/commits/{sha}/check-runs` и `GET /repos/SlavaPush/vibe-chat/commits/{sha}/status`.
-2. Список обязательных проверок задаётся конфигурацией офиса: сборка, проверки API, критический E2E и проверка границ файлов.
+1. Офис читает результаты запусков для итогового commit: `GET /repos/SlavaPush/vibe-studio/commits/{sha}/check-runs` и `GET /repos/SlavaPush/vibe-studio/commits/{sha}/status`.
+2. Список обязательных проверок задаётся конфигурацией офиса: сборка, проверки API, критический E2E и проверка границ файлов `office-paths`.
 3. Выпуск разрешён, только если каждая обязательная проверка существует для этого commit и завершилась с `conclusion = success`.
 4. Статусы `skipped`, `neutral`, `cancelled`, `timed_out`, `action_required`, `failure`, а также отсутствие обязательной проверки блокируют выпуск.
 5. Результаты проверок исходной ветки не заменяют проверки итогового commit, если SHA после слияния изменился.
@@ -59,7 +69,7 @@ Sandbox, агенты и CI не получают эти секреты. Аге�
 
 ## Render
 
-1. Автодеплой сервиса `vibe-chat` выключен: в настройках Render Auto-Deploy = Off, через API — поле `autoDeploy = no` запроса Update service. Деплой запускает только офис.
+1. Автодеплой сервиса Render `elbrus-vibe-chat` (`srv-dbdtap5g1s2s73b13edg`) выключен: в настройках Render Auto-Deploy = Off, через API — поле `autoDeploy = no` запроса Update service. Деплой запускает только офис.
 2. Деплой запускается запросом `POST /v1/services/{serviceId}/deploys` с телом `{"commitId": "<commit_sha>"}`. Кандидат получает статус `deploying`, задача — `deploying`. Идентификатор деплоя Render сохраняется в `deploy.render_deploy_id` до ожидания результата.
 3. Офис опрашивает `GET /v1/services/{serviceId}/deploys/{deployId}` до терминального статуса. Каждое изменение статуса публикуется событием `deploy_status`.
 4. Статус `live` означает успешный деплой. Затем офис проверяет `GET /api/version`: опубликованная версия должна совпасть с `commit_sha`. Только после этого кандидат получает `released`, `is_published = true`, задача — `released`, очередь освобождается.
@@ -81,4 +91,4 @@ Sandbox, агенты и CI не получают эти секреты. Аге�
 
 ## Сервис `vibe-chat`
 
-Офис использует только публичную операцию `GET /api/version` сервиса `vibe-chat`. Ответ содержит SHA commit опубликованной сборки. Формат ответа определяет `vibe-chat/contracts/api.md`. Запрос выполняется без кеширования. Офис не обращается к данным пользователей сервиса и не хранит его ключи.
+Офис использует только публичную операцию `GET /api/version` сервиса `vibe-chat`. Ответ содержит SHA commit опубликованной сборки. Формат ответа определяет `apps/chat/contracts/api.md`. Запрос выполняется без кеширования. Офис не обращается к данным пользователей сервиса и не хранит его ключи.

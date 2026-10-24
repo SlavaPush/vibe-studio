@@ -11,7 +11,7 @@ from app.sandbox import Sandbox
 from app.schemas import ModelProfile, TaskStatus
 from app.tasks import IntakeOutcome
 
-TARGET = os.environ.get("OFFICE_TEST_TARGET_REPO", "https://github.com/SlavaPush/vibe-chat.git")
+TARGET = os.environ.get("OFFICE_TEST_TARGET_REPO", "https://github.com/SlavaPush/vibe-studio.git")
 UNMOCKED_TEST = """import { test, expect } from "@playwright/test";
 
 test("заголовок новой версии", async ({ page }) => {
@@ -75,13 +75,15 @@ def test_graph_with_real_sandbox_produces_qa_evidence(real):
     assert found.stdout.strip() == ""
 
     def developer(call):
-        page = (workspace.worktree_path(call.task_id) / "web/index.html").read_text()
-        return developer_answer(page.replace("<title>vibe-chat</title>", "<title>vibe-chat office</title>"), "web/index.html")
+        page = (workspace.worktree_path(call.task_id) / "apps/chat/web/index.html").read_text()
+        return developer_answer(
+            page.replace("<title>vibe-chat</title>", "<title>vibe-chat office</title>"), "apps/chat/web/index.html"
+        )
 
     tests = iter([UNMOCKED_TEST, TITLE_TEST])
 
     def qa(call):
-        path = f"web/e2e/office/{call.task_id}.pw.ts"
+        path = f"apps/chat/web/e2e/office/{call.task_id}.pw.ts"
         return {
             "actions": [{"kind": "write_file", "path": path, "content": next(tests), "step": None}],
             "done": True,
@@ -124,7 +126,8 @@ def test_graph_with_real_sandbox_produces_qa_evidence(real):
     qa_calls = gateway.role_calls("qa", task_id)
     assert len(qa_calls) == 2
     assert "Тест QA обратился к API vibe-chat без подмены: GET /api/" in qa_calls[1].user
-    assert "contracts/api.md\nweb/src/api/client.ts" in qa_calls[0].user
+    assert "apps/chat/contracts/api.md\napps/chat/web/src/api/client.ts" in qa_calls[0].user
+    assert not (workspace.worktree_path(task_id) / "apps/office").exists()
     assert len(gateway.role_calls("developer", task_id)) == 1
     reports = sorted(artifacts.glob("e2e-*-playwright-report.json"), key=lambda path: int(path.name.split("-")[1]))
     assert len(reports) == 3

@@ -4,8 +4,13 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator, model_validator
 
-QA_TEST_DIR = "web/e2e/office"
-QA_API_FILES = ("contracts/api.md", "web/src/api/client.ts", "web/src/api/types.ts", "web/src/mocks/contract-examples.ts")
+from app.config import APP_DIR
+
+QA_TEST_DIR = f"{APP_DIR}/web/e2e/office"
+QA_API_FILES = tuple(
+    f"{APP_DIR}/{rel}"
+    for rel in ("contracts/api.md", "web/src/api/client.ts", "web/src/api/types.ts", "web/src/mocks/contract-examples.ts")
+)
 CLIPPED = " [обрезано]"
 
 
@@ -261,9 +266,9 @@ def input_budget(context_tokens: int, max_output_tokens: int, max_input_tokens: 
     return int(limit * 0.9)
 
 
-SUPERVISOR = """Ты — Supervisor офиса разработки. Офис изменяет только пользовательский интерфейс веб-сервиса vibe-chat (каталог web/ репозитория: React, TypeScript, Vite).
+SUPERVISOR = """Ты — Supervisor офиса разработки. Офис изменяет только пользовательский интерфейс веб-сервиса vibe-chat (каталог apps/chat/web/ монорепозитория vibe-studio: React, TypeScript, Vite).
 
-Получив текст задачи участника и список файлов web/src, сформулируй требования:
+Получив текст задачи участника и список файлов apps/chat/web/src, сформулируй требования:
 - summary — что должно измениться для пользователя, 1–3 предложения на русском;
 - acceptance_criteria — от 1 до 8 проверяемых критериев приёмки на русском; каждый критерий проверяется в браузере тестом Playwright на собранном приложении без backend;
 - needs_research — true, только если для задачи нужны сведения из публичной документации в интернете;
@@ -275,7 +280,7 @@ RESEARCH_PLAN = """Ты — исследователь офиса разрабо
 
 RESEARCH_NOTES = """Ты — исследователь офиса разработки интерфейса vibe-chat. По тексту загруженных страниц кратко ответь на вопросы исследования (notes, до 4000 символов, на русском) и перечисли использованные страницы в sources (title и url из данных). Ответь только JSON по заданной схеме."""
 
-DEVELOPER = """Ты — разработчик офиса. Ты изменяешь интерфейс vibe-chat в рабочей копии репозитория по утверждённым требованиям.
+DEVELOPER = """Ты — разработчик офиса. Ты изменяешь интерфейс vibe-chat (каталог apps/chat/web/) в рабочей копии монорепозитория vibe-studio по утверждённым требованиям.
 
 Каждый ответ — один ход: summary, признак done и список действий (не больше 8).
 Действия (kind и поля; неиспользуемые поля равны null):
@@ -284,7 +289,7 @@ DEVELOPER = """Ты — разработчик офиса. Ты изменяеш
 - write_file: path и content — полное новое содержимое файла;
 - delete_file: path;
 - run_step: step — lint, test или build.
-Писать можно только в web/src/**, web/public/** и web/index.html. Тесты, package.json, конфигурации и каталоги вне web/ менять нельзя: такие действия отклоняются.
+Писать можно только в apps/chat/web/src/**, apps/chat/web/public/** и apps/chat/web/index.html, кроме apps/chat/web/src/api/** и apps/chat/web/src/mocks/**. Тесты, package.json, конфигурации и каталоги вне apps/chat/web/ менять нельзя: такие действия отклоняются.
 Результаты действий придут в следующем ходе. Когда изменения готовы, верни done = true; summary — краткое описание изменений на русском для commit. Ответь только JSON по заданной схеме."""
 
 QA = """Ты — QA офиса. Ты пишешь один сквозной тест Playwright на TypeScript, который проверяет критерии приёмки на собранном приложении vibe-chat.
@@ -297,4 +302,4 @@ QA = """Ты — QA офиса. Ты пишешь один сквозной те
 
 CRITIC = """Ты — ревьюер-критик офиса. Проверь diff изменений интерфейса vibe-chat по требованиям и отчёту проверок.
 
-Верни verdict (pass или changes_requested) и findings. Каждое замечание: blocking (true — критерий приёмки не выполнен или изменение содержит ошибку), criterion (номер критерия или null), file и line (место в diff или null), text — конкретное описание на русском. У замечания должен быть заполнен criterion или file. Не требуй изменений вне web/src, web/public и web/index.html. Ответь только JSON по заданной схеме."""
+Верни verdict (pass или changes_requested) и findings. Каждое замечание: blocking (true — критерий приёмки не выполнен или изменение содержит ошибку), criterion (номер критерия или null), file и line (место в diff или null), text — конкретное описание на русском. У замечания должен быть заполнен criterion или file. Не требуй изменений вне apps/chat/web/src, apps/chat/web/public и apps/chat/web/index.html. Ответь только JSON по заданной схеме."""

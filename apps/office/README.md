@@ -1,6 +1,6 @@
 # back-office
 
-Мультиагентный офис, который развивает публичный сервис [vibe-chat](https://github.com/SlavaPush/vibe-chat). Участники ставят задачи по разработке сервиса; фильтр приёма отклоняет посторонние задачи; до трёх задач выполняются одновременно, каждая в отдельном git worktree; пять ролей (исследователь, Supervisor, разработчик, QA, критик) на LangGraph; независимые проверки; очередь выпуска; подтверждение релиза администратором.
+Мультиагентный офис, который развивает публичный сервис `vibe-chat` (каталог `apps/chat` монорепозитория [vibe-studio](https://github.com/SlavaPush/vibe-studio)). Офис находится в каталоге `apps/office` того же монорепозитория. Участники ставят задачи по разработке сервиса; фильтр приёма отклоняет посторонние задачи; до трёх задач выполняются одновременно, каждая в отдельном git worktree; пять ролей (исследователь, Supervisor, разработчик, QA, критик) на LangGraph; независимые проверки; очередь выпуска; подтверждение релиза администратором.
 
 Для демонстрации офис работает локально. Архитектура допускает деплой на сервер с Docker без переписывания.
 
@@ -13,8 +13,8 @@
 | `contracts/` | Контракт API панели и описание интеграций с GitHub и Render (этап P1) |
 | `policies/` | Разрешённые пути и команды sandbox, профили моделей `models.yaml` |
 | `docker/sandbox/` | Образ для сборки и проверок изменяемого кода (Node 24 + Playwright) |
-| `api/scripts/` | Smoke-проверки моделей и замер профиля `local` |
-| `workspace/` | Клон `vibe-chat` и worktree задач; в `.gitignore` |
+| `api/scripts/` | Smoke-проверки моделей, замер профиля `local`, проверка ветки задачи `check_branch.py` |
+| `workspace/` | Клон `vibe-studio` и worktree задач; в `.gitignore` |
 
 Статус: подэтап `P4.1` — API офиса на БД (SQLite локально, PostgreSQL при деплое): сеансы по коду доступа, проверка `Host` и `Origin`, права, фильтр приёма задач (детерминированные проверки, модерация OpenAI, классификатор), три слота и очередь `queued`, решения с версией и идемпотентностью, журнал событий и SSE, отчёты проверок и артефакты, решения по выпускам без деплоя. Подэтап `P4.2` — рабочие копии и sandbox: клон `vibe-chat`, worktree на задачу, политика путей и команд, проверки в Docker, commit кодом офиса, `GET /api/tasks/{id}/diff`. Подэтап `P4.3` — граф ролей LangGraph: шлюз моделей, требования Supervisor и подтверждение владельца, разработчик, проверки, QA и критик, циклы исправления, бюджеты, восстановление после перезапуска. Подэтап `P4.4` — панель на API офиса: вход по коду, стек задач, карточка задачи, постановка задачи, решения по задачам и выпускам, обновление через SSE с восстановлением после разрыва.
 
@@ -25,8 +25,8 @@
 1. Supervisor готовит требования: краткое описание и до восьми критериев приёмки. При необходимости исследователь загружает до трёх публичных страниц `https` (`api/app/research.py`): адрес сервера проверяется до соединения, соединение идёт на проверенный IP, прокси окружения не используются.
 2. Требования записываются в задачу с `spec_hash`, событие `decision_required` ждёт решения `approve_spec`. Граф продолжает только при записи решения в таблице `decisions` для версии из этого события.
 3. Разработчик выполняет до шести ходов: чтение, запись и удаление файлов через политику путей, запуск `lint`, `test`, `build`. Commit делает код офиса с trailer `Office-Role` и `Office-Round`. Затем запускается полный набор проверок; при неуспехе задача возвращается разработчику не больше двух раз.
-4. QA и критик работают параллельно. QA пишет тест Playwright `web/e2e/office/<task_id>.pw.ts`; тест должен не проходить на `base_sha` и проходить на версии задачи. Backend `vibe-chat` в sandbox недоступен, поэтому тест подменяет все запросы к `/api/` через `page.route` ответами по контракту; пути контракта, клиента API и примеров ответов QA получает в контексте. Результат определяется по JSON-отчёту Playwright. Если тест обратился к API без подмены, результат не засчитывается ни в пользу, ни против разработчика: QA получает список таких запросов и переписывает тест, после второй такой попытки задача получает `needs_attention`. Критик проверяет diff по требованиям.
-5. Блокирующее замечание возвращает задачу разработчику (не больше двух циклов, `fix_cycles`), затем `needs_attention`. Без блокирующих замечаний задача переходит в `awaiting_integration`; push и PR — этап `P5`.
+4. QA и критик работают параллельно. QA пишет тест Playwright `apps/chat/web/e2e/office/<task_id>.pw.ts`; тест должен не проходить на `base_sha` и проходить на версии задачи. Backend `vibe-chat` в sandbox недоступен, поэтому тест подменяет все запросы к `/api/` через `page.route` ответами по контракту; пути контракта, клиента API и примеров ответов QA получает в контексте. Результат определяется по JSON-отчёту Playwright. Если тест обратился к API без подмены, результат не засчитывается ни в пользу, ни против разработчика: QA получает список таких запросов и переписывает тест, после второй такой попытки задача получает `needs_attention`. Критик проверяет diff по требованиям.
+5. Блокирующее замечание возвращает задачу разработчику (не больше двух циклов, `fix_cycles`), затем `needs_attention`. Без блокирующих замечаний офис повторно проверяет всю ветку `base_sha..HEAD` (раздел «Повторная проверка ветки»); при нарушении задача получает `needs_attention` с причиной, иначе переходит в `awaiting_integration`; push и PR — этап `P5`.
 
 Ответ модели — JSON по схеме роли; ответ вне схемы или обрезанный пределом выходных токенов не исполняется, задача получает `failed` с отдельной причиной для каждого случая. Поле `step` действия — перечисление шагов роли из `policies/commands.yaml`: у разработчика `lint`, `test`, `build`, у QA только `e2e`. В схемах ходов длинные текстовые поля идут последними: `actions` — последнее поле ответа, `content` — последнее поле действия. При другом порядке `qwen3:8b` в части ответов продолжала поле `content` строками комментариев до предела токенов. Каждое обращение к модели, включая резервного провайдера, учитывается в `usage` до вызова; после 30 обращений задача получает `needs_attention`. Предел времени задачи — `OFFICE_TASK_TIME_LIMIT_MINUTES` (по умолчанию 60) от перехода в `developing`. Обращения к Ollama выполняются по одному.
 
@@ -34,17 +34,36 @@ Checkpoint графа хранится в `<имя БД>.checkpoints.sqlite` р�
 
 ## Рабочая область и sandbox
 
-Офис держит клон `TARGET_REPO_URL` в `<WORKSPACE_DIR>/vibe-chat` (по умолчанию `workspace/` в корне репозитория). Задача, занявшая слот, получает worktree `<WORKSPACE_DIR>/wt/<task_id>` на ветке `office/<task_id>` от `origin/main`; `branch` и `base_sha` записываются в задачу. Отмена и выпуск удаляют worktree, ветка остаётся. При `failed` и `needs_attention` worktree сохраняется, `retry` использует его повторно. При старте API создаёт недостающие worktree задач в статусах слота и удаляет worktree отменённых и выпущенных задач. Без `TARGET_REPO_URL` API не запускается.
+Офис держит клон монорепозитория `TARGET_REPO_URL` (`vibe-studio`) в `<WORKSPACE_DIR>/vibe-studio` (по умолчанию `apps/office/workspace/`). Целевое приложение — каталог `apps/chat`. Задача, занявшая слот, получает worktree `<WORKSPACE_DIR>/wt/<task_id>` на ветке `office/<task_id>` от `origin/main`; `branch` и `base_sha` записываются в задачу. Worktree создаётся со sparse checkout в режиме cone только для `apps/chat/`: каталогов `apps/office/` и `.github/` в нём нет, файлы корня монорепозитория (`README.md`, `LICENSE`) присутствуют, запись в них запрещена политикой. Настройка sparse checkout хранится в конфигурации самого worktree и не действует на клон и другие worktree. Если после перезапуска найден worktree без sparse checkout, офис включает его на месте и сохраняет изменения в `apps/chat/`; если в worktree есть изменения вне `apps/chat/`, worktree не меняется, задача получает `needs_attention`. Политику путей и свой код офис читает только из собственного checkout (`apps/office/policies/`), никогда из клона или worktree задачи. Рабочая область прежнего репозитория `vibe-chat` не подходит: для `vibe-studio` задайте новый `WORKSPACE_DIR` или очистите `workspace/` и используйте новую БД офиса. Отмена и выпуск удаляют worktree, ветка остаётся. При `failed` и `needs_attention` worktree сохраняется, `retry` использует его повторно. При старте API создаёт недостающие worktree задач в статусах слота и удаляет worktree отменённых и выпущенных задач. Без `TARGET_REPO_URL` API не запускается.
 
-`policies/paths.yaml` задаёт пути, которые роли читают и пишут: разработчик — `web/src/**`, `web/public/**`, `web/index.html`; QA — только `web/e2e/office/**/*.pw.ts`. Запреты общего списка действуют без учёта регистра. Symlink в любом компоненте пути, `..`, абсолютные пути, недопустимые расширения и файлы больше 200 КБ отклоняются. Каждый вызов инструмента пишет событие `tool_called`. Commit выполняет код офиса: каждый изменённый путь проверяется повторно, исполняемые файлы, symlink и submodule отклоняются.
+`policies/paths.yaml` задаёт пути относительно корня монорепозитория, которые роли читают и пишут: разработчик — `apps/chat/web/src/**`, `apps/chat/web/public/**`, `apps/chat/web/index.html`, кроме `apps/chat/web/src/api/**` и `apps/chat/web/src/mocks/**`; QA — только `apps/chat/web/e2e/office/**/*.pw.ts`. Запись в `apps/office/**`, `.github/**`, `apps/chat/api/**`, `apps/chat/contracts/**`, `apps/chat/infra/**`, корневые файлы, файлы окружения, manifest, lock-файлы, конфигурации и тесты запрещена. Запреты общего списка действуют без учёта регистра. Symlink в любом компоненте пути, `..`, абсолютные пути, недопустимые расширения и файлы больше 200 КБ отклоняются. Каждый вызов инструмента пишет событие `tool_called`. Commit выполняет код офиса: каждый изменённый путь проверяется повторно, исполняемые файлы, symlink и submodule отклоняются.
 
-`policies/commands.yaml` задаёт шаги проверок `install`, `lint`, `test`, `build`, `e2e`, их таймауты, роли и пределы контейнера. Контейнер запускается от пользователя `10001` с `--cap-drop ALL`, `no-new-privileges`, корневой файловой системой только для чтения, пределами памяти, CPU и процессов и без сети (кроме `install`). Worktree монтируется только для чтения. Зависимости ставятся `npm ci` в том Docker `office-nm-<хеш lock-файла>`, общий для задач с одинаковым `web/package-lock.json`. Шаг `e2e` собирает приложение (ошибка сборки — код выхода 90), раздаёт `web/dist` сервером `docker/sandbox/office-e2e/serve.mjs` и запускает тесты QA `web/e2e/office/**/*.pw.ts` в Playwright. Сервер отвечает на неподменённые запросы к `/api/` и `/healthz` ошибкой `501 office_unmocked_api` и записывает их в артефакт `unmocked-api.txt`. JSON-отчёт `playwright-report.json` сохраняется в артефактах. Одновременно работает не больше `OFFICE_SANDBOX_CONTAINERS` контейнеров. Журналы шагов, скриншоты и трассы доступны через `GET /api/tasks/{id}/artifacts/{name}`.
+`policies/commands.yaml` задаёт шаги проверок `install`, `lint`, `test`, `build`, `e2e`, их таймауты, роли и пределы контейнера. Контейнер запускается от пользователя `10001` с `--cap-drop ALL`, `no-new-privileges`, корневой файловой системой только для чтения, пределами памяти, CPU и процессов и без сети (кроме `install`). Каталог `apps/chat` worktree монтируется в контейнер как `/src` только для чтения, поэтому пути внутри sandbox заданы относительно `apps/chat`. Зависимости ставятся `npm ci` в том Docker `office-nm-<хеш lock-файла>`, общий для задач с одинаковым `apps/chat/web/package-lock.json`. Шаг `e2e` собирает приложение (ошибка сборки — код выхода 90), раздаёт `web/dist` сервером `docker/sandbox/office-e2e/serve.mjs` и запускает тесты QA `apps/chat/web/e2e/office/**/*.pw.ts` в Playwright. Сервер отвечает на неподменённые запросы к `/api/` и `/healthz` ошибкой `501 office_unmocked_api` и записывает их в артефакт `unmocked-api.txt`. JSON-отчёт `playwright-report.json` сохраняется в артефактах. Одновременно работает не больше `OFFICE_SANDBOX_CONTAINERS` контейнеров. Журналы шагов, скриншоты и трассы доступны через `GET /api/tasks/{id}/artifacts/{name}`.
 
-Образ sandbox собирается вручную (без образа шаги завершаются ошибкой «Sandbox недоступен»):
+Образ sandbox собирается вручную из корня монорепозитория (без образа шаги завершаются ошибкой «Sandbox недоступен»):
 
 ```bash
-docker build -t back-office-sandbox:p4 docker/sandbox
+docker build -t back-office-sandbox:p4 apps/office/docker/sandbox
 ```
+
+## Повторная проверка ветки
+
+Перед переходом задачи в `awaiting_integration` офис проверяет всю ветку `base_sha..HEAD` функцией `api/app/branch_check.py`, независимо от проверок отдельных commit:
+
+- каждый изменённый или удалённый путь допустим для одной из ролей политики `policies/paths.yaml`;
+- режим файла — обычный файл `100644`; исполняемые файлы, symlink и submodule отклоняются;
+- содержимое, которое git считает двоичным (в том числе с байтом NUL), отклоняется;
+- добавленные строки не содержат комментариев отключения проверок `eslint-disable`, `oxlint-disable`, `@ts-ignore`, `@ts-nocheck`, `@ts-expect-error`. Строки берутся из `git diff --text`, поэтому признак двоичного файла их не скрывает.
+
+Нарушение переводит задачу в `needs_attention`: событие `tool_called` с инструментом `verify_branch` содержит перечень нарушений, PR не создаётся. Релизный этап `P5` вызывает ту же функцию перед выпуском.
+
+Та же функция работает в обязательной проверке GitHub `office-paths` (`.github/workflows/office-paths.yml`, событие `pull_request_target`, только ветки `office/*`). Workflow берёт checkout базовой ветки без `ref` и с `persist-credentials: false`, получает объекты head PR через `git fetch` только как данные и запускает скрипт офиса из базовой ревизии. Права — `contents: read`, секретов нет. Скрипт можно запустить локально:
+
+```bash
+cd apps/office/api && uv run python -m scripts.check_branch --repo ../../.. --base <sha базы> --head <sha ветки>
+```
+
+Код возврата 0 — нарушений нет, 1 — есть нарушения или проверка не выполнена. Diff считается от merge-base базового commit и ветки. На этапе `P4a` любые пути вне зоны интерфейса отклоняются; серверный контур добавляется на этапе `P5`.
 
 ## Контракты
 
@@ -106,7 +125,7 @@ Docker Desktop на машине владельца ограничен 8 GB па
 
 | Шаг | Схема | `think` | Контекст |
 | --- | --- | --- | --- |
-| `supervisor/specify` | `SpecDraft` | нет | текст задачи, листинг `web/src` (42 пути) |
+| `supervisor/specify` | `SpecDraft` | нет | текст задачи, листинг `apps/chat/web/src` (42 пути) |
 | `developer/implement` | `Turn` | да | требования, листинг, второй ход разработчика с прочитанным компонентом TSX (143 строки) |
 | `qa/qa` | `QaTurn` | нет | требования, путь теста QA, листинг |
 | `critic/review` | `CriticReview` | да | требования, отчёт проверок, diff (73 строки) |
@@ -172,10 +191,13 @@ cd web && npm ci && npm run dev
 
 Открывать панель нужно по `http://localhost:5173`, а не по `http://127.0.0.1:5173`. Cookie сеанса имеет атрибут `Secure`; Chrome принимает такие cookie по HTTP только для `localhost`.
 
-Проверки:
+Проверки из корня монорепозитория (те же команды выполняют job `office-api`, `office-web` и `office-sandbox` корневого `.github/workflows/ci.yml`):
 
 ```bash
-cd api && uv run pytest
+(cd apps/office/api && uv sync --locked && uv run pytest)
+(cd apps/office/web && npm ci && npm run lint && npm run test && npm run build)
+docker build -t back-office-sandbox:p4 apps/office/docker/sandbox
+docker run --rm -v "$PWD/apps/chat/web:/src:ro" -v "$PWD/apps/chat/contracts:/work/contracts:ro" back-office-sandbox:p4 sandbox-smoke /src
 ```
 
 Тесты БД выполняются на SQLite и, при заданной `OFFICE_TEST_POSTGRES_URL`, на PostgreSQL. Каждый тест получает отдельную схему PostgreSQL. Локальная PostgreSQL в Docker:
@@ -185,17 +207,13 @@ docker run -d --rm --name office-pg-test -e POSTGRES_USER=office -e POSTGRES_PAS
 ```
 
 ```bash
-cd api && OFFICE_TEST_POSTGRES_URL=postgresql://office:office@127.0.0.1:55432/office uv run pytest
+(cd apps/office/api && OFFICE_TEST_POSTGRES_URL=postgresql://office:office@127.0.0.1:55432/office uv run pytest)
 ```
 
-Тесты рабочей области используют локальный bare-репозиторий и не обращаются к сети. Тесты с реальным Docker помечены `docker` и запускаются отдельно. Они требуют собранный образ `back-office-sandbox:p4` и клонируют `vibe-chat` из `OFFICE_TEST_TARGET_REPO` (по умолчанию `https://github.com/SlavaPush/vibe-chat.git`; подходит и путь к локальной копии):
+Тесты рабочей области используют локальный bare-репозиторий с раскладкой монорепозитория и не обращаются к сети. Тесты с реальным Docker помечены `docker` и запускаются отдельно. Они требуют собранный образ `back-office-sandbox:p4` и клонируют монорепозиторий из `OFFICE_TEST_TARGET_REPO` (по умолчанию `https://github.com/SlavaPush/vibe-studio.git`). Источник должен содержать ветку `main`: клон офиса берёт `origin/main`. Подходит путь к локальной копии `vibe-studio`, тогда проверяется `apps/chat` её ветки `main`. В CI job `office-sandbox` создаёт `main` на проверяемом commit (`git update-ref refs/heads/main HEAD`) и передаёт путь checkout:
 
 ```bash
-cd api && OFFICE_TEST_DOCKER=1 uv run pytest -m docker
-```
-
-```bash
-cd web && npm ci && npm run lint && npm run test && npm run build
+(cd apps/office/api && OFFICE_TEST_DOCKER=1 OFFICE_TEST_TARGET_REPO="$PWD/../../.." uv run pytest -m docker)
 ```
 
 Smoke-проверка локальной модели (ответ без рассуждения и с рассуждением, код возврата 0 только при двух завершённых ответах):
@@ -211,21 +229,21 @@ cd api && PYTHONPATH=. uv run --env-file ../.env python scripts/smoke_roles.py
 cd api && PYTHONPATH=. uv run --env-file ../.env python scripts/smoke_roles.py ollama
 ```
 
-Образ sandbox и сквозная проверка: сборка `vibe-chat/web` внутри контейнера и открытие собранного приложения в браузере Playwright. Каталог `web` репозитория `vibe-chat` монтируется только для чтения:
+Образ sandbox и сквозная проверка: сборка `apps/chat/web` внутри контейнера и открытие собранного приложения в браузере Playwright. Каталог `apps/chat/web` монорепозитория монтируется только для чтения. Сборка интерфейса чата читает примеры из `../contracts/api.md`, поэтому `apps/chat/contracts` монтируется в `/work/contracts`. Команды выполняются из корня монорепозитория:
 
 ```bash
-docker build -t back-office-sandbox:p4 docker/sandbox
+docker build -t back-office-sandbox:p4 apps/office/docker/sandbox
 ```
 
 ```bash
-docker run --rm -v "$PWD/../vibe-chat/web:/src:ro" back-office-sandbox:p4 sandbox-smoke /src
+docker run --rm -v "$PWD/apps/chat/web:/src:ro" -v "$PWD/apps/chat/contracts:/work/contracts:ro" back-office-sandbox:p4 sandbox-smoke /src
 ```
 
 ## Ручной сценарий `P4`
 
 Сценарий проверяет критерий этапа `P4` на реальных моделях в профиле `hybrid`: облачные вызовы платные (до 30 обращений на задачу). Экспорт диалога в Markdown в сценарии не ставится: это первая функция демонстрации.
 
-1. Подготовка. Пересобрать образ sandbox (`docker build -t back-office-sandbox:p4 docker/sandbox`). В `.env` задать `TARGET_REPO_URL=git@github.com:SlavaPush/vibe-chat.git`, коды `OFFICE_ACCESS_CODE` и `OFFICE_ADMIN_CODE`, новую SQLite в `OFFICE_DATABASE_URL`, ключи Anthropic и OpenAI. Запустить API на `127.0.0.1:8001` и панель на `http://localhost:5173` (раздел «Запуск локально»).
+1. Подготовка. Пересобрать образ sandbox (`docker build -t back-office-sandbox:p4 apps/office/docker/sandbox` из корня монорепозитория). В `.env` задать `TARGET_REPO_URL=git@github.com:SlavaPush/vibe-studio.git`, коды `OFFICE_ACCESS_CODE` и `OFFICE_ADMIN_CODE`, новую SQLite в `OFFICE_DATABASE_URL`, ключи Anthropic и OpenAI. Запустить API на `127.0.0.1:8001` и панель на `http://localhost:5173` (раздел «Запуск локально»).
 2. Участник А работает в панели, участник Б — через `curl` с отдельным файлом cookie. А ставит две задачи по интерфейсу `vibe-chat` и одну постороннюю, Б — две задачи. Ожидание: четыре задачи приняты, посторонняя отклонена с причиной; три задачи занимают слоты, четвёртая в `queued`; `GET /api/slots` показывает 3 из 3; в `workspace/wt/` три каталога на ветках `office/<task_id>`.
 3. Дождаться события `decision_required` у трёх задач в слотах, ничего не утверждая. Остановить API и запустить снова. Ожидание: у трёх задач сохранились статус `awaiting_spec_approval`, требования и `version`, четвёртая осталась в `queued`. Затем А утверждает свои требования в панели, Б — через `curl`; после утверждения у каждой задачи появляется `role_started` разработчика.
 4. Права. А открывает задачу Б: кнопки решений недоступны, видна причина. Б через `curl` пытается утвердить и отменить задачу А: ответ `403 forbidden_not_owner`. Для проверки выпуска в БД создаётся кандидат `pending` через `TaskStore.create_candidate`: А видит его без кнопок выпуска, Б через `curl` получает `403 forbidden_role`.

@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any, TypedDict
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
+from app.branch_check import WorkspaceError
+from app.config import APP_DIR
 from app.db import utcnow
 from app.roles import (
     CRITIC,
@@ -188,7 +190,7 @@ class TaskGraph:
         path = self.workspace.task_worktree(self.task_id)
         files = [
             name for name in self.workspace.tracked_files(path)
-            if name.startswith("web/src/") and self.workspace.paths.readable(name)
+            if name.startswith(f"{APP_DIR}/web/src/") and self.workspace.paths.readable(name)
         ]
         lines = files[:LISTING_LIMIT]
         if len(files) > LISTING_LIMIT:
@@ -291,7 +293,7 @@ class TaskGraph:
         self.started(AgentRole.supervisor, "spec")
         fixed = [
             Entry("Текст задачи участника", task.text, required=True),
-            Entry("Файлы web/src", self.listing()),
+            Entry("Файлы apps/chat/web/src", self.listing()),
         ]
         draft = self.ask(
             AgentRole.supervisor, "spec", SUPERVISOR, fixed, [], SpecDraft, S.awaiting_spec_approval
@@ -403,7 +405,7 @@ class TaskGraph:
             fixed.append(Entry("Замечания QA и критика", json.dumps(findings, ensure_ascii=False, indent=1), required=True))
         if state.get("check_feedback"):
             fixed.append(Entry("Результат проверок прошлой версии", state["check_feedback"]))
-        fixed.append(Entry("Файлы web/src", self.listing()))
+        fixed.append(Entry("Файлы apps/chat/web/src", self.listing()))
         reply = self.turns(AgentRole.developer, "implement", DEVELOPER, fixed, Turn, DEV_TURNS, S.developing)
         self.guard(S.developing)
         sha = self.workspace.commit(
@@ -491,7 +493,7 @@ class TaskGraph:
                     fixed.append(Entry("Контракт API vibe-chat, клиент и примеры ответов", "\n".join(api_files), required=True))
                 if feedback:
                     fixed.append(Entry("Результат прошлой попытки", feedback, required=True))
-                fixed.append(Entry("Файлы web/src", self.listing()))
+                fixed.append(Entry("Файлы apps/chat/web/src", self.listing()))
                 reply = self.turns(AgentRole.qa, "qa", QA, fixed, QaTurn, QA_TURNS, S.reviewing, test_file)
                 covered = [item for item in reply.criteria_covered if 1 <= item <= len(task.spec.acceptance_criteria)]
                 model_findings = list(reply.findings)
@@ -570,10 +572,28 @@ class TaskGraph:
         )
         return {"critic_findings": findings}
 
+    def verify_branch(self) -> None:
+        try:
+            found = self.workspace.verify_branch(self.task_id)
+        except WorkspaceError as error:
+            found = [str(error)]
+        if not found:
+            return
+        reason = "; ".join(found)
+        self.store.add_event(
+            self.task_id,
+            TaskEventType.tool_called,
+            {"arguments": "base_sha..HEAD", "result": "denied", "reason": reason[:1000]},
+            tool="verify_branch",
+        )
+        self.halt(None, "verify_branch", f"Повторная проверка ветки не пройдена: {reason}")
+
     def gate(self, state: State) -> State:
         task = self.guard(S.reviewing, S.developing, S.awaiting_integration)
         findings = (state.get("qa_findings") or []) + (state.get("critic_findings") or [])
         if not any(item["blocking"] for item in findings):
+            if task.status == S.reviewing:
+                self.verify_branch()
             if not self.store.ensure_status(self.task_id, S.reviewing, S.awaiting_integration):
                 raise Stopped("cannot enter awaiting_integration")
             return {"fix": False, "findings": findings}
