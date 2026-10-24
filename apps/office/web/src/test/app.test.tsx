@@ -4,7 +4,7 @@ import { NETWORK_MESSAGE } from '@/api/client'
 import type { Participant, Task } from '@/api/types'
 import App from '@/App'
 import { CHECK_AGAIN, COOKIE_MISSING } from '@/components/office/AccessGate'
-import { participants, releases, tasks } from '@/mocks/data'
+import { participants, releaseQueue, releases, tasks } from '@/mocks/data'
 import {
   FakeEventSource,
   apiError,
@@ -27,6 +27,7 @@ function backend(participant: Participant | null = maria) {
   api.on('GET /api/me', () => (participant ? json(200, participant) : unauthorized()))
   api.on('GET /api/tasks', tasks)
   api.on('GET /api/releases', releases)
+  api.on('GET /api/release-queue', { ...releaseQueue, release_blocked_by: null, blocked_reason: null })
   api.on('GET /api/slots', { used: 2, total: 3 })
   for (const task of tasks) api.on(`GET /api/tasks/${task.id}`, task)
   return api
@@ -382,6 +383,49 @@ describe('обновление через SSE', () => {
     expect(api.count('GET /api/releases')).toBe(before + 1)
   })
 
+  it.each(['rollback_status', 'release_blocked', 'release_unblocked', 'external_publish'] as const)(
+    'событие %s перечитывает выпуски и состояние очереди',
+    async (type) => {
+      const api = backend()
+      render(<App />)
+      await ready()
+      const source = openStream()
+      const before = api.count('GET /api/release-queue')
+      api.on('GET /api/release-queue', releaseQueue)
+      act(() => source.emit(taskEvent('tsk_102', type, { release_id: 'rel_5' })))
+      expect(await screen.findByText('Выпуск заблокирован после отката rel_5')).toBeInTheDocument()
+      expect(api.count('GET /api/release-queue')).toBe(before + 1)
+    },
+  )
+
+  it.each([
+    { step: 'release', outcome: 'blocked', summary: 'Состав выпуска не подтверждён.', release_id: 'rel_5' },
+    { step: 'release', outcome: 'blocked', summary: 'Исправление после отката остановлено.', revert_of: 'rel_5' },
+  ])('role_finished выпуска или revert-PR перечитывает выпуски и очередь', async (payload) => {
+    const api = backend()
+    render(<App />)
+    await ready()
+    const source = openStream()
+    const before = api.count('GET /api/release-queue')
+    const releasesBefore = api.count('GET /api/releases')
+    api.on('GET /api/release-queue', releaseQueue)
+    act(() => source.emit(taskEvent('tsk_102', 'role_finished', payload)))
+    expect(await screen.findByText('Выпуск заблокирован после отката rel_5')).toBeInTheDocument()
+    expect(api.count('GET /api/release-queue')).toBe(before + 1)
+    expect(api.count('GET /api/releases')).toBe(releasesBefore + 1)
+  })
+
+  it('role_finished без выпуска не перечитывает выпуски', async () => {
+    const api = backend()
+    render(<App />)
+    await ready()
+    const source = openStream()
+    const before = api.count('GET /api/releases')
+    act(() => source.emit(taskEvent('tsk_101', 'role_finished', { step: 'qa', outcome: 'ok', summary: 'QA.' })))
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    expect(api.count('GET /api/releases')).toBe(before)
+  })
+
   it('после разрыва перечитывает списки до подключения и повторно после open', async () => {
     const api = backend()
     render(<App />)
@@ -579,6 +623,33 @@ describe('постановка и решения в панели', () => {
     )
     expect(await screen.findByText(/Задача изменилась/)).toBeInTheDocument()
     await waitFor(() => expect(api.count('GET /api/tasks/tsk_101')).toBe(before + 1))
+  })
+
+  it('событие начала слияния обновляет открытую карточку и блокирует отмену', async () => {
+    const integrating: Task = {
+      ...developing,
+      status: 'awaiting_integration',
+      pr_number: 7,
+      pr_url: 'https://github.com/SlavaPush/vibe-studio/pull/7',
+      head_sha: 'b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f80',
+      integration_started: true,
+    }
+    const api = backend()
+    api.on('GET /api/tasks', tasks.map((task) => (task.id === developing.id ? integrating : task)))
+    api.on('GET /api/tasks/tsk_101', integrating)
+    render(<App />)
+    await ready()
+    const source = openStream()
+    fireEvent.click(within(stack()).getByRole('button', { name: new RegExp(developing.title) }))
+    expect(await screen.findByRole('button', { name: 'Отменить задачу' })).toBeEnabled()
+    api.on('GET /api/tasks/tsk_101', { ...integrating, merge_pending: true, version: integrating.version + 1 })
+    act(() =>
+      source.emit(taskEvent('tsk_101', 'merge_started', { pr_number: 7, head_sha: integrating.head_sha })),
+    )
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Отменить задачу' })).toBeDisabled())
+    expect(screen.getByRole('button', { name: 'Отменить задачу' })).toHaveAccessibleDescription(
+      'Выполняется слияние PR задачи: отмена недоступна.',
+    )
   })
 
   it('участник не видит активных действий по чужой задаче и по выпуску', async () => {

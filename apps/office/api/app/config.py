@@ -61,12 +61,24 @@ class Settings:
     release_poll_seconds: float = 20.0
     checks_timeout_minutes: float = 30.0
     reconcile_timeout_minutes: float = 30.0
+    pr_review_calls: int = 2
+    service_url: str = "https://elbrus-vibe-chat.onrender.com"
     render_api_key: str | None = None
     render_service_id: str = ""
+    render_api_url: str = "https://api.render.com"
+    verify_seconds: float = 120.0
+    verify_fault: bool = False
+    external_deploy_wait_minutes: float = 30.0
+    trusted_github_logins: tuple[str, ...] = ("SlavaPush",)
+    github_app_slug: str = "vibe-office"
 
     @property
     def github_app_configured(self) -> bool:
         return bool(self.github_app_id and self.github_app_installation_id and self.github_app_private_key_path)
+
+    @property
+    def render_configured(self) -> bool:
+        return bool(self.render_api_key and self.render_service_id)
 
     @property
     def push_url(self) -> str:
@@ -108,6 +120,15 @@ class Settings:
             reconcile_timeout_minutes=float(
                 env.get("OFFICE_RECONCILE_TIMEOUT_MINUTES") or cls.reconcile_timeout_minutes
             ),
+            pr_review_calls=int(env.get("OFFICE_PR_REVIEW_CALLS") or cls.pr_review_calls),
+            service_url=env.get("OFFICE_SERVICE_URL") or cls.service_url,
             render_api_key=env.get("RENDER_API_KEY") or None,
             render_service_id=env.get("RENDER_SERVICE_ID", ""),
+            verify_seconds=float(env.get("OFFICE_VERIFY_SECONDS") or cls.verify_seconds),
+            verify_fault=env.get("OFFICE_VERIFY_FAULT") == "1",
+            external_deploy_wait_minutes=float(
+                env.get("OFFICE_EXTERNAL_DEPLOY_WAIT_MINUTES") or cls.external_deploy_wait_minutes
+            ),
+            trusted_github_logins=_list(env.get("OFFICE_TRUSTED_GITHUB_LOGINS"), cls.trusted_github_logins),
+            github_app_slug=env.get("OFFICE_GITHUB_APP_SLUG") or cls.github_app_slug,
         )

@@ -31,13 +31,14 @@
 | `Role` | `participant`, `admin` |
 | `TaskStatus` | `rejected`, `queued`, `awaiting_spec_approval`, `developing`, `reviewing`, `awaiting_integration`, `awaiting_release`, `deploying`, `released`, `failed`, `cancelled`, `needs_attention` |
 | `ModelProfile` | `local`, `cloud`, `hybrid` |
-| `AgentRole` | `supervisor`, `researcher`, `developer`, `qa`, `critic` |
-| `TaskEventType` | `task_created`, `task_rejected`, `status_changed`, `role_started`, `role_finished`, `tool_called`, `artifact_ready`, `decision_required`, `decision_recorded`, `check_result`, `release_candidate`, `deploy_status`, `pr_opened`, `checks_status`, `pr_closed`, `operation_unknown` |
-| `FailureKind` | `checks_failed`, `pr_rejected` |
+| `AgentRole` | `supervisor`, `researcher`, `developer`, `qa`, `critic`, `pr_reviewer` |
+| `TaskEventType` | `task_created`, `task_rejected`, `status_changed`, `role_started`, `role_finished`, `tool_called`, `artifact_ready`, `decision_required`, `decision_recorded`, `check_result`, `release_candidate`, `deploy_status`, `pr_opened`, `checks_status`, `pr_closed`, `operation_unknown`, `pr_review`, `merge_started`, `pr_merged`, `rollback_status`, `release_blocked`, `release_unblocked`, `external_publish` |
+| `FailureKind` | `checks_failed`, `pr_rejected`, `deploy_failed`, `verify_failed` |
 | `TaskDecision` | `approve_spec`, `cancel`, `retry` |
-| `ReleaseDecision` | `approve_release`, `rollback` |
+| `ReleaseDecision` | `rollback`, `resume_releases` |
 | `ReleaseKind` | `release`, `rollback` |
-| `ReleaseStatus` | `pending`, `approved`, `deploying`, `released`, `failed`, `rolled_back`, `revoked` |
+| `ReleaseStatus` | `pending`, `deploying`, `verifying`, `rolling_back`, `released`, `failed`, `superseded`, `revoked`, `rolled_back` |
+| `ReleaseOrigin` | `task`, `auto_revert`, `resume`, `manual_rollback` |
 
 Порядок статусов задачи фиксирован:
 
@@ -79,7 +80,14 @@
   "pr_opened",
   "checks_status",
   "pr_closed",
-  "operation_unknown"
+  "operation_unknown",
+  "pr_review",
+  "merge_started",
+  "pr_merged",
+  "rollback_status",
+  "release_blocked",
+  "release_unblocked",
+  "external_publish"
 ]
 ```
 
@@ -92,13 +100,13 @@
 | `awaiting_spec_approval` | Задача заняла слот. Пока `spec = null`, Supervisor готовит требования; после этого требования ждут решения владельца `approve_spec` | да |
 | `developing` | Разработчик изменяет код в worktree задачи | да |
 | `reviewing` | QA и критик проверяют зафиксированную версию | да |
-| `awaiting_integration` | Ветка проверена. Офис отправляет её в `vibe-studio`, открывает PR от GitHub App и ждёт обязательных проверок PR; сводка проверок — в поле `checks`. После успешных проверок задача ждёт ревью и слияния PR | нет |
-| `awaiting_release` | PR слит; итоговый commit ждёт очереди выпуска | нет |
-| `deploying` | Выполняется деплой кандидата | нет |
-| `released` | Выпуск опубликован | нет |
+| `awaiting_integration` | Ветка проверена. Офис отправляет её в `vibe-studio`, открывает PR от GitHub App и ждёт обязательных проверок PR; сводка проверок — в поле `checks`. После успешных проверок агент ревью PR принимает решение (поле `pr_review`); при `approve` офис сливает PR (squash) и проверяет итоговый commit `merge_sha`: обязательные проверки `push` и критический E2E | нет |
+| `awaiting_release` | PR слит, итоговый commit прошёл проверки и критический E2E; кандидат выпуска ждёт очереди выпуска. Подтверждения администратора нет | нет |
+| `deploying` | Выполняется деплой кандидата, проверка после деплоя или автоматический откат | нет |
+| `released` | Выпуск опубликован и прошёл проверку после деплоя; или изменение опубликовано в составе более нового выпуска | нет |
 | `failed` | Задача завершилась ошибкой; результат сохранён. Причина выпуска — в `failure_kind` | нет |
 | `cancelled` | Владелец отменил задачу; открытый PR задачи офис закрывает | нет |
-| `needs_attention` | Исчерпан бюджет исправлений или исход внешней операции неизвестен | нет |
+| `needs_attention` | Исчерпан бюджет исправлений, исход внешней операции неизвестен, агент ревью PR не дал действительного решения (невалидный ответ, ошибка провайдера, исчерпанный предел; PR остаётся открытым) или выпуск остановлен: состав не подтверждён, версия сервиса недоступна, Render занят чужим деплоем, ошибка отката. Выпуск продолжает администратор решением `resume_releases` | нет |
 
 Слот занимают статусы от `awaiting_spec_approval` до `reviewing` включительно. Всего слотов три. Задача в `queued` захватывает слот, когда он освобождается. Переход задачи в `awaiting_integration` освобождает слот. Worktree задачи сохраняется до её закрытия (`cancelled`, `released`).
 
@@ -148,31 +156,33 @@
 | Читать задачи, события, diff, проверки, артефакты, слоты, выпуски | да | да |
 | Создать задачу | да | да |
 | `approve_spec`, `cancel`, `retry` своей задачи | да | да |
-| `approve_spec`, `cancel`, `retry` чужой задачи | нет, `403 forbidden_not_owner` | нет, `403 forbidden_not_owner` |
-| `approve_release`, `rollback` | нет, `403 forbidden_role` | да |
+| `approve_spec`, `cancel` чужой задачи; `retry` чужой задачи до начала интеграции | нет, `403 forbidden_not_owner` | нет, `403 forbidden_not_owner` |
+| `retry` чужой задачи в `needs_attention` с `integration_started = true` | нет, `403 forbidden_not_owner` | да |
+| `rollback`, `resume_releases` | нет, `403 forbidden_role` | да |
 
 Решения по задаче доступны в статусах:
 
 | Решение | Допустимые статусы задачи | Дополнительное условие |
 | --- | --- | --- |
 | `approve_spec` | `awaiting_spec_approval` | Требования готовы: `spec` не равно `null` |
-| `cancel` | `queued`, `awaiting_spec_approval`, `developing`, `reviewing`, `awaiting_integration`, `needs_attention` | — |
-| `retry` | `failed`, `needs_attention` | Бюджет обращений не исчерпан: `usage.model_calls` меньше `usage.model_calls_limit`; для `failed` поле `failure_kind` не равно `checks_failed` и `pr_rejected` |
+| `cancel` | `queued`, `awaiting_spec_approval`, `developing`, `reviewing`, `awaiting_integration`, `needs_attention` | PR задачи не слит (`merge_sha = null`) и слияние не выполняется (`merge_pending = false`) |
+| `retry` | `failed`, `needs_attention` | Бюджет обращений не исчерпан: `usage.model_calls` меньше `usage.model_calls_limit` (на этапе интеграции — см. ниже); для `failed` поле `failure_kind` пусто (`null`) |
 
-`retry` возвращает задачу в `queued`; задача заново проходит очередь слотов. `usage` и `fix_cycles` при этом сохраняются: пределы относятся к задаче, а не к попытке. Исключение: `retry` задачи в `needs_attention`, у которой уже есть операции выпуска (push ветки, создание или закрытие PR) или заполнены `head_sha` или `pr_number`, возвращает её в `awaiting_integration`. Офис сначала сверяет незавершённые операции с GitHub и продолжает с места остановки; если исход по-прежнему не установлен, задача снова получает `needs_attention`.
+`retry` возвращает задачу в `queued`; задача заново проходит очередь слотов. `usage` и `fix_cycles` при этом сохраняются: пределы относятся к задаче, а не к попытке. Исключение: `retry` задачи в `needs_attention` с `integration_started = true` (есть операции выпуска — push ветки, создание, слияние или закрытие PR, обращение к агенту ревью — или заполнены `head_sha`, `pr_number` или `merge_sha`) возвращает её в `awaiting_integration`. Офис сначала сверяет незавершённые операции с GitHub и продолжает с места остановки; если исход по-прежнему не установлен, задача снова получает `needs_attention`. Для такого `retry` бюджет графа (`usage.model_calls_limit`) не проверяется: чтение проверок, слияние, сверка и E2E не обращаются к моделям. Если для текущего `head_sha` нет решения агента ревью и задача ещё не слита, нужен остаток предела обращений агента ревью (`OFFICE_PR_REVIEW_CALLS` на задачу, по умолчанию 2); исчерпанный предел — `409 decision_not_allowed`. Если для итогового commit задачи уже создан кандидат выпуска (не `revoked`), `retry` недоступен (`409 decision_not_allowed`): выпуск продолжает администратор решением `resume_releases`.
 
-Задача с `failure_kind` `checks_failed` (обязательные проверки PR не пройдены) или `pr_rejected` (PR отклонён агентом ревью) не повторяется: нужна новая задача.
+Задача с `failure_kind` `checks_failed` (обязательные проверки PR не пройдены), `pr_rejected` (PR отклонён агентом ревью), `deploy_failed` (деплой Render завершился ошибкой) или `verify_failed` (проверка после деплоя не пройдена, выполнен откат) не повторяется: нужна новая задача.
 
-`cancel` в `awaiting_integration` переводит задачу в `cancelled`; офис закрывает открытый PR задачи и записывает событие `pr_closed`.
+`cancel` в `awaiting_integration` переводит задачу в `cancelled`; офис закрывает открытый PR задачи и записывает событие `pr_closed`. После слияния PR (`merge_sha` заполнен) и во время слияния `cancel` недоступен (`409 decision_not_allowed`): изменение уже в `main` или может там оказаться.
 
 Решения по выпуску доступны в статусах:
 
 | Решение | Условие |
 | --- | --- |
-| `approve_release` | Кандидат в статусе `pending` |
-| `rollback` | Кандидат в статусе `released` и `is_published = true`; создаётся кандидат вида `rollback` на версию `expected_previous_sha` этого выпуска |
+| `rollback` | Кандидат вида `release` в статусе `released` и `is_published = true`; создаётся кандидат вида `rollback` (`origin = manual_rollback`) на версию `expected_previous_sha` этого выпуска. `fix_sha` не указывается |
+| `resume_releases` с `fix_sha` | Кандидат — `release_blocked_by` очереди (выпуск заблокирован после его отката). Офис проверяет, что `fix_sha` входит в `main` и является потомком откатанного commit, выполняет проверки итогового commit и критический E2E и создаёт кандидата исправления (`origin = resume`). Тот же `fix_sha` после создания кандидата исправления (`revert.status = merged`) — `409 decision_not_allowed`, состояние не меняется |
+| `resume_releases` без `fix_sha` | Кандидат остановлен (`blocked_reason` заполнен): активный кандидат очереди (`active_release_id`) или кандидат `pending`. Для активного кандидата офис сначала сверяет Render и сервис: идёт деплой или откат либо запрос деплоя ещё сверяется — `409 decision_not_allowed` с причиной; иначе БД согласуется с опубликованной версией и очередь освобождается. Кандидат `pending` возвращается в очередь |
 
-Решение в другом статусе или при невыполненном дополнительном условии получает `409 decision_not_allowed`.
+Решение в другом статусе или при невыполненном дополнительном условии получает `409 decision_not_allowed`. Без настроенного Render (`RENDER_API_KEY`, `RENDER_SERVICE_ID`) `resume_releases` недоступен. Подтверждения выпуска администратором нет: решение `approve_release` удалено, запрос с ним получает `422 validation_error`.
 
 ## Модели
 
@@ -205,8 +215,12 @@
 | `pr_url` | string или `null` | Адрес PR в `vibe-studio` |
 | `pr_number` | integer или `null` | Номер PR в `vibe-studio` |
 | `head_sha` | string или `null` | Commit ветки `office/<task_id>`, отправленный в `vibe-studio` |
-| `failure_kind` | `FailureKind` или `null` | Причина `failed` на этапе выпуска: `checks_failed` — обязательные проверки PR не пройдены, `pr_rejected` — PR отклонён агентом ревью; `null` для остальных причин |
-| `checks` | `PullRequestChecks` или `null` | Последняя сводка обязательных проверок PR для `head_sha`; `null`, пока PR не проверялся |
+| `failure_kind` | `FailureKind` или `null` | Причина `failed` на этапе выпуска: `checks_failed` — обязательные проверки PR или итогового commit (в том числе критический E2E) не пройдены, `pr_rejected` — PR отклонён агентом ревью, `deploy_failed` — деплой Render завершился ошибкой или Render отклонил запрос (отката нет), `verify_failed` — проверка после деплоя не пройдена, выполнен откат (в том числе для выпуска, в составе которого было изменение задачи); `null` для остальных причин |
+| `checks` | `PullRequestChecks` или `null` | Последняя сводка обязательных проверок: до слияния — проверки PR для `head_sha`, после слияния — проверки события `push` итогового commit `merge_sha` (поле `checks.head_sha` указывает проверенный commit); `null`, пока PR не проверялся и сразу после слияния |
+| `pr_review` | `PullRequestReview` или `null` | Последнее решение агента ревью PR; `null`, пока агент не вызывался. Решение действительно только для своего `head_sha` |
+| `merge_sha` | string или `null` | Итоговый commit squash-слияния PR в `main`; `null`, пока PR не слит |
+| `merge_pending` | boolean | Слияние PR выполняется или его исход не установлен (операция `merge_pr` в статусе `started` или `unknown`); `cancel` недоступен |
+| `integration_started` | boolean | Задача на этапе интеграции: есть операции журнала выпуска или заполнены `head_sha`, `pr_number`, `merge_sha`. `retry` такой задачи из `needs_attention` возвращает её в `awaiting_integration` без проверки бюджета графа |
 | `changed_files` | string[] | Изменённые файлы относительно `base_sha` |
 | `fix_cycles` | integer | Выполненные циклы исправления, 0–2 |
 | `usage` | `Usage` | Расход задачи |
@@ -214,6 +228,8 @@
 `Spec`: `version` (integer), `spec_hash` (string), `summary` (string), `acceptance_criteria` (string[]), `sources` (массив `{title, url}`).
 
 `Usage`: `model_calls` (integer), `model_calls_limit` (integer, 30), `input_tokens` (integer), `output_tokens` (integer).
+
+`PullRequestReview`: `id` (string), `head_sha` (string — head PR, для которого принято решение), `verdict` (`approve` или `reject`), `reasons` (string — обоснование), `required_changes` (string[] — что изменить; при `reject` не пуст), `checklist` (массив `{item, ok, note}`: `item` — пункт чек-листа `paths`, `network`, `external_navigation`, `inputs`, `system_messages`, `sent_text`, `third_party_code`; `ok` — boolean; `note` — string), `created_at` (дата-время).
 
 `PullRequestChecks`: `head_sha` (string — проверенный commit), `checks` (массив `PullRequestCheck`). `PullRequestCheck`: `name` (string — имя обязательной проверки из ruleset `main`), `status` (string: `missing` — засчитанного запуска нет, `queued`, `in_progress`, `completed` и другие статусы job GitHub Actions), `conclusion` (string или `null` — итог job для `completed`: `success`, `failure`, `cancelled`, `timed_out`, `action_required`, `skipped` и другие), `url` (string или `null` — страница job). Проверка пройдена только при `conclusion = success`.
 
@@ -237,18 +253,29 @@
 | `task_rejected` | `reason` |
 | `status_changed` | `from`, `to` — статусы задачи |
 | `role_started` | `step` — шаг роли |
-| `role_finished` | `step`, `outcome` (`ok`, `blocked`, `error`), `summary` |
+| `role_finished` | `step`, `outcome` (`ok`, `blocked`, `error`), `summary`; итог шага очереди выпуска (`step = release`: публикация, остановка, ошибка деплоя, откат) — также `release_id` |
 | `tool_called` | `arguments` — краткое описание аргументов, `result` (`ok`, `denied`, `error`) |
 | `artifact_ready` | `name`, `size_bytes` |
 | `decision_required` | `decision`, `expected_version`, при выпуске также `release_id` |
 | `decision_recorded` | `decision`, `decision_id`, `participant_id` |
 | `check_result` | `command`, `exit_code`, `duration_ms` |
 | `release_candidate` | `release_id`, `commit_sha` |
-| `deploy_status` | `release_id`, `render_deploy_id`, `render_status` |
+| `deploy_status` | `release_id`, `render_deploy_id`, `render_status` — новый статус деплоя Render; после проверки после деплоя также `verified` (boolean) и `fault` (boolean — управляемый сбой `OFFICE_VERIFY_FAULT=1`, сервис не проверялся) |
 | `pr_opened` | `pr_number`, `pr_url` — PR задачи создан или найден |
-| `checks_status` | `head_sha`, `checks` — новая сводка обязательных проверок PR (модель `PullRequestChecks`) |
+| `checks_status` | `head_sha`, `checks` — новая сводка обязательных проверок PR или итогового commit (модель `PullRequestChecks`) |
 | `pr_closed` | `pr_number` — офис закрыл PR задачи |
-| `operation_unknown` | `kind` (`push`, `create_pr`, `close_pr`), `pr_number`, `reason` — исход внешней операции закрытой задачи не установлен, офис её больше не повторяет |
+| `operation_unknown` | `kind` (`push`, `create_pr`, `close_pr`, `merge_pr`), `pr_number`, `reason` — исход внешней операции закрытой задачи не установлен, офис её больше не повторяет |
+| `pr_review` | `review_id`, `head_sha`, `verdict` (`approve`, `reject`) — решение агента ревью PR сохранено; роль `pr_reviewer` |
+| `merge_started` | `pr_number`, `head_sha` — офис записал операцию слияния и отправляет запрос; с этого момента `merge_pending = true`, `cancel` недоступен |
+| `pr_merged` | `pr_number`, `merge_sha` — офис слил PR задачи в `main` |
+| `rollback_status` | `release_id`, `render_deploy_id`, `render_status` — статус отката Render (`requested` — запрос отправляется); при запросе и после проверки также `target_sha`, после проверки — `verified` |
+| `release_blocked` | `release_id`, `reason` — автоматический выпуск остановлен после отката этого кандидата (`release_blocked_by`) |
+| `release_unblocked` | `release_id`, `fixed_by` — опубликован кандидат исправления `fixed_by`, блокировка снята |
+| `external_publish` | `published_sha` — опубликована версия без кандидата офиса (деплой вне офиса); пишется в задачи ожидающих кандидатов |
+
+События revert-PR (`tool_called` с `tool = git_revert` и `git_push`, `pr_opened`, `checks_status`, `pr_review`, `merge_started`, `pr_merged`, `pr_closed`, `role_finished`) пишутся в задачу откатанного выпуска с дополнительным полем `revert_of` — идентификатором откатанного кандидата. Статус задачи при этом не меняется.
+
+Панель перечитывает выпуски и состояние очереди после событий `release_candidate`, `deploy_status`, `rollback_status`, `release_blocked`, `release_unblocked`, `external_publish`, решений по выпуску (`decision_recorded` с `rollback` или `resume_releases`) и любого события с полем `release_id` или `revert_of`.
 
 ### `CheckReport`
 
@@ -285,18 +312,43 @@
 | `status` | `ReleaseStatus` | Статус в очереди |
 | `version` | integer | Версия объекта для `expected_version` |
 | `commit_sha` | string | Итоговый commit для деплоя |
-| `expected_previous_sha` | string | Опубликованная версия, относительно которой считался diff и давалось подтверждение |
+| `expected_previous_sha` | string | Основание выпуска: опубликованная версия, относительно которой проверен состав выпуска |
 | `spec_hash` | string | Хеш требований |
 | `suite_hash` | string | Хеш набора проверок |
 | `ci_run_ids` | string[] | Идентификаторы запусков обязательных проверок GitHub Actions для `commit_sha` |
-| `pr_url` | string или `null` | PR, из которого получен commit; `null` для отката |
+| `pr_url` | string или `null` | PR, из которого получен commit; `null` для отката и исправления по `fix_sha` |
 | `created_at` | string (дата-время) | Время создания |
-| `approved_by` | string или `null` | Администратор, подтвердивший кандидата |
-| `approved_at` | string (дата-время) или `null` | Время подтверждения |
 | `is_published` | boolean | Версия этого кандидата опубликована сейчас |
-| `deploy` | `DeployResult` или `null` | Результат деплоя |
+| `deploy` | `DeployResult` или `null` | Результат деплоя; для кандидата вида `rollback` — деплой Render rollback |
+| `pr_review_id` | string или `null` | Решение агента ревью PR (`PullRequestReview.id`) — основание выпуска; `null` для отката |
+| `e2e` | `CheckReport` или `null` | Критический E2E итогового commit: `lint`, `test`, `build`, `e2e` со всеми тестами QA из `main` на `commit_sha`, с `suite_hash`; без шага `e2e`, если в commit исправления не осталось тестов QA; `null` для отката |
+| `origin` | `ReleaseOrigin` | Основание кандидата: `task` — задача, `auto_revert` — слитый revert-PR после отката, `resume` — `fix_sha` решения `resume_releases`, `manual_rollback` — решение `rollback` |
+| `origin_decision_id` | string или `null` | Решение администратора — основание кандидата (`resume`, `manual_rollback`) |
+| `superseded_by` | string или `null` | Кандидат, в составе которого опубликован или выбран для деплоя этот (`superseded`); `null` при внешней публикации |
+| `blocked_reason` | string или `null` | Почему кандидат остановлен: состав не подтверждён, версия сервиса недоступна, Render занят, исход операции не установлен, причина `revoked` или отката. Остановленный кандидат ждёт `resume_releases` |
+| `verify` | `VerifyResult` или `null` | Проверка после деплоя |
+| `rollback` | `RollbackResult` или `null` | Автоматический откат после неуспешной проверки |
+| `revert` | `RevertResult` или `null` | Исправление после отката: revert-PR или `fix_sha` |
 
-`DeployResult`: `render_deploy_id` (string), `render_status` (string, статус деплоя Render), `started_at` (дата-время), `finished_at` (дата-время или `null`), `published_sha` (string или `null` — версия из `GET /api/version` после деплоя), `error` (string или `null`).
+Статусы кандидата: `pending` — ждёт очереди; `deploying` — деплой Render; `verifying` — проверка после деплоя; `rolling_back` — автоматический откат и его проверка; `released` — опубликован и проверен; `failed` — деплой не удался или выпуск откатан; `superseded` — опубликован или будет опубликован в составе более нового кандидата; `revoked` — опубликованная версия сменилась до деплоя, создан новый кандидат того же commit (для отката — откат отменён); `rolled_back` — выпуск откатан решением `rollback`.
+
+`DeployResult`: `render_deploy_id` (string), `render_status` (string, статус деплоя Render), `started_at` (дата-время), `finished_at` (дата-время или `null`), `published_sha` (string или `null` — версия из `GET /api/version` после успешной проверки), `error` (string или `null`).
+
+`VerifyResult`: `expected_sha` (string), `ok` (boolean), `fault` (boolean — управляемый сбой `OFFICE_VERIFY_FAULT=1`), `attempts` (integer), `health` (boolean — `GET /healthz` вернул `{"status": "ok"}`), `version` (string или `null` — `GET /api/version`), `page_version` (string или `null` — `<meta name="app-version">` главной страницы), `error` (string или `null` — что не совпало), `checked_at` (дата-время).
+
+`RollbackResult`: `target_sha` (string — прежняя версия), `target_deploy_id` (string — деплой Render, к которому выполняется откат), `render_deploy_id` (string или `null` — деплой отката), `render_status` (string или `null`), `started_at`, `finished_at` (дата-время или `null`), `verify` (`VerifyResult` или `null` — проверка после отката), `error` (string или `null`).
+
+`RevertResult`: `status` (`pending` — ждёт начала, `active` — revert-PR или проверки `fix_sha` выполняются, `needs_attention` — остановлено, `merged` — кандидат исправления создан), `source` (`auto` — revert-PR офиса, `resume` — `fix_sha` администратора), `base_sha` (string или `null` — `main`, от которого создана ветка `office/revert-<release_id>`), `head_sha` (string или `null`), `pr_number`, `pr_url` (revert-PR или `null`), `checks` (`PullRequestChecks` или `null`), `fix_sha` (string или `null` — итоговый commit revert-PR или `fix_sha`), `decision_id` (string или `null`), `candidate_id` (string или `null` — кандидат исправления), `reason` (string или `null` — причина остановки).
+
+### `ReleaseQueueState`
+
+| Поле | Тип | Описание |
+| --- | --- | --- |
+| `configured` | boolean | Исполнитель выпуска и Render настроены; `false` — «Выпуск не настроен», кандидаты ждут в `pending` |
+| `active_release_id` | string или `null` | Кандидат, который сейчас деплоится, проверяется или откатывается (один на очередь) |
+| `release_blocked_by` | string или `null` | Откатанный кандидат: до публикации исправления деплоятся только откаты и кандидаты, содержащие исправление |
+| `blocked_reason` | string или `null` | Причина блокировки (`blocked_reason` кандидата `release_blocked_by`) |
+| `published_sha` | string или `null` | Опубликованная версия без кандидата офиса (деплой вне офиса); основание следующего выпуска |
 
 ### `Slots`
 
@@ -430,6 +482,10 @@
     "head_sha": null,
     "failure_kind": null,
     "checks": null,
+    "pr_review": null,
+    "merge_sha": null,
+    "merge_pending": false,
+    "integration_started": false,
     "changed_files": [],
     "fix_cycles": 0,
     "usage": {
@@ -474,6 +530,10 @@
     "head_sha": null,
     "failure_kind": null,
     "checks": null,
+    "pr_review": null,
+    "merge_sha": null,
+    "merge_pending": false,
+    "integration_started": false,
     "changed_files": [
       "web/src/components/chat/MessageActions.tsx",
       "web/src/components/chat/AssistantMessage.tsx"
@@ -516,17 +576,36 @@
     "head_sha": "b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f80",
     "failure_kind": null,
     "checks": {
-      "head_sha": "b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f80",
+      "head_sha": "c3d4e5f6a7b8091a2b3c4d5e6f708192a3b4c5d6",
       "checks": [
-        {"name": "chat-api", "status": "completed", "conclusion": "success", "url": "https://github.com/SlavaPush/vibe-studio/actions/runs/18342200001/job/52010000001"},
-        {"name": "chat-web", "status": "completed", "conclusion": "success", "url": "https://github.com/SlavaPush/vibe-studio/actions/runs/18342200001/job/52010000002"},
-        {"name": "chat-containers", "status": "completed", "conclusion": "success", "url": "https://github.com/SlavaPush/vibe-studio/actions/runs/18342200001/job/52010000003"},
-        {"name": "office-api", "status": "completed", "conclusion": "success", "url": "https://github.com/SlavaPush/vibe-studio/actions/runs/18342200001/job/52010000004"},
-        {"name": "office-web", "status": "completed", "conclusion": "success", "url": "https://github.com/SlavaPush/vibe-studio/actions/runs/18342200001/job/52010000005"},
-        {"name": "office-sandbox", "status": "completed", "conclusion": "success", "url": "https://github.com/SlavaPush/vibe-studio/actions/runs/18342200001/job/52010000006"},
-        {"name": "office-paths", "status": "completed", "conclusion": "success", "url": "https://github.com/SlavaPush/vibe-studio/actions/runs/18342200002/job/52010000007"}
+        {"name": "chat-api", "status": "completed", "conclusion": "success", "url": "https://github.com/SlavaPush/vibe-studio/actions/runs/18342210771/job/52010000011"},
+        {"name": "chat-web", "status": "completed", "conclusion": "success", "url": "https://github.com/SlavaPush/vibe-studio/actions/runs/18342210771/job/52010000012"},
+        {"name": "chat-containers", "status": "completed", "conclusion": "success", "url": "https://github.com/SlavaPush/vibe-studio/actions/runs/18342210771/job/52010000013"},
+        {"name": "office-api", "status": "completed", "conclusion": "success", "url": "https://github.com/SlavaPush/vibe-studio/actions/runs/18342210771/job/52010000014"},
+        {"name": "office-web", "status": "completed", "conclusion": "success", "url": "https://github.com/SlavaPush/vibe-studio/actions/runs/18342210771/job/52010000015"},
+        {"name": "office-sandbox", "status": "completed", "conclusion": "success", "url": "https://github.com/SlavaPush/vibe-studio/actions/runs/18342210771/job/52010000016"}
       ]
     },
+    "pr_review": {
+      "id": "prv_5d6e7f8091a2",
+      "head_sha": "b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f80",
+      "verdict": "approve",
+      "reasons": "Изменение затрагивает только настройки интерфейса и выполняет все критерии приёмки.",
+      "required_changes": [],
+      "checklist": [
+        {"item": "paths", "ok": true, "note": "Только apps/chat/web/src/components/settings."},
+        {"item": "network", "ok": true, "note": "Новых сетевых вызовов нет."},
+        {"item": "external_navigation", "ok": true, "note": "Внешних ссылок нет."},
+        {"item": "inputs", "ok": true, "note": "Добавлен переключатель темы, данные не отправляются."},
+        {"item": "system_messages", "ok": true, "note": "Системные сообщения не скрываются."},
+        {"item": "sent_text", "ok": true, "note": "Отправляемый текст не меняется."},
+        {"item": "third_party_code", "ok": true, "note": "Стороннего кода нет."}
+      ],
+      "created_at": "2026-10-23T10:44:00Z"
+    },
+    "merge_sha": "c3d4e5f6a7b8091a2b3c4d5e6f708192a3b4c5d6",
+    "merge_pending": false,
+    "integration_started": true,
     "changed_files": [
       "web/src/components/settings/ThemeSwitch.tsx",
       "web/src/components/settings/SettingsDialog.tsx"
@@ -558,7 +637,7 @@
 }
 ```
 
-Ответ `201`: модель `Task` в статусе `queued`, поля `spec`, `branch`, `base_sha`, `pr_url`, `pr_number`, `head_sha`, `failure_kind`, `checks` равны `null`, `changed_files` пуст. Пример отклонённой задачи — первая задача в ответе `GET /api/tasks`.
+Ответ `201`: модель `Task` в статусе `queued`, поля `spec`, `branch`, `base_sha`, `pr_url`, `pr_number`, `head_sha`, `failure_kind`, `checks`, `pr_review`, `merge_sha` равны `null`, `merge_pending` и `integration_started` равны `false`, `changed_files` пуст. Пример отклонённой задачи — первая задача в ответе `GET /api/tasks`.
 
 Ошибки: `401 unauthorized`; `422 validation_error`, если `text` короче 20 или длиннее 4000 символов; `429 rate_limited`, если у участника уже пять задач за последний час.
 
@@ -797,11 +876,44 @@ data: {"event_id":211,"task_id":"tsk_101","seq":11,"type":"check_result", ...}
 }
 ```
 
-Фрагмент журнала задачи `tsk_102` (кандидат выпуска ждёт администратора):
+Фрагмент журнала задачи `tsk_102` (агент ревью принял PR, офис слил его, кандидат выпуска ждёт администратора):
 
 <!-- example: TaskEvent[] -->
 ```json
 [
+  {
+    "event_id": 217,
+    "task_id": "tsk_102",
+    "seq": 38,
+    "type": "pr_review",
+    "timestamp": "2026-10-23T10:44:00Z",
+    "role": "pr_reviewer",
+    "tool": null,
+    "artifact": null,
+    "payload": {"review_id": "prv_5d6e7f8091a2", "head_sha": "b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f80", "verdict": "approve"}
+  },
+  {
+    "event_id": 218,
+    "task_id": "tsk_102",
+    "seq": 39,
+    "type": "merge_started",
+    "timestamp": "2026-10-23T10:44:30Z",
+    "role": null,
+    "tool": null,
+    "artifact": null,
+    "payload": {"pr_number": 12, "head_sha": "b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f80"}
+  },
+  {
+    "event_id": 219,
+    "task_id": "tsk_102",
+    "seq": 40,
+    "type": "pr_merged",
+    "timestamp": "2026-10-23T10:45:00Z",
+    "role": null,
+    "tool": null,
+    "artifact": null,
+    "payload": {"pr_number": 12, "merge_sha": "c3d4e5f6a7b8091a2b3c4d5e6f708192a3b4c5d6"}
+  },
   {
     "event_id": 220,
     "task_id": "tsk_102",
@@ -817,12 +929,64 @@ data: {"event_id":211,"task_id":"tsk_101","seq":11,"type":"check_result", ...}
     "event_id": 221,
     "task_id": "tsk_102",
     "seq": 42,
-    "type": "decision_required",
+    "type": "external_publish",
     "timestamp": "2026-10-23T10:50:00Z",
     "role": null,
     "tool": null,
     "artifact": null,
-    "payload": {"decision": "approve_release", "release_id": "rel_7", "expected_version": 1}
+    "payload": {"published_sha": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"}
+  }
+]
+```
+
+Журнал выпуска с неуспешной проверкой, откатом, блокировкой и исправлением (задача `tsk_095`):
+
+<!-- example: TaskEvent[] -->
+```json
+[
+  {
+    "event_id": 180,
+    "task_id": "tsk_095",
+    "seq": 40,
+    "type": "deploy_status",
+    "timestamp": "2026-10-23T09:12:00Z",
+    "role": null,
+    "tool": null,
+    "artifact": null,
+    "payload": {"release_id": "rel_5", "render_deploy_id": "dep-e2f3a4b5c6d7", "render_status": "live", "verified": false, "fault": true}
+  },
+  {
+    "event_id": 181,
+    "task_id": "tsk_095",
+    "seq": 41,
+    "type": "rollback_status",
+    "timestamp": "2026-10-23T09:15:00Z",
+    "role": null,
+    "tool": null,
+    "artifact": null,
+    "payload": {"release_id": "rel_5", "render_deploy_id": "dep-f3a4b5c6d7e8", "render_status": "live", "verified": true, "target_sha": "5e0c1a7b9d2f4e6a8c0b1d3f5a7c9e1b3d5f7a90"}
+  },
+  {
+    "event_id": 182,
+    "task_id": "tsk_095",
+    "seq": 42,
+    "type": "release_blocked",
+    "timestamp": "2026-10-23T09:15:00Z",
+    "role": null,
+    "tool": null,
+    "artifact": null,
+    "payload": {"release_id": "rel_5", "reason": "Проверка после деплоя d4e5f6a не пройдена: /healthz не ответил status ok. Выполнен откат к 5e0c1a7."}
+  },
+  {
+    "event_id": 190,
+    "task_id": "tsk_095",
+    "seq": 50,
+    "type": "release_unblocked",
+    "timestamp": "2026-10-23T09:48:00Z",
+    "role": null,
+    "tool": null,
+    "artifact": null,
+    "payload": {"release_id": "rel_5", "fixed_by": "rel_8"}
   }
 ]
 ```
@@ -870,7 +1034,7 @@ data: {"event_id":211,"task_id":"tsk_101","seq":11,"type":"check_result", ...}
   "role": null,
   "tool": null,
   "artifact": null,
-  "payload": {"release_id": "rel_6", "render_deploy_id": "dep-d1a2b3c4e5f6", "render_status": "live"}
+  "payload": {"release_id": "rel_6", "render_deploy_id": "dep-d1a2b3c4e5f6", "render_status": "live", "verified": true, "fault": false}
 }
 ```
 
@@ -983,7 +1147,7 @@ HTML-отчёт Playwright с этими заголовками не работ�
 
 ### `POST /api/tasks/{id}/decisions`
 
-Записывает решение владельца задачи: `approve_spec`, `cancel` или `retry`. Сервер проверяет сеанс, владельца, статус задачи и `expected_version`.
+Записывает решение владельца задачи: `approve_spec`, `cancel` или `retry`. Сервер проверяет сеанс, владельца, статус задачи и `expected_version`. `retry` задачи в `needs_attention` с `integration_started = true` может записать и администратор: ошибка инфраструктуры после начала интеграции не зависит от автора задачи, офис продолжает с того шага, где остановился.
 
 Запрос:
 
@@ -1052,7 +1216,7 @@ HTML-отчёт Playwright с этими заголовками не работ�
 
 ### `GET /api/releases`
 
-Возвращает очередь и историю выпусков: всех кандидатов, новые первыми. Очередь — кандидаты в статусах `pending`, `approved`, `deploying`. История — `released`, `failed`, `rolled_back`, `revoked`.
+Возвращает очередь и историю выпусков: всех кандидатов, новые первыми. Очередь — кандидаты в статусах `pending`, `deploying`, `verifying`, `rolling_back`. История — `released`, `failed`, `superseded`, `revoked`, `rolled_back`. Состояние очереди (активный кандидат, блокировка, внешняя публикация) — `GET /api/release-queue`.
 
 Ответ `200`:
 
@@ -1072,10 +1236,28 @@ HTML-отчёт Playwright с этими заголовками не работ�
     "ci_run_ids": ["18342210771"],
     "pr_url": "https://github.com/SlavaPush/vibe-studio/pull/12",
     "created_at": "2026-10-23T10:49:00Z",
-    "approved_by": null,
-    "approved_at": null,
     "is_published": false,
-    "deploy": null
+    "deploy": null,
+    "pr_review_id": "prv_5d6e7f8091a2",
+    "origin": "task",
+    "origin_decision_id": null,
+    "superseded_by": null,
+    "blocked_reason": null,
+    "verify": null,
+    "rollback": null,
+    "revert": null,
+    "e2e": {
+      "task_id": "tsk_102",
+      "commit_sha": "c3d4e5f6a7b8091a2b3c4d5e6f708192a3b4c5d6",
+      "spec_hash": "sha256:9c1e4b7a2d3f5e60",
+      "suite_hash": "sha256:71c0d2e93a4b5f18",
+      "checks": [
+        {"command": "npm run lint", "exit_code": 0, "duration_ms": 8200, "artifact_urls": ["/api/tasks/tsk_102/artifacts/lint-3.log"]},
+        {"command": "npm run test", "exit_code": 0, "duration_ms": 15400, "artifact_urls": ["/api/tasks/tsk_102/artifacts/test-3.log"]},
+        {"command": "npm run build", "exit_code": 0, "duration_ms": 21900, "artifact_urls": ["/api/tasks/tsk_102/artifacts/build-3.log"]},
+        {"command": "playwright test --config /office-e2e/playwright.config.ts", "exit_code": 0, "duration_ms": 47300, "artifact_urls": ["/api/tasks/tsk_102/artifacts/e2e-3.log"]}
+      ]
+    }
   },
   {
     "id": "rel_6",
@@ -1090,35 +1272,151 @@ HTML-отчёт Playwright с этими заголовками не работ�
     "ci_run_ids": ["18339906512"],
     "pr_url": "https://github.com/SlavaPush/vibe-studio/pull/9",
     "created_at": "2026-10-22T17:40:00Z",
-    "approved_by": "prt_admin",
-    "approved_at": "2026-10-22T18:02:00Z",
     "is_published": true,
     "deploy": {
       "render_deploy_id": "dep-d1a2b3c4e5f6",
       "render_status": "live",
       "started_at": "2026-10-22T18:03:00Z",
       "finished_at": "2026-10-22T18:12:00Z",
-      "published_sha": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+      "published_sha": "a1b2c3d",
       "error": null
-    }
+    },
+    "pr_review_id": null,
+    "e2e": null,
+    "origin": "task",
+    "origin_decision_id": null,
+    "superseded_by": null,
+    "blocked_reason": null,
+    "verify": {
+      "expected_sha": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+      "ok": true,
+      "fault": false,
+      "attempts": 2,
+      "health": true,
+      "version": "a1b2c3d",
+      "page_version": "a1b2c3d",
+      "error": null,
+      "checked_at": "2026-10-22T18:13:00Z"
+    },
+    "rollback": null,
+    "revert": null
   }
 ]
+```
+
+Кандидат, откатанный после неуспешной проверки, с revert-PR:
+
+<!-- example: ReleaseCandidate -->
+```json
+{
+  "id": "rel_5",
+  "task_id": "tsk_095",
+  "kind": "release",
+  "status": "failed",
+  "version": 9,
+  "commit_sha": "d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d",
+  "expected_previous_sha": "5e0c1a7b9d2f4e6a8c0b1d3f5a7c9e1b3d5f7a90",
+  "spec_hash": "sha256:4b2e7c9d1a3f5e60",
+  "suite_hash": "sha256:71c0d2e93a4b5f18",
+  "ci_run_ids": ["18340010021"],
+  "pr_url": "https://github.com/SlavaPush/vibe-studio/pull/10",
+  "created_at": "2026-10-23T09:02:00Z",
+  "is_published": false,
+  "deploy": {
+    "render_deploy_id": "dep-e2f3a4b5c6d7",
+    "render_status": "deactivated",
+    "started_at": "2026-10-23T09:03:00Z",
+    "finished_at": "2026-10-23T09:14:00Z",
+    "published_sha": null,
+    "error": null
+  },
+  "pr_review_id": "prv_1a2b3c4d5e6f",
+  "e2e": null,
+  "origin": "task",
+  "origin_decision_id": null,
+  "superseded_by": null,
+  "blocked_reason": "Проверка после деплоя d4e5f6a не пройдена: /healthz не ответил status ok. Выполнен откат к 5e0c1a7.",
+  "verify": {
+    "expected_sha": "d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d",
+    "ok": false,
+    "fault": false,
+    "attempts": 24,
+    "health": false,
+    "version": "d4e5f6a",
+    "page_version": "d4e5f6a",
+    "error": "/healthz не ответил status ok",
+    "checked_at": "2026-10-23T09:14:00Z"
+  },
+  "rollback": {
+    "target_sha": "5e0c1a7b9d2f4e6a8c0b1d3f5a7c9e1b3d5f7a90",
+    "target_deploy_id": "dep-a9b8c7d6e5f4",
+    "render_deploy_id": "dep-f3a4b5c6d7e8",
+    "render_status": "live",
+    "started_at": "2026-10-23T09:14:00Z",
+    "finished_at": "2026-10-23T09:15:00Z",
+    "verify": {
+      "expected_sha": "5e0c1a7b9d2f4e6a8c0b1d3f5a7c9e1b3d5f7a90",
+      "ok": true,
+      "fault": false,
+      "attempts": 1,
+      "health": true,
+      "version": "5e0c1a7",
+      "page_version": "5e0c1a7",
+      "error": null,
+      "checked_at": "2026-10-23T09:15:00Z"
+    },
+    "error": null
+  },
+  "revert": {
+    "status": "active",
+    "source": "auto",
+    "base_sha": "e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4",
+    "head_sha": "f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5",
+    "pr_number": 11,
+    "pr_url": "https://github.com/SlavaPush/vibe-studio/pull/11",
+    "checks": null,
+    "fix_sha": null,
+    "decision_id": null,
+    "candidate_id": null,
+    "reason": null
+  }
+}
+```
+
+Ошибки: `401 unauthorized`.
+
+### `GET /api/release-queue`
+
+Возвращает состояние очереди выпуска. Панель перечитывает его вместе с `GET /api/releases` по событиям `release_candidate`, `deploy_status`, `rollback_status`, `release_blocked`, `release_unblocked`, `external_publish`.
+
+Ответ `200`:
+
+<!-- example: ReleaseQueueState -->
+```json
+{
+  "configured": true,
+  "active_release_id": null,
+  "release_blocked_by": "rel_5",
+  "blocked_reason": "Проверка после деплоя d4e5f6a не пройдена: /healthz не ответил status ok. Выполнен откат к 5e0c1a7.",
+  "published_sha": null
+}
 ```
 
 Ошибки: `401 unauthorized`.
 
 ### `POST /api/releases/{id}/decisions`
 
-Записывает решение администратора: `approve_release` для кандидата в статусе `pending` или `rollback` для опубликованного выпуска. `rollback` создаёт кандидата вида `rollback` на версию `expected_previous_sha` выбранного выпуска и ставит его в ту же очередь. Подтверждение относится к точной версии кандидата: изменение `commit_sha`, `spec_hash` или `suite_hash` создаёт нового кандидата.
+Записывает решение администратора. `rollback` для опубликованного выпуска создаёт кандидата вида `rollback` на версию `expected_previous_sha` выбранного выпуска; он ждёт свободной очереди с приоритетом перед обычными кандидатами. `resume_releases` с `fix_sha` (40 символов hex) запускает выпуск исправления после отката; без `fix_sha` — сверку остановленного выпуска (раздел «Права»). Подтверждения выпуска нет: обычный кандидат деплоится автоматически.
 
 Запрос:
 
 <!-- example: ReleaseDecisionRequest -->
 ```json
 {
-  "decision": "approve_release",
-  "expected_version": 1,
-  "idempotency_key": "4e5f6a7b-approve-rel7"
+  "decision": "resume_releases",
+  "expected_version": 9,
+  "idempotency_key": "4e5f6a7b-resume-rel5",
+  "fix_sha": "0a1b2c3d4e5f60718293a4b5c6d7e8f901234567"
 }
 ```
 
@@ -1128,25 +1426,37 @@ HTML-отчёт Playwright с этими заголовками не работ�
 ```json
 {
   "decision_id": "dec_612",
-  "decision": "approve_release",
+  "decision": "resume_releases",
   "task_id": null,
-  "release_id": "rel_7",
+  "release_id": "rel_5",
   "participant_id": "prt_admin",
-  "expected_version": 1,
-  "idempotency_key": "4e5f6a7b-approve-rel7",
+  "expected_version": 9,
+  "idempotency_key": "4e5f6a7b-resume-rel5",
   "recorded_at": "2026-10-23T11:05:00Z"
 }
 ```
 
-Ошибка `403`: подтверждение выпуска участником без роли `admin`.
+Ошибка `403`: решение по выпуску участником без роли `admin`.
 
 <!-- example: ApiError -->
 ```json
 {
   "code": "forbidden_role",
-  "message": "Подтверждение выпуска и откат доступны только администратору.",
+  "message": "Откат и возобновление выпуска доступны только администратору.",
   "retryable": false,
   "operation_id": "op_8c9d0e1f"
+}
+```
+
+Ошибка `409`: сверка невозможна, пока Render выполняет деплой.
+
+<!-- example: ApiError -->
+```json
+{
+  "code": "decision_not_allowed",
+  "message": "Деплой Render dep-0a1b2c3d4e5f ещё выполняется (build_in_progress): сверка невозможна.",
+  "retryable": false,
+  "operation_id": "op_5a6b7c8d"
 }
 ```
 
@@ -1156,7 +1466,7 @@ HTML-отчёт Playwright с этими заголовками не работ�
 ```json
 {
   "code": "version_mismatch",
-  "message": "Кандидат выпуска изменился. Проверьте новую версию и подтвердите заново.",
+  "message": "Кандидат выпуска изменился. Проверьте новую версию и примите решение заново.",
   "retryable": false,
   "operation_id": "op_3e4f5a6b"
 }

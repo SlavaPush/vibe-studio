@@ -10,9 +10,17 @@ interface ConversationListProps {
   onSelect: (id: string) => void
   onCreate: () => void
   onRename: (id: string, title: string) => void
+  loadFailed?: boolean
 }
 
-export function ConversationList({ conversations, activeId, onSelect, onCreate, onRename }: ConversationListProps) {
+export function ConversationList({
+  conversations,
+  activeId,
+  onSelect,
+  onCreate,
+  onRename,
+  loadFailed = false,
+}: ConversationListProps) {
   const [editing, setEditing] = useState<{ id: string; title: string } | null>(null)
 
   const finish = (save: boolean) => {
@@ -39,6 +47,11 @@ export function ConversationList({ conversations, activeId, onSelect, onCreate, 
       <Button variant="outline" onClick={onCreate}>
         Новый диалог
       </Button>
+      {conversations.length === 0 && !loadFailed && (
+        <p className="px-1 text-sm text-muted-foreground">
+          Диалогов пока нет. Диалог создаётся при отправке первого сообщения.
+        </p>
+      )}
       <ul className="flex flex-col gap-1">
         {conversations.map((conversation) => {
           const active = conversation.id === activeId

@@ -91,6 +91,8 @@ def test_monorepo_paths_allowed(role, path):
         "apps/chat/web/package-lock.json",
         "apps/chat/web/vite.config.ts",
         "apps/chat/web/e2e/office/a.ts",
+        "apps/chat/web/e2e/office/support/mock-api.ts",
+        "apps/chat/web/e2e/office/support/mock-api.test.ts",
         "apps/chat/web/e2e/smoke.pw.ts",
         "apps/chat/web/.env.local",
         "web/src/App.tsx",

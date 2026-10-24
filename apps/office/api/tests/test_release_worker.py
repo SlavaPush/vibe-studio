@@ -12,16 +12,20 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+from app import release_queue
 from app import workspace as workspace_module
 from app.config import CHECKOUT_ROOT
 from app.db import utcnow
 from app.github import GitHubError, GitHubUnavailable, github_client
+from app.models_gateway import ProviderReply
 from app.operations import OperationLog, OpStatus
-from app.release import ReleaseWorker
+from app.release import ReleaseWorker, task_carrier
 from app.required_checks import load_required_checks
-from app.schemas import AgentRole, FailureKind, TaskEventType, TaskStatus
+from app.sandbox import SandboxError
+from app.schemas import AgentRole, CheckReport, CheckResult, FailureKind, ReleaseStatus, TaskEventType, TaskStatus
+from app.service_check import SERVICE_TIMEOUT
 from app.workspace import PushResult, Workspace
-from conftest import FakeGitHub, git
+from conftest import CI_JOBS, FakeGitHub, FakeSuite, ScriptedGateway, git
 
 SPEC = {
     "version": 1,
@@ -49,11 +53,37 @@ class Clock:
         return utcnow() + self.offset
 
 
+class Service:
+    def __init__(self, version: str) -> None:
+        self.version: object = version
+        self.status = 200
+        self.down = False
+        self.timeouts = 0
+        self.tick: timedelta | None = None
+        self.clock: Clock | None = None
+        self.requests: list[httpx.Request] = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if self.tick is not None and self.clock is not None:
+            self.clock.offset += self.tick
+        if self.timeouts:
+            self.timeouts -= 1
+            raise httpx.ReadTimeout("timed out", request=request)
+        if self.down:
+            raise httpx.ConnectError("connection refused", request=request)
+        return httpx.Response(self.status, json={"version": self.version})
+
+
 class Setup(SimpleNamespace):
     def worker(self) -> ReleaseWorker:
         if getattr(self, "current", None) is not None:
             self.current.shutdown()
-        self.current = ReleaseWorker(self.settings, self.store, self.workspace, self.github, REQUIRED, self.clock)
+        self.current = ReleaseWorker(
+            self.settings, self.store, self.workspace, self.github, REQUIRED, self.clock,
+            gateway=self.gateway, suite=self.suite,
+            service=httpx.Client(transport=httpx.MockTransport(self.service.handler)),
+        )
         return self.current
 
     def task(self):
@@ -101,7 +131,7 @@ def setup(office, origin, tmp_path, app_key, monkeypatch):
     fake = FakeGitHub(origin.bare, token)
     github = github_client("5452356", "174735588", app_key.path, "SlavaPush/vibe-studio",
                            transport=httpx.MockTransport(fake.handler))
-    settings = replace(app.state.settings, github_push_url=origin.url)
+    settings = replace(app.state.settings, github_push_url=origin.url, verify_seconds=0)
     pushes = []
     real_push = workspace.push
 
@@ -113,7 +143,8 @@ def setup(office, origin, tmp_path, app_key, monkeypatch):
     result = Setup(
         office=office, origin=origin, app=app, store=store, workspace=workspace, client=client, me=me,
         task_id=task_id, head=head, fake=fake, github=github, settings=settings, clock=Clock(), pushes=pushes,
-        token=token, current=None,
+        token=token, current=None, gateway=ScriptedGateway(settings), suite=FakeSuite(store),
+        service=Service(origin.main()[:7]), published=origin.main(),
     )
     yield result
     if result.current is not None:
@@ -164,16 +195,17 @@ def test_task_reaches_open_pr_and_passed_checks(setup):
     assert setup.store.slots_used() == 0
 
     setup.fake.add_pr_runs(setup.head, 1)
+    setup.gateway.handlers["pr_reviewer"] = lambda call: ProviderReply("{}", 10, 2, True)
     assert drive(worker, setup.task_id) == 0
     task = setup.task()
-    assert task.status == TaskStatus.awaiting_integration
+    assert task.status == TaskStatus.needs_attention
     assert [(check.status, check.conclusion) for check in task.checks.checks] == [("completed", "success")] * 7
-    assert len(setup.events(TaskEventType.checks_status)) == 2
-    drive(worker, setup.task_id)
     assert len(setup.events(TaskEventType.checks_status)) == 2
     assert setup.fake.mutations() == [("POST", "/repos/SlavaPush/vibe-studio/pulls")]
     assert len(setup.pushes) == 1
-    assert {row["kind"]: row["status"] for row in setup.ops()} == {"push": "succeeded", "create_pr": "succeeded"}
+    assert {row["kind"]: row["status"] for row in setup.ops()} == {
+        "push": "succeeded", "create_pr": "succeeded", "pr_review": "failed",
+    }
 
 
 def test_failed_check_closes_pr_and_fails_task(setup):
@@ -311,7 +343,7 @@ def test_rejected_push_needs_attention(setup):
 
 
 def test_branch_violation_blocks_push(setup, monkeypatch):
-    monkeypatch.setattr(setup.workspace, "verify_branch", lambda task_id: ["apps/chat/api/main.py: запрещено"])
+    monkeypatch.setattr(setup.workspace, "verify_branch", lambda *args: ["apps/chat/api/main.py: запрещено"])
     drive(setup.worker(), setup.task_id)
     assert setup.task().status == TaskStatus.needs_attention
     assert setup.pushes == []
@@ -682,3 +714,471 @@ def test_unknown_push_does_not_block_closing_known_pr(setup):
     drive(worker, setup.task_id)
     assert setup.fake.prs[1]["state"] == "closed"
     assert worker.candidates() == []
+
+
+def merged(setup) -> ReleaseWorker:
+    worker = opened(setup)
+    setup.fake.add_pr_runs(setup.head, 1)
+    drive(worker, setup.task_id)
+    assert setup.task().merge_sha == setup.origin.main()
+    return worker
+
+
+def candidates_of(setup):
+    return [release for release in setup.store.list_releases() if release.task_id == setup.task_id]
+
+
+def push_foreign(setup):
+    other = setup.origin.work
+    git(other, "fetch", "-q", str(setup.origin.bare), f"office/{setup.task_id}")
+    git(other, "checkout", "-q", "-B", "foreign", "FETCH_HEAD")
+    setup.origin.write("apps/chat/web/src/Foreign.tsx", "export {}\n")
+    git(other, "add", "-A")
+    git(other, "commit", "-q", "-m", "foreign")
+    git(other, "push", "-q", str(setup.origin.bare), f"foreign:office/{setup.task_id}")
+
+
+def test_approved_pr_is_merged_checked_and_becomes_candidate(setup):
+    worker = merged(setup)
+    task = setup.task()
+    sha = task.merge_sha
+    [put] = [request for request in setup.fake.requests if request.method == "PUT"]
+    assert put.url.path == "/repos/SlavaPush/vibe-studio/pulls/1/merge"
+    assert json.loads(put.content) == {"sha": setup.head, "merge_method": "squash", "commit_title": f"{task.title} (#1)"}
+    assert git(setup.origin.bare, "rev-parse", "main~1") == setup.published
+    assert [event.payload for event in setup.events(TaskEventType.pr_merged)] == [{"pr_number": 1, "merge_sha": sha}]
+    assert task.status == TaskStatus.awaiting_integration
+    assert task.checks.head_sha == sha
+    assert {check.status for check in task.checks.checks} == {"missing"}
+    assert setup.suite.calls == []
+    run_id = setup.fake.add_push_runs(sha)
+    setup.fake.add_run("ci.yml", "push", sha, [], {"chat-api": "failure"}, head_branch="office/other")
+    drive(worker, setup.task_id)
+    task = setup.task()
+    assert task.status == TaskStatus.awaiting_release
+    assert task.checks.head_sha == sha
+    assert [check.name for check in task.checks.checks] == [name for name in CI_JOBS]
+    assert setup.suite.calls == [(setup.task_id, sha, sha, True)]
+    [candidate] = candidates_of(setup)
+    assert (candidate.kind, candidate.status, candidate.commit_sha) == ("release", "pending", sha)
+    assert candidate.expected_previous_sha == setup.published
+    assert (candidate.spec_hash, candidate.suite_hash) == (SPEC["spec_hash"], "sha256:fake")
+    assert candidate.ci_run_ids == [str(run_id)]
+    assert candidate.pr_url == task.pr_url
+    assert candidate.pr_review_id == task.pr_review.id
+    assert candidate.e2e.commit_sha == sha
+    assert [check.command for check in candidate.e2e.checks][-1].startswith("playwright test")
+    assert len(setup.service.requests) == 1
+    assert setup.events(TaskEventType.release_candidate)[-1].payload == {"release_id": candidate.id, "commit_sha": sha}
+    setup.office.set_task(setup.task_id, status="awaiting_integration")
+    drive(setup.worker(), setup.task_id)
+    assert len(candidates_of(setup)) == 1
+    assert len(setup.suite.calls) == 1
+    assert len(setup.gateway.role_calls("pr_reviewer")) == 1
+    assert setup.fake.merges() == 1
+
+
+def test_new_head_after_review_is_not_merged(setup):
+    worker = opened(setup)
+    setup.fake.add_pr_runs(setup.head, 1)
+    real = setup.gateway.handlers["pr_reviewer"]
+
+    def review_then_push(call):
+        push_foreign(setup)
+        return real(call)
+
+    setup.gateway.handlers["pr_reviewer"] = review_then_push
+    assert worker.step(setup.task_id)
+    review = setup.task().pr_review
+    assert (review.verdict, review.head_sha) == ("approve", setup.head)
+    assert not worker._merge(task_carrier(setup.task()), review)
+    task = setup.task()
+    assert task.status == TaskStatus.needs_attention
+    assert task.pr_review == review
+    assert setup.fake.merges() == 0
+    assert setup.fake.prs[1]["state"] == "open"
+
+
+def test_new_head_during_refused_merge_needs_attention(setup, monkeypatch):
+    worker = opened(setup)
+    setup.fake.add_pr_runs(setup.head, 1)
+    real = worker.github.merge_pr
+
+    def push_then_merge(*args):
+        push_foreign(setup)
+        return real(*args)
+
+    monkeypatch.setattr(worker.github, "merge_pr", push_then_merge)
+    drive(worker, setup.task_id)
+    task = setup.task()
+    assert task.status == TaskStatus.needs_attention
+    assert task.merge_sha is None
+    assert setup.fake.merges() == 1
+    assert setup.fake.prs[1]["merged"] is False
+    assert [row["status"] for row in setup.ops() if row["kind"] == "merge_pr"] == ["failed"]
+    reason = [event for event in setup.events(TaskEventType.role_finished) if event.payload["step"] == "merge_pr"]
+    assert "решение недействительно" in reason[-1].payload["summary"].lower()
+
+
+@pytest.mark.parametrize("status", [405, 409, 422])
+def test_refused_merge_needs_attention_and_retry_merges(setup, status):
+    worker = opened(setup)
+    setup.fake.add_pr_runs(setup.head, 1)
+    setup.fake.status[("PUT", "/repos/SlavaPush/vibe-studio/pulls/1/merge")] = status
+    drive(worker, setup.task_id)
+    task = setup.task()
+    assert task.status == TaskStatus.needs_attention
+    assert setup.fake.prs[1]["state"] == "open"
+    assert [row["status"] for row in setup.ops() if row["kind"] == "merge_pr"] == ["failed"]
+    setup.fake.status.clear()
+    assert decide(setup, "retry", f"retry-merge-{status}").status_code == 200
+    drive(worker, setup.task_id)
+    assert setup.task().merge_sha == setup.origin.main()
+    assert setup.fake.merges() == 2
+    assert len(setup.gateway.role_calls("pr_reviewer")) == 1
+
+
+def test_merge_timeout_is_reconciled_without_second_put(setup):
+    worker = opened(setup)
+    setup.fake.add_pr_runs(setup.head, 1)
+    setup.fake.hang_merge = True
+    drive(worker, setup.task_id)
+    assert [row["status"] for row in setup.ops() if row["kind"] == "merge_pr"] == ["started"]
+    setup.fake.hang_merge = False
+    assert not worker.step(setup.task_id)
+    assert setup.task().merge_sha is None
+    sha = setup.fake.squash(setup.fake.prs[1], setup.head)
+    assert worker.step(setup.task_id)
+    assert setup.task().merge_sha == sha
+    assert setup.fake.merges() == 1
+    assert [row["status"] for row in setup.ops() if row["kind"] == "merge_pr"] == ["succeeded"]
+
+
+def test_unreadable_merge_answer_is_reconciled_without_second_put(setup):
+    worker = opened(setup)
+    setup.fake.add_pr_runs(setup.head, 1)
+    setup.fake.garble_merge = True
+    drive(worker, setup.task_id)
+    setup.fake.garble_merge = False
+    assert [row["status"] for row in setup.ops() if row["kind"] == "merge_pr"] == ["started"]
+    assert setup.task().status == TaskStatus.awaiting_integration
+    assert not worker.step(setup.task_id)
+    sha = setup.fake.squash(setup.fake.prs[1], setup.head)
+    drive(worker, setup.task_id)
+    assert setup.task().merge_sha == sha
+    assert setup.fake.merges() == 1
+
+
+def test_cancel_accepted_before_merge_operation_prevents_put(setup, monkeypatch):
+    worker = opened(setup)
+    setup.fake.add_pr_runs(setup.head, 1)
+    real = setup.store.load_review
+    cancelled = []
+
+    def cancel_after_read(conn, task_id, head_sha):
+        review = real(conn, task_id, head_sha)
+        if review is not None and review.verdict == "approve" and not cancelled:
+            cancelled.append(True)
+            assert decide(setup, "cancel", "cancel-before-merge").status_code == 200
+        return review
+
+    monkeypatch.setattr(setup.store, "load_review", cancel_after_read)
+    drive(worker, setup.task_id)
+    monkeypatch.undo()
+    drive(worker, setup.task_id)
+    task = setup.task()
+    assert (task.status, task.merge_sha) == (TaskStatus.cancelled, None)
+    assert setup.fake.merges() == 0
+    assert [row["kind"] for row in setup.ops() if row["kind"] == "merge_pr"] == []
+    assert setup.fake.prs[1]["state"] == "closed"
+
+
+def test_lost_merge_answer_is_adopted_by_reconcile(setup):
+    worker = opened(setup)
+    setup.fake.add_pr_runs(setup.head, 1)
+    setup.fake.lose_merge = True
+    drive(worker, setup.task_id)
+    assert setup.task().merge_sha is None
+    setup.fake.lose_merge = False
+    drive(worker, setup.task_id)
+    assert setup.task().merge_sha == setup.origin.main()
+    assert setup.fake.merges() == 1
+
+
+def test_unknown_merge_after_limit_needs_attention_and_retry_only_reconciles(setup):
+    worker = opened(setup)
+    setup.fake.add_pr_runs(setup.head, 1)
+    setup.fake.hang_merge = True
+    drive(worker, setup.task_id)
+    setup.fake.hang_merge = False
+    setup.clock.offset = timedelta(minutes=31)
+    drive(worker, setup.task_id)
+    assert setup.task().status == TaskStatus.needs_attention
+    assert [row["status"] for row in setup.ops() if row["kind"] == "merge_pr"] == ["unknown"]
+    response = decide(setup, "cancel", "cancel-unknown-merge")
+    assert response.status_code == 409
+    assert response.json()["code"] == "decision_not_allowed"
+    setup.clock.offset = timedelta()
+    assert decide(setup, "retry", "retry-unknown-merge").status_code == 200
+    drive(worker, setup.task_id)
+    assert setup.task().merge_sha is None
+    assert setup.fake.merges() == 1
+    sha = setup.fake.squash(setup.fake.prs[1], setup.head)
+    drive(worker, setup.task_id)
+    assert setup.task().merge_sha == sha
+    assert setup.fake.merges() == 1
+
+
+def test_merge_crash_after_put_is_reconciled_after_restart(setup, monkeypatch):
+    worker = opened(setup)
+    setup.fake.add_pr_runs(setup.head, 1)
+    monkeypatch.setattr(worker, "_apply_merge", lambda *args: (_ for _ in ()).throw(Crash()))
+    with pytest.raises(Crash):
+        drive(worker, setup.task_id)
+    assert setup.task().merge_sha is None
+    monkeypatch.undo()
+    drive(setup.worker(), setup.task_id)
+    assert setup.task().merge_sha == setup.origin.main()
+    assert setup.fake.merges() == 1
+
+
+def test_cancel_is_forbidden_during_and_after_merge(setup):
+    worker = opened(setup)
+    setup.fake.add_pr_runs(setup.head, 1)
+    setup.fake.hang_merge = True
+    drive(worker, setup.task_id)
+    body = setup.client.get(f"/api/tasks/{setup.task_id}").json()
+    assert (body["merge_pending"], body["merge_sha"], body["integration_started"]) == (True, None, True)
+    assert [event.payload for event in setup.events(TaskEventType.merge_started)] == [
+        {"pr_number": 1, "head_sha": setup.head}
+    ]
+    response = decide(setup, "cancel", "cancel-during-merge")
+    assert response.status_code == 409
+    assert "слит" in response.json()["message"]
+    setup.fake.squash(setup.fake.prs[1], setup.head)
+    setup.fake.hang_merge = False
+    drive(worker, setup.task_id)
+    assert setup.task().status == TaskStatus.awaiting_integration
+    assert setup.task().merge_pending is False
+    assert decide(setup, "cancel", "cancel-waiting-push-checks").status_code == 409
+    setup.clock.offset = timedelta(minutes=31)
+    drive(worker, setup.task_id)
+    assert setup.task().status == TaskStatus.needs_attention
+    assert decide(setup, "cancel", "cancel-after-merge").status_code == 409
+    assert setup.task().status == TaskStatus.needs_attention
+    assert setup.fake.mutations().count(("PATCH", "/repos/SlavaPush/vibe-studio/pulls/1")) == 0
+
+
+def test_cancel_racing_merge_keeps_pr_and_records_merge(setup, monkeypatch):
+    worker = opened(setup)
+    setup.fake.add_pr_runs(setup.head, 1)
+    real = worker.github.merge_pr
+
+    def merge_after_cancel(*args):
+        setup.office.set_task(setup.task_id, status="cancelled")
+        return real(*args)
+
+    monkeypatch.setattr(worker.github, "merge_pr", merge_after_cancel)
+    drive(worker, setup.task_id)
+    task = setup.task()
+    assert (task.status, task.merge_sha) == (TaskStatus.cancelled, setup.origin.main())
+    assert worker.candidates() == []
+    assert setup.fake.mutations().count(("PATCH", "/repos/SlavaPush/vibe-studio/pulls/1")) == 0
+
+
+@pytest.mark.parametrize("conclusion", ["failure", "cancelled", "skipped"])
+def test_failed_push_check_of_merge_commit_fails_without_candidate(setup, conclusion):
+    worker = merged(setup)
+    setup.fake.add_push_runs(setup.task().merge_sha, office_web=conclusion)
+    drive(worker, setup.task_id)
+    task = setup.task()
+    assert (task.status, task.failure_kind) == (TaskStatus.failed, FailureKind.checks_failed)
+    assert candidates_of(setup) == []
+    assert setup.suite.calls == []
+    assert decide(setup, "retry", "retry-merge-checks").status_code == 409
+
+
+def test_merge_commit_checks_wait_then_need_attention(setup):
+    worker = merged(setup)
+    setup.fake.add_run("ci.yml", "pull_request", setup.task().merge_sha, [1], {name: "success" for name in CI_JOBS})
+    drive(worker, setup.task_id)
+    assert {check.status for check in setup.task().checks.checks} == {"missing"}
+    assert setup.task().status == TaskStatus.awaiting_integration
+    setup.clock.offset = timedelta(minutes=31)
+    drive(worker, setup.task_id)
+    assert setup.task().status == TaskStatus.needs_attention
+    assert candidates_of(setup) == []
+
+
+@pytest.mark.parametrize("step", ["lint", "e2e"])
+def test_failed_critical_e2e_fails_without_candidate(setup, step):
+    worker = merged(setup)
+    setup.fake.add_push_runs(setup.task().merge_sha)
+    setup.suite.exits = lambda task_id, app, qa, e2e: {step: 1}
+    drive(worker, setup.task_id)
+    task = setup.task()
+    assert (task.status, task.failure_kind) == (TaskStatus.failed, FailureKind.checks_failed)
+    assert candidates_of(setup) == []
+    reason = [event for event in setup.events(TaskEventType.role_finished) if event.payload["step"] == "merge_checks"]
+    assert "exit 1" in reason[-1].payload["summary"]
+
+
+def test_interrupted_suite_is_repeated_and_complete_report_is_reused(setup, monkeypatch):
+    worker = merged(setup)
+    setup.fake.add_push_runs(setup.task().merge_sha)
+
+    def crash(*args):
+        raise Crash()
+
+    setup.suite.on_suite = crash
+    with pytest.raises(Crash):
+        drive(worker, setup.task_id)
+    setup.suite.on_suite = None
+    partial = CheckReport(
+        task_id=setup.task_id, commit_sha=setup.task().merge_sha, spec_hash=None, suite_hash="sha256:fake",
+        checks=[CheckResult(command="npm run lint", exit_code=0, duration_ms=1, artifact_urls=[])],
+    )
+    setup.store.add_check_report(partial)
+    restarted = setup.worker()
+    monkeypatch.setattr(restarted, "_candidate", lambda *args: (_ for _ in ()).throw(Crash()))
+    with pytest.raises(Crash):
+        drive(restarted, setup.task_id)
+    assert len(setup.suite.calls) == 2
+    monkeypatch.undo()
+    drive(setup.worker(), setup.task_id)
+    assert setup.task().status == TaskStatus.awaiting_release
+    assert len(setup.suite.calls) == 2
+    assert len(candidates_of(setup)) == 1
+
+
+def test_sandbox_error_needs_attention(setup):
+    worker = merged(setup)
+    setup.fake.add_push_runs(setup.task().merge_sha)
+
+    def broken(*args):
+        raise SandboxError("Sandbox недоступен")
+
+    setup.suite.on_suite = broken
+    drive(worker, setup.task_id)
+    assert setup.task().status == TaskStatus.needs_attention
+    assert candidates_of(setup) == []
+
+
+def test_restart_after_merge_continues_with_merge_commit(setup):
+    merged(setup)
+    setup.fake.add_push_runs(setup.task().merge_sha)
+    drive(setup.worker(), setup.task_id)
+    assert setup.task().status == TaskStatus.awaiting_release
+
+
+@pytest.mark.parametrize("failure", ["down", "status", "body"])
+def test_unavailable_service_version_needs_attention(setup, failure):
+    worker = merged(setup)
+    setup.fake.add_push_runs(setup.task().merge_sha)
+    if failure == "down":
+        setup.service.down = True
+    elif failure == "status":
+        setup.service.status = 503
+    else:
+        setup.service.version = "dev"
+    drive(worker, setup.task_id)
+    assert setup.task().status == TaskStatus.needs_attention
+    assert candidates_of(setup) == []
+    setup.service.down, setup.service.status, setup.service.version = False, 200, setup.published[:7]
+    assert decide(setup, "retry", f"retry-service-{failure}").status_code == 200
+    drive(worker, setup.task_id)
+    assert setup.task().status == TaskStatus.awaiting_release
+    assert len(setup.suite.calls) == 1
+
+
+def test_sleeping_service_wakes_within_window_and_candidate_is_created(setup, monkeypatch):
+    monkeypatch.setattr(release_queue, "VERIFY_INTERVAL", 0)
+    setup.settings = replace(setup.settings, verify_seconds=120)
+    worker = merged(setup)
+    setup.fake.add_push_runs(setup.task().merge_sha)
+    setup.service.timeouts = 2
+    before = len(setup.service.requests)
+    drive(worker, setup.task_id)
+    assert setup.task().status == TaskStatus.awaiting_release
+    assert len(candidates_of(setup)) == 1
+    versions = [r for r in setup.service.requests[before:] if r.url.path == "/api/version"]
+    assert len(versions) >= 3
+    assert all(r.extensions["timeout"]["read"] == SERVICE_TIMEOUT for r in versions[:3])
+
+
+def test_service_version_window_is_exhausted_then_needs_attention(setup, monkeypatch):
+    monkeypatch.setattr(release_queue, "VERIFY_INTERVAL", 0)
+    setup.settings = replace(setup.settings, verify_seconds=120)
+    worker = merged(setup)
+    setup.fake.add_push_runs(setup.task().merge_sha)
+    setup.service.timeouts = 1000
+    setup.service.clock, setup.service.tick = setup.clock, timedelta(seconds=30)
+    before = len(setup.service.requests)
+    drive(worker, setup.task_id)
+    assert setup.task().status == TaskStatus.needs_attention
+    assert candidates_of(setup) == []
+    timeouts = [r.extensions["timeout"]["read"] for r in setup.service.requests[before:]]
+    assert 3 <= len(timeouts) <= 6
+    assert timeouts[0] == SERVICE_TIMEOUT
+    assert timeouts[-1] < SERVICE_TIMEOUT
+
+
+def test_published_candidate_is_base_and_external_version_replaces_it(setup):
+    other = setup.office.queued_task(setup.me["id"])
+    setup.office.add_candidate(other, commit_sha="d" * 40, status=ReleaseStatus.released, is_published=True)
+    setup.service.version = "d" * 7
+    worker = merged(setup)
+    setup.fake.add_push_runs(setup.task().merge_sha)
+    drive(worker, setup.task_id)
+    assert candidates_of(setup)[0].expected_previous_sha == "d" * 40
+    setup.office.set_task(setup.task_id, status="awaiting_integration")
+    with setup.store.db.transaction() as conn:
+        conn.execute("DELETE FROM release_candidates WHERE task_id = :id", {"id": setup.task_id})
+    setup.service.version = setup.published[:7]
+    drive(worker, setup.task_id)
+    assert setup.task().status == TaskStatus.awaiting_release
+    [candidate] = candidates_of(setup)
+    assert candidate.expected_previous_sha == setup.published
+    assert not any(release.is_published for release in setup.store.list_releases())
+    with setup.store.db.connection() as conn:
+        assert setup.store.queue_state(conn)["published_sha"] == setup.published
+
+
+@pytest.mark.parametrize("case", ["unknown", "outside_main"])
+def test_initial_base_must_resolve_into_main_history(setup, case):
+    if case == "unknown":
+        setup.service.version = "0" * 7
+    else:
+        setup.origin.write("apps/chat/web/src/Side.tsx", "export {}\n")
+        git(setup.origin.work, "checkout", "-q", "-b", "side")
+        git(setup.origin.work, "add", "-A")
+        git(setup.origin.work, "commit", "-q", "-m", "side")
+        git(setup.origin.work, "push", "-q", str(setup.origin.bare), "side")
+        setup.service.version = git(setup.origin.bare, "rev-parse", "side")[:7]
+    worker = merged(setup)
+    setup.fake.add_push_runs(setup.task().merge_sha)
+    drive(worker, setup.task_id)
+    assert setup.task().status == TaskStatus.needs_attention
+    assert candidates_of(setup) == []
+
+
+def test_candidate_and_status_change_are_one_transaction(setup, monkeypatch):
+    worker = merged(setup)
+    setup.fake.add_push_runs(setup.task().merge_sha)
+    real = setup.store.transition
+
+    def broken(conn, task_id, to, **kwargs):
+        if to == TaskStatus.awaiting_release:
+            raise RuntimeError("database failure")
+        return real(conn, task_id, to, **kwargs)
+
+    monkeypatch.setattr(setup.store, "transition", broken)
+    with pytest.raises(RuntimeError):
+        drive(worker, setup.task_id)
+    assert candidates_of(setup) == []
+    assert setup.task().status == TaskStatus.awaiting_integration
+    monkeypatch.undo()
+    drive(worker, setup.task_id)
+    assert setup.task().status == TaskStatus.awaiting_release
+    assert len(candidates_of(setup)) == 1
+    assert len(setup.suite.calls) == 1

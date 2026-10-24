@@ -2,6 +2,7 @@ import type {
   CheckReport,
   Participant,
   ReleaseCandidate,
+  ReleaseQueueState,
   Task,
   TaskEvent,
 } from '@/api/types'
@@ -22,6 +23,10 @@ export const tasks = examples['Task[]'][0] as Task[]
 export const events = [...examples['TaskEvent[]'].flat(), ...examples.TaskEvent] as TaskEvent[]
 
 export const releases = examples['ReleaseCandidate[]'][0] as ReleaseCandidate[]
+
+export const blockedRelease = examples.ReleaseCandidate[0] as ReleaseCandidate
+
+export const releaseQueue = examples.ReleaseQueueState[0] as ReleaseQueueState
 
 export const checkReports: CheckReport[] = [
   examples.CheckReport[0] as CheckReport,

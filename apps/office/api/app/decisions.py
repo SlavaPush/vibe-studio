@@ -1,5 +1,6 @@
 import hashlib
 import json
+from collections.abc import Callable
 from typing import Any
 
 from pydantic import BaseModel
@@ -16,9 +17,11 @@ from app.permissions import (
 from app.schemas import (
     Decision,
     Participant,
+    ReleaseCandidate,
     ReleaseDecision,
     ReleaseDecisionRequest,
     ReleaseKind,
+    ReleaseOrigin,
     ReleaseStatus,
     TaskDecision,
     TaskDecisionRequest,
@@ -117,13 +120,29 @@ def decide_task(
         task = store.load_task(conn, task_id)
         if task is None:
             raise not_found("Задача не найдена.")
-        require_task_owner(participant, task)
+        require_task_owner(participant, task, request.decision)
         previous = replay(conn, participant.id, request.idempotency_key, TASK_OPERATION, task_id, body_hash)
         if previous is not None:
             return previous
         if task.version != request.expected_version:
             raise version_mismatch("Задача изменилась. Обновите карточку и примите решение заново.")
+        integration = task.status == TaskStatus.needs_attention and task.integration_started
         check_task_decision(task, request.decision)
+        if (
+            request.decision == TaskDecision.retry
+            and integration
+            and not task.merge_sha
+            and not store.has_review(conn, task_id, task.head_sha)
+            and store.pr_review_calls_used(conn, task_id) >= store.pr_review_calls
+        ):
+            raise not_allowed("Предел обращений агента ревью PR исчерпан. Повтор недоступен.")
+        if request.decision == TaskDecision.retry and integration and task.merge_sha:
+            released = conn.fetchone(
+                "SELECT id FROM release_candidates WHERE task_id = :id AND kind = :kind AND status <> :revoked",
+                {"id": task_id, "kind": ReleaseKind.release.value, "revoked": ReleaseStatus.revoked.value},
+            )
+            if released is not None:
+                raise not_allowed("Кандидат выпуска уже создан: выпуск продолжает администратор решением «Возобновить выпуск».")
         decision = insert_decision(
             conn,
             participant_id=participant.id,
@@ -145,11 +164,7 @@ def decide_task(
             },
         )
         target = TASK_TARGETS[request.decision]
-        if (
-            request.decision == TaskDecision.retry
-            and task.status == TaskStatus.needs_attention
-            and (task.head_sha or task.pr_number is not None or store.has_operations(conn, task_id))
-        ):
+        if request.decision == TaskDecision.retry and integration:
             target = TaskStatus.awaiting_integration
         store.transition(conn, task_id, target, expected_from=task.status)
         store.signal(conn, SIGNAL_DECISION_RECORDED, task_id)
@@ -159,7 +174,11 @@ def decide_task(
 
 
 def decide_release(
-    store: TaskStore, participant: Participant, release_id: str, request: ReleaseDecisionRequest
+    store: TaskStore,
+    participant: Participant,
+    release_id: str,
+    request: ReleaseDecisionRequest,
+    resume: Callable[[Connection, ReleaseCandidate, Decision, ReleaseDecisionRequest], None] | None = None,
 ) -> Decision:
     body_hash = request_hash(request)
     with store.db.locked_transaction() as conn:
@@ -174,20 +193,22 @@ def decide_release(
             return previous
         if candidate.version != request.expected_version:
             raise version_mismatch(
-                "Кандидат выпуска изменился. Проверьте новую версию и подтвердите заново."
+                "Кандидат выпуска изменился. Проверьте новую версию и примите решение заново."
             )
-        check_release_decision(candidate, request.decision)
+        check_release_decision(candidate, request.decision, request.fix_sha)
+        if request.decision == ReleaseDecision.resume_releases and resume is None:
+            raise not_allowed("Выпуск не настроен: исполнитель выпуска и Render не подключены.")
         if request.decision == ReleaseDecision.rollback:
             active = conn.fetchone(
                 "SELECT id FROM release_candidates WHERE kind = :kind AND commit_sha = :target "
-                "AND expected_previous_sha = :current AND status IN (:pending, :approved, :deploying)",
+                "AND expected_previous_sha = :current AND status IN (:pending, :deploying, :verifying)",
                 {
                     "kind": ReleaseKind.rollback.value,
                     "target": candidate.expected_previous_sha,
                     "current": candidate.commit_sha,
                     "pending": ReleaseStatus.pending.value,
-                    "approved": ReleaseStatus.approved.value,
                     "deploying": ReleaseStatus.deploying.value,
+                    "verifying": ReleaseStatus.verifying.value,
                 },
             )
             if active is not None:
@@ -212,17 +233,9 @@ def decide_release(
                 "participant_id": participant.id,
             },
         )
-        if request.decision == ReleaseDecision.approve_release:
-            conn.execute(
-                "UPDATE release_candidates SET status = :status, approved_by = :admin, approved_at = :now, "
-                "version = version + 1 WHERE id = :id",
-                {
-                    "status": ReleaseStatus.approved.value,
-                    "admin": participant.id,
-                    "now": to_text(utcnow()),
-                    "id": release_id,
-                },
-            )
+        store.signal(conn, SIGNAL_DECISION_RECORDED, candidate.task_id)
+        if request.decision == ReleaseDecision.resume_releases:
+            resume(conn, candidate, decision, request)
         else:
             source = conn.fetchone(
                 "SELECT spec_hash, suite_hash, ci_run_ids FROM release_candidates "
@@ -239,5 +252,7 @@ def decide_release(
                 suite_hash=source["suite_hash"] if source else candidate.suite_hash,
                 ci_run_ids=json.loads(source["ci_run_ids"]) if source else [],
                 pr_url=None,
+                origin=ReleaseOrigin.manual_rollback,
+                origin_decision_id=decision.decision_id,
             )
     return decision

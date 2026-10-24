@@ -36,6 +36,12 @@ UNMOCKED_NAME = "unmocked-api.txt"
 UNMOCKED_SHOWN = 5
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 ASSERTION = re.compile(r"^(Error: )?(expect(\.soft)?\(|Timed out \d+ms waiting for expect\()")
+INFRA = re.compile(
+    r"Executable doesn't exist|browserType\.launch|net::ERR_CONNECTION_REFUSED|ECONNREFUSED"
+    r"|exceeded (during setup|while setting up)"
+)
+MESSAGE_LIMIT = 1000
+TEST_ERROR_LIMIT = 1500
 SANDBOX_USER = "10001:10001"
 MARKER = "/deps/.office-complete"
 UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -102,7 +108,7 @@ class SandboxCancelled(Exception):
 
 @dataclass(frozen=True)
 class E2EResult:
-    status: Literal["passed", "failed", "invalid", "no_evidence"]
+    status: Literal["passed", "failed", "test_error", "invalid", "no_evidence"]
     reason: str = ""
     line: int | None = None
     message: str = ""
@@ -136,11 +142,31 @@ def _specs(suite: dict[str, Any]) -> Iterator[dict[str, Any]]:
         yield from _specs(child)
 
 
+def error_message(error: dict[str, Any]) -> str:
+    return ANSI.sub("", str(error.get("message") or "")).strip()
+
+
 def is_assertion(error: Any) -> bool:
     if not isinstance(error, dict):
         return False
-    lines = ANSI.sub("", str(error.get("message") or "")).strip().splitlines()
+    lines = error_message(error).splitlines()
     return bool(lines) and ASSERTION.match(lines[0]) is not None
+
+
+def is_infra(error: dict[str, Any]) -> bool:
+    return INFRA.search(f"{error_message(error)}\n{error.get('stack') or ''}") is not None
+
+
+def test_line(error: dict[str, Any], test_file: str) -> int | None:
+    location = error.get("location")
+    if isinstance(location, dict):
+        file = str(location.get("file") or "")
+        line = location.get("line")
+        if (file == test_file or file.endswith(f"/{test_file}")) and isinstance(line, int) and line >= 1:
+            return line
+    text = f"{error_message(error)}\n{ANSI.sub('', str(error.get('stack') or ''))}"
+    found = re.search(rf"(?:^|[\s(/]){re.escape(test_file)}:(\d+)", text, re.MULTILINE)
+    return int(found.group(1)) if found and int(found.group(1)) >= 1 else None
 
 
 def parse_playwright(report: Any, test_file: str) -> E2EResult:
@@ -158,6 +184,7 @@ def parse_playwright(report: Any, test_file: str) -> E2EResult:
     if not tests:
         return E2EResult("no_evidence", "Отчёт не содержит тестов QA.")
     failure: dict[str, Any] | None = None
+    broken: tuple[dict[str, Any], int] | None = None
     for test in tests:
         results = test.get("results") or []
         status = results[-1].get("status") if results else None
@@ -165,10 +192,29 @@ def parse_playwright(report: Any, test_file: str) -> E2EResult:
             return E2EResult("no_evidence", "Тест QA пропущен или прерван.")
         if status == "passed":
             continue
-        assertions = [error for error in results[-1].get("errors") or [] if is_assertion(error)]
-        if not assertions:
-            return E2EResult("no_evidence", "Тест QA завершился ошибкой без проверки утверждения.")
-        failure = failure or assertions[0]
+        errors = [error for error in results[-1].get("errors") or [] if isinstance(error, dict)]
+        if any(is_infra(error) for error in errors):
+            return E2EResult("no_evidence", "Тест QA не выполнен: браузер, сервер приложения или fixture не запустились.")
+        assertions = [error for error in errors if is_assertion(error)]
+        found = [
+            (error, line)
+            for error in errors
+            if not is_assertion(error) and (line := test_line(error, test_file)) is not None
+        ]
+        if assertions and not found:
+            failure = failure or assertions[0]
+            continue
+        if not found:
+            return E2EResult("no_evidence", "Тест QA завершился ошибкой без проверки утверждения вне файла теста.")
+        broken = broken or found[0]
+    if broken is not None:
+        error, line = broken
+        return E2EResult(
+            "test_error",
+            "Тест QA завершился ошибкой до проверки утверждения.",
+            line=line,
+            message=error_message(error)[:TEST_ERROR_LIMIT],
+        )
     if failure is None:
         return E2EResult("passed")
     location = failure.get("location") or {}
@@ -176,7 +222,7 @@ def parse_playwright(report: Any, test_file: str) -> E2EResult:
     return E2EResult(
         "failed",
         line=line if isinstance(line, int) and line >= 1 else None,
-        message=ANSI.sub("", str(failure.get("message") or "")).strip()[:1000],
+        message=error_message(failure)[:MESSAGE_LIMIT],
     )
 
 

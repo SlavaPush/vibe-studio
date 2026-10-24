@@ -1,17 +1,34 @@
+import { useId, useState } from 'react'
 import { decideRelease, type Run } from '@/api/client'
-import type { Participant, ReleaseCandidate, ReleaseDecision, ReleaseStatus } from '@/api/types'
+import type {
+  Participant,
+  ReleaseCandidate,
+  ReleaseDecision,
+  ReleaseQueueState,
+  ReleaseStatus,
+  VerifyResult,
+} from '@/api/types'
 import { ConfirmButton, DecisionMessage } from '@/components/office/DecisionControls'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { DECISION_LABELS, RELEASE_STATUS_LABELS, formatDateTime } from '@/lib/labels'
-import { canAct } from '@/lib/permissions'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import {
+  DECISION_LABELS,
+  RELEASE_ORIGIN_LABELS,
+  RELEASE_STATUS_LABELS,
+  formatDateTime,
+} from '@/lib/labels'
+import { RELEASE_ADMIN_ONLY, canAct } from '@/lib/permissions'
 import { newDecision, useDecision } from '@/lib/use-decision'
 
-const QUEUE_STATUSES: readonly ReleaseStatus[] = ['pending', 'approved', 'deploying']
+const QUEUE_STATUSES: readonly ReleaseStatus[] = ['pending', 'deploying', 'verifying', 'rolling_back']
+const FIX_SHA = /^[0-9a-f]{40}$/
 
 interface ReleaseQueueProps {
   releases: ReleaseCandidate[]
+  queue: ReleaseQueueState | null
   participant: Participant
   run: Run
   onRefresh: (release: ReleaseCandidate) => void
@@ -19,18 +36,30 @@ interface ReleaseQueueProps {
 
 interface ReleaseItemProps {
   release: ReleaseCandidate
-  action: ReleaseDecision
+  queue: ReleaseQueueState | null
   participant: Participant
   run: Run
   onRefresh: (release: ReleaseCandidate) => void
 }
 
-function ReleaseItem({ release, action, participant, run, onRefresh }: ReleaseItemProps) {
-  const decision = useDecision<ReleaseDecision>(
+function useReleaseDecision(release: ReleaseCandidate, run: Run, onRefresh: (release: ReleaseCandidate) => void) {
+  return useDecision<ReleaseDecision>(
     (body) => run(() => decideRelease(release.id, body)),
     () => onRefresh(release),
   )
+}
+
+function verifyText(verify: VerifyResult): string {
+  if (verify.ok) return `пройдена (попыток: ${verify.attempts})`
+  const fault = verify.fault ? 'управляемый сбой OFFICE_VERIFY_FAULT; ' : ''
+  return `не пройдена: ${fault}${verify.error ?? 'нет данных'}`
+}
+
+function ReleaseItem({ release, queue, participant, run, onRefresh }: ReleaseItemProps) {
+  const decision = useReleaseDecision(release, run, onRefresh)
+  const action: ReleaseDecision = QUEUE_STATUSES.includes(release.status) ? 'resume_releases' : 'rollback'
   const start = () => void decision.submit(newDecision(action, release.version))
+  const active = queue?.active_release_id === release.id
 
   return (
     <li className="grid gap-2 rounded-md border p-3 text-sm">
@@ -40,7 +69,11 @@ function ReleaseItem({ release, action, participant, run, onRefresh }: ReleaseIt
           {RELEASE_STATUS_LABELS[release.status]}
         </Badge>
         {release.kind === 'rollback' && <Badge variant="outline">Откат</Badge>}
+        {release.origin !== 'task' && release.kind === 'release' && (
+          <Badge variant="outline">{RELEASE_ORIGIN_LABELS[release.origin]}</Badge>
+        )}
         {release.is_published && <Badge variant="outline">Опубликован сейчас</Badge>}
+        {active && <Badge variant="outline">Выполняется</Badge>}
         <span className="text-muted-foreground">Задача {release.task_id}</span>
       </div>
       <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
@@ -49,11 +82,17 @@ function ReleaseItem({ release, action, participant, run, onRefresh }: ReleaseIt
         <dt className="text-muted-foreground">Предыдущая версия</dt>
         <dd className="font-mono break-all">{release.expected_previous_sha}</dd>
         <dt className="text-muted-foreground">Проверки CI</dt>
-        <dd className="font-mono">{release.ci_run_ids.join(', ')}</dd>
+        <dd className="font-mono">{release.ci_run_ids.join(', ') || 'нет'}</dd>
         <dt className="text-muted-foreground">Создан</dt>
         <dd>
           <time dateTime={release.created_at}>{formatDateTime(release.created_at)}</time>
         </dd>
+        {release.superseded_by && (
+          <>
+            <dt className="text-muted-foreground">В составе</dt>
+            <dd className="font-mono">{release.superseded_by}</dd>
+          </>
+        )}
         {release.deploy && (
           <>
             <dt className="text-muted-foreground">Деплой Render</dt>
@@ -73,22 +112,43 @@ function ReleaseItem({ release, action, participant, run, onRefresh }: ReleaseIt
             </dd>
           </>
         )}
+        {release.verify && (
+          <>
+            <dt className="text-muted-foreground">Проверка после деплоя</dt>
+            <dd className={release.verify.ok ? undefined : 'text-destructive'}>{verifyText(release.verify)}</dd>
+          </>
+        )}
+        {release.rollback && (
+          <>
+            <dt className="text-muted-foreground">Откат</dt>
+            <dd>
+              {'к '}
+              <span className="font-mono">{release.rollback.target_sha.slice(0, 7)}</span>
+              {`, Render: ${release.rollback.render_status ?? 'запрос'}`}
+              {release.rollback.verify && `, проверка ${verifyText(release.rollback.verify)}`}
+            </dd>
+          </>
+        )}
+        {release.blocked_reason && (
+          <>
+            <dt className="text-muted-foreground">Причина остановки</dt>
+            <dd className="text-destructive">{release.blocked_reason}</dd>
+          </>
+        )}
       </dl>
-      {canAct(participant, release, action).allowed && (
+      {canAct(participant, release, action, queue).allowed && (
         <div>
-          {action === 'rollback' ? (
-            <ConfirmButton
-              label={DECISION_LABELS[action]}
-              title={`Откатить выпуск ${release.id}?`}
-              description={`В очередь встанет кандидат отката на версию ${release.expected_previous_sha}.`}
-              disabled={decision.pending}
-              onConfirm={start}
-            />
-          ) : (
-            <Button type="button" disabled={decision.pending} onClick={start}>
-              {DECISION_LABELS[action]}
-            </Button>
-          )}
+          <ConfirmButton
+            label={DECISION_LABELS[action]}
+            title={action === 'rollback' ? `Откатить выпуск ${release.id}?` : `Возобновить выпуск ${release.id}?`}
+            description={
+              action === 'rollback'
+                ? `В очередь встанет кандидат отката на версию ${release.expected_previous_sha}.`
+                : 'Офис сверит Render и опубликованную версию и освободит очередь. Если деплой ещё идёт, решение будет отклонено.'
+            }
+            disabled={decision.pending}
+            onConfirm={start}
+          />
         </div>
       )}
       <DecisionMessage
@@ -100,15 +160,104 @@ function ReleaseItem({ release, action, participant, run, onRefresh }: ReleaseIt
   )
 }
 
-export function ReleaseQueue({ releases, participant, run, onRefresh }: ReleaseQueueProps) {
-  const queue = releases.filter((release) => QUEUE_STATUSES.includes(release.status))
+interface BlockedProps {
+  blocked: ReleaseCandidate | undefined
+  queue: ReleaseQueueState
+  participant: Participant
+  run: Run
+  onRefresh: (release: ReleaseCandidate) => void
+}
+
+function ResumeForm({ release, run, onRefresh }: { release: ReleaseCandidate; run: Run; onRefresh: BlockedProps['onRefresh'] }) {
+  const id = useId()
+  const [fixSha, setFixSha] = useState('')
+  const decision = useReleaseDecision(release, run, onRefresh)
+  const valid = FIX_SHA.test(fixSha)
+  return (
+    <form
+      className="grid gap-2"
+      onSubmit={(event) => {
+        event.preventDefault()
+        if (valid) void decision.submit({ ...newDecision('resume_releases', release.version), fix_sha: fixSha })
+      }}
+    >
+      <Label htmlFor={id}>Исправляющий commit в main (fix_sha, 40 символов)</Label>
+      <div className="flex flex-wrap gap-2">
+        <Input
+          id={id}
+          className="max-w-md font-mono"
+          value={fixSha}
+          onChange={(event) => setFixSha(event.target.value.trim().toLowerCase())}
+          aria-invalid={fixSha !== '' && !valid}
+        />
+        <Button type="submit" disabled={!valid || decision.pending}>
+          {DECISION_LABELS.resume_releases}
+        </Button>
+      </div>
+      <DecisionMessage
+        notice={decision.notice}
+        pending={decision.pending}
+        onRetry={(body) => void decision.submit(body)}
+      />
+    </form>
+  )
+}
+
+function BlockedNotice({ blocked, queue, participant, run, onRefresh }: BlockedProps) {
+  const revert = blocked?.revert
+  return (
+    <section aria-labelledby="release-blocked-heading" className="grid gap-2 rounded-md border border-destructive p-3 text-sm">
+      <h3 id="release-blocked-heading" className="font-medium text-destructive">
+        Выпуск заблокирован после отката {queue.release_blocked_by}
+      </h3>
+      <p>{queue.blocked_reason}</p>
+      <p className="text-muted-foreground">
+        До публикации исправления деплоятся только откаты и кандидаты, содержащие исправление.
+      </p>
+      {revert && (
+        <p>
+          {revert.source === 'auto' ? 'Revert-PR' : 'Исправление владельца'}
+          {revert.pr_url && (
+            <>
+              {': '}
+              <a className="underline" href={revert.pr_url} target="_blank" rel="noreferrer">
+                PR #{revert.pr_number}
+              </a>
+            </>
+          )}
+          {revert.fix_sha && (
+            <>
+              {', commit '}
+              <span className="font-mono">{revert.fix_sha.slice(0, 7)}</span>
+            </>
+          )}
+          {`, состояние: ${REVERT_LABELS[revert.status]}`}
+          {revert.reason && <span className="text-destructive">. {revert.reason}</span>}
+        </p>
+      )}
+      {blocked && canAct(participant, blocked, 'resume_releases', queue).allowed && (
+        <ResumeForm release={blocked} run={run} onRefresh={onRefresh} />
+      )}
+    </section>
+  )
+}
+
+const REVERT_LABELS: Record<NonNullable<ReleaseCandidate['revert']>['status'], string> = {
+  pending: 'ждёт начала',
+  active: 'выполняется',
+  needs_attention: 'требует внимания',
+  merged: 'кандидат исправления создан',
+}
+
+export function ReleaseQueue({ releases, queue, participant, run, onRefresh }: ReleaseQueueProps) {
+  const pending = releases.filter((release) => QUEUE_STATUSES.includes(release.status))
   const history = releases.filter((release) => !QUEUE_STATUSES.includes(release.status))
   const isAdmin = participant.role === 'admin'
-  const item = (release: ReleaseCandidate, action: ReleaseDecision) => (
+  const item = (release: ReleaseCandidate) => (
     <ReleaseItem
       key={release.id}
       release={release}
-      action={action}
+      queue={queue}
       participant={participant}
       run={run}
       onRefresh={onRefresh}
@@ -123,19 +272,35 @@ export function ReleaseQueue({ releases, participant, run, onRefresh }: ReleaseQ
         </CardTitle>
       </CardHeader>
       <CardContent className="grid gap-4">
-        {!isAdmin && (
-          <p className="text-sm text-muted-foreground">
-            Подтверждение выпуска и откат доступны только администратору.
+        {queue && !queue.configured && (
+          <p role="status" className="text-sm text-destructive">
+            Выпуск не настроен: RENDER_API_KEY и RENDER_SERVICE_ID не заданы. Кандидаты ждут в очереди.
+          </p>
+        )}
+        {!isAdmin && <p className="text-sm text-muted-foreground">{RELEASE_ADMIN_ONLY}</p>}
+        {queue?.release_blocked_by && (
+          <BlockedNotice
+            blocked={releases.find((release) => release.id === queue.release_blocked_by)}
+            queue={queue}
+            participant={participant}
+            run={run}
+            onRefresh={onRefresh}
+          />
+        )}
+        {queue?.published_sha && (
+          <p className="text-sm">
+            {'Опубликована версия вне офиса: '}
+            <span className="font-mono">{queue.published_sha}</span>
           </p>
         )}
         <section aria-labelledby="release-queue-heading" className="grid gap-2">
           <h3 id="release-queue-heading" className="font-medium">
             Очередь выпуска
           </h3>
-          {queue.length === 0 ? (
+          {pending.length === 0 ? (
             <p className="text-sm text-muted-foreground">Очередь пуста.</p>
           ) : (
-            <ul className="grid gap-2">{queue.map((release) => item(release, 'approve_release'))}</ul>
+            <ul className="grid gap-2">{pending.map(item)}</ul>
           )}
         </section>
         <section aria-labelledby="release-history-heading" className="grid gap-2">
@@ -145,7 +310,7 @@ export function ReleaseQueue({ releases, participant, run, onRefresh }: ReleaseQ
           {history.length === 0 ? (
             <p className="text-sm text-muted-foreground">Выпусков ещё не было.</p>
           ) : (
-            <ul className="grid gap-2">{history.map((release) => item(release, 'rollback'))}</ul>
+            <ul className="grid gap-2">{history.map(item)}</ul>
           )}
         </section>
       </CardContent>

@@ -9,7 +9,7 @@ import tempfile
 import threading
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from enum import StrEnum
 from pathlib import Path
 
@@ -365,13 +365,46 @@ class Workspace:
         self.store.record_commit(task_id, sha, changed, role)
         return sha
 
-    def verify_branch(self, task_id: str) -> list[str]:
-        task = self.store.get_task(task_id)
-        if not task.base_sha:
+    def verify_branch(self, task_id: str, base_sha: str | None = None) -> list[str]:
+        base = base_sha or self.store.get_task(task_id).base_sha
+        if not base:
             raise WorkspaceError("base_sha задачи не записан.")
         with self.lock:
             path = self.task_worktree(task_id)
-            return check_range(self.paths, path, task.base_sha, "HEAD")
+            return check_range(self.paths, path, base, "HEAD")
+
+    def first_parent(self, base: str, head: str) -> list[str]:
+        with self.lock:
+            self._ensure_clone()
+            self.git("fetch", "--quiet", "origin", "main", timeout=NETWORK_TIMEOUT)
+            output = self.git("rev-list", "--first-parent", "--parents", f"{base}..{head}")
+        return [line.split() for line in output.splitlines() if line]
+
+    def revert_branch(self, tree: str, commits: list[list[str]]) -> tuple[str, str]:
+        path = self.worktree_path(tree)
+        branch = branch_name(tree)
+        with self.lock:
+            self._ensure_clone()
+            if os.path.lexists(path):
+                self.git("worktree", "remove", "--force", str(path))
+            self.git("worktree", "prune")
+            self.git("fetch", "--quiet", "origin", timeout=NETWORK_TIMEOUT)
+            base = self.git("rev-parse", "--verify", "refs/remotes/origin/main^{commit}")
+            self.trees.mkdir(parents=True, exist_ok=True)
+            self.git("worktree", "add", "--quiet", "-B", branch, str(path), base)
+            for sha, *parents in commits:
+                mainline = ["-m", "1"] if len(parents) > 1 else []
+                try:
+                    self.git("revert", "--no-edit", *mainline, sha, cwd=path, env=COMMIT_ENV)
+                except WorkspaceError as error:
+                    with suppress(WorkspaceError):
+                        self.git("revert", "--abort", cwd=path, env=COMMIT_ENV)
+                    raise WorkspaceError(f"git revert {sha[:7]} не выполнен: конфликт с более поздними изменениями main.") from error
+            return base, self.git("rev-parse", "HEAD", cwd=path)
+
+    def changed_names(self, tree: str, base: str, head: str) -> list[str]:
+        output = run_git("diff", "--name-only", "-z", base, head, cwd=self.task_worktree(tree))
+        return [name for name in output.decode("utf-8").split("\0") if name]
 
     def head(self, task_id: str) -> str:
         return self.git("rev-parse", "HEAD", cwd=self.task_worktree(task_id))
@@ -465,9 +498,12 @@ class Workspace:
                     shutil.rmtree(holder, ignore_errors=True)
                     self.git("worktree", "prune")
 
-    def export_qa(self, sha: str, destination: Path) -> list[str]:
+    def qa_files(self, sha: str) -> list[str]:
         listed = run_git("ls-tree", "-r", "--name-only", "-z", sha, "--", QA_DIR, cwd=self.clone)
-        files = [name for name in listed.decode("utf-8").split("\0") if name]
+        return [name for name in listed.decode("utf-8").split("\0") if name]
+
+    def export_qa(self, sha: str, destination: Path) -> list[str]:
+        files = self.qa_files(sha)
         if not files:
             return []
         archive = run_git("archive", "--format=tar", sha, "--", QA_DIR, cwd=self.clone)

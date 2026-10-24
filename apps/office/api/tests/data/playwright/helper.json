@@ -1,0 +1,174 @@
+{
+  "config": {
+    "argv": [
+      "/usr/bin/node",
+      "/usr/bin/playwright",
+      "test",
+      "--config",
+      "/cfg/playwright.config.ts",
+      "helper.pw.ts"
+    ],
+    "configFile": "/cfg/playwright.config.ts",
+    "rootDir": "/qa",
+    "failOnFlakyTests": false,
+    "forbidOnly": true,
+    "fullyParallel": false,
+    "globalSetup": null,
+    "globalTeardown": null,
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {
+      "actualWorkers": 1
+    },
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "/tmp/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "",
+        "name": "",
+        "testDir": "/qa",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.pw.ts"
+        ],
+        "timeout": 5000
+      }
+    ],
+    "filteredProjects": [
+      {
+        "grep": {},
+        "grepInvert": null,
+        "outputDir": "/tmp/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "name": "",
+        "testDir": "/qa",
+        "snapshotDir": "/qa",
+        "testIgnore": [],
+        "testMatch": "**/*.pw.ts",
+        "timeout": 5000,
+        "use": {},
+        "dependencies": [],
+        "ignoreSnapshots": false,
+        "__projectId": ""
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "line",
+        null
+      ],
+      [
+        "json",
+        {
+          "outputFile": "/data/helper.json"
+        }
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "default",
+    "updateSourceMethod": "patch",
+    "version": "1.64.1",
+    "workers": 1,
+    "webServer": null
+  },
+  "suites": [
+    {
+      "title": "apps/chat/web/e2e/office/helper.pw.ts",
+      "file": "apps/chat/web/e2e/office/helper.pw.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "ошибка во вспомогательном модуле",
+          "ok": false,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 5000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "failed",
+                  "duration": 56,
+                  "error": {
+                    "message": "Error: В подмене нет диалогов",
+                    "stack": "Error: В подмене нет диалогов\n    at conversationTitle (/qa/apps/chat/web/e2e/office/support/helper.ts:3:21)\n    at /qa/apps/chat/web/e2e/office/helper.pw.ts:6:34",
+                    "location": {
+                      "file": "/qa/apps/chat/web/e2e/office/support/helper.ts",
+                      "column": 21,
+                      "line": 3
+                    },
+                    "snippet": "   at apps/chat/web/e2e/office/support/helper.ts:3\n\n\u001b[0m \u001b[90m 1 |\u001b[39m \u001b[36mexport\u001b[39m \u001b[36mfunction\u001b[39m conversationTitle(items\u001b[33m:\u001b[39m { title\u001b[33m:\u001b[39m string }[])\u001b[33m:\u001b[39m string {\n \u001b[90m 2 |\u001b[39m   \u001b[36mconst\u001b[39m first \u001b[33m=\u001b[39m items[\u001b[35m0\u001b[39m]\u001b[33m;\u001b[39m\n\u001b[31m\u001b[1m>\u001b[22m\u001b[39m\u001b[90m 3 |\u001b[39m   \u001b[36mif\u001b[39m (\u001b[33m!\u001b[39mfirst) \u001b[36mthrow\u001b[39m \u001b[36mnew\u001b[39m \u001b[33mError\u001b[39m(\u001b[32m\"В подмене нет диалогов\"\u001b[39m)\u001b[33m;\u001b[39m\n \u001b[90m   |\u001b[39m                     \u001b[31m\u001b[1m^\u001b[22m\u001b[39m\n \u001b[90m 4 |\u001b[39m   \u001b[36mreturn\u001b[39m first\u001b[33m.\u001b[39mtitle\u001b[33m;\u001b[39m\n \u001b[90m 5 |\u001b[39m }\n \u001b[90m 6 |\u001b[39m\u001b[0m"
+                  },
+                  "errors": [
+                    {
+                      "location": {
+                        "file": "/qa/apps/chat/web/e2e/office/support/helper.ts",
+                        "column": 21,
+                        "line": 3
+                      },
+                      "message": "Error: В подмене нет диалогов\n\n   at apps/chat/web/e2e/office/support/helper.ts:3\n\n  1 | export function conversationTitle(items: { title: string }[]): string {\n  2 |   const first = items[0];\n> 3 |   if (!first) throw new Error(\"В подмене нет диалогов\");\n    |                     ^\n  4 |   return first.title;\n  5 | }\n  6 |\n    at conversationTitle (/qa/apps/chat/web/e2e/office/support/helper.ts:3:21)\n    at /qa/apps/chat/web/e2e/office/helper.pw.ts:6:34"
+                    }
+                  ],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T12:24:16.600Z",
+                  "annotations": [],
+                  "attachments": [
+                    {
+                      "name": "error-context",
+                      "contentType": "text/markdown",
+                      "path": "/tmp/test-results/apps-chat-web-e2e-office-h-ed9a3-а-во-вспомогательном-модуле/error-context.md"
+                    }
+                  ],
+                  "errorLocation": {
+                    "file": "/qa/apps/chat/web/e2e/office/support/helper.ts",
+                    "column": 21,
+                    "line": 3
+                  }
+                }
+              ],
+              "status": "unexpected"
+            }
+          ],
+          "id": "77705269aad4019ffabc-cfb657acd9c0b7c62107",
+          "file": "apps/chat/web/e2e/office/helper.pw.ts",
+          "line": 4,
+          "column": 5
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-10-24T12:24:16.317Z",
+    "duration": 488.96100000000007,
+    "expected": 0,
+    "skipped": 0,
+    "unexpected": 1,
+    "flaky": 0
+  }
+}

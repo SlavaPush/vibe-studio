@@ -1,18 +1,55 @@
+import json
 import logging
 import threading
 from collections.abc import Callable
+from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
+import httpx
+from pydantic import BaseModel
+
 from app.branch_check import WorkspaceError
 from app.config import Settings
-from app.db import from_text, to_text, utcnow
+from app.db import Connection, from_text, to_text, utcnow
 from app.github import ACTIONS_APP_ID, GitHubClient, GitHubError, GitHubUnavailable
+from app.models_gateway import InvalidModelResponse, ModelsGateway, ProviderError
 from app.operations import Operation, OperationLog, OpStatus
+from app.release_queue import QueueBusy, ReleaseQueue
+from app.render import RenderClient, RenderError, RenderUnavailable
 from app.required_checks import RequiredCheck
-from app.schemas import AgentRole, FailureKind, PullRequestCheck, PullRequestChecks, Task, TaskEventType, TaskStatus
-from app.tasks import SIGNAL_DECISION_RECORDED, SIGNAL_SLOT_RELEASED, SIGNAL_TASK_CLOSED, TaskStore, _json
-from app.workspace import PushResult, Workspace, branch_name
+from app.roles import CHECKLIST, PR_REVIEWER, ContextTooLarge, Entry, PrReview, assemble
+from app.sandbox import SUITE, CommandsPolicy, SandboxCancelled, SandboxError
+from app.schemas import (
+    AgentRole,
+    CheckReport,
+    Decision,
+    FailureKind,
+    Participant,
+    PullRequestCheck,
+    PullRequestChecks,
+    PullRequestReview,
+    ReleaseCandidate,
+    ReleaseDecisionRequest,
+    ReleaseKind,
+    ReleaseOrigin,
+    ReleaseStatus,
+    Task,
+    TaskEventType,
+    TaskStatus,
+)
+from app.service_check import SERVICE_TIMEOUT, BaseUnavailable, ServiceCheck
+from app.tasks import (
+    SIGNAL_DECISION_RECORDED,
+    SIGNAL_SLOT_RELEASED,
+    SIGNAL_TASK_CLOSED,
+    BudgetExceeded,
+    TaskStore,
+    _json,
+    new_id,
+)
+from app.workspace import NETWORK_TIMEOUT, PushResult, Workspace, branch_name
 
 logger = logging.getLogger("office.release")
 
@@ -20,20 +57,62 @@ S = TaskStatus
 PUSH = "push"
 CREATE_PR = "create_pr"
 CLOSE_PR = "close_pr"
+PR_REVIEW = "pr_review"
+MERGE_PR = "merge_pr"
+REVERT = "revert"
+INTEGRATION_OPS = frozenset({PUSH, CREATE_PR, CLOSE_PR, PR_REVIEW, MERGE_PR})
 MAX_ATTEMPTS = 3
 STEPS_PER_PASS = 8
 SHUTDOWN_TIMEOUT = 30.0
+REVIEW_DIFF_LIMIT = 200 * 1024
 INTEGRATING = frozenset({S.awaiting_integration})
 CANDIDATES = (
     "SELECT id, created_at FROM tasks WHERE status = 'awaiting_integration' "
     "UNION SELECT t.id, t.created_at FROM tasks t WHERE t.status = 'cancelled' "
     "AND NOT EXISTS (SELECT 1 FROM task_events e WHERE e.task_id = t.id AND e.type = 'operation_unknown') "
-    "AND ((t.pr_number IS NOT NULL AND NOT EXISTS (SELECT 1 FROM operations o WHERE o.task_id = t.id "
-    "AND o.kind = 'close_pr' AND o.status = 'succeeded')) "
-    "OR EXISTS (SELECT 1 FROM operations o WHERE o.task_id = t.id AND o.kind IN ('create_pr', 'close_pr') "
-    "AND o.status IN ('started', 'unknown'))) "
+    "AND ((t.pr_number IS NOT NULL AND t.merge_sha IS NULL AND NOT EXISTS (SELECT 1 FROM operations o "
+    "WHERE o.task_id = t.id AND o.kind = 'close_pr' AND o.status = 'succeeded')) "
+    "OR EXISTS (SELECT 1 FROM operations o WHERE o.task_id = t.id AND o.release_id IS NULL "
+    "AND o.kind IN ('create_pr', 'close_pr', 'merge_pr') AND o.status IN ('started', 'unknown'))) "
     "ORDER BY created_at, id"
 )
+
+
+@dataclass(frozen=True)
+class Carrier:
+    id: str
+    task_id: str
+    tree: str
+    title: str
+    base_sha: str | None
+    head_sha: str | None
+    pr_number: int | None
+    pr_url: str | None
+    merge_sha: str | None
+    checks: PullRequestChecks | None
+    release_id: str | None = None
+
+    @property
+    def branch(self) -> str:
+        return branch_name(self.tree)
+
+
+def task_carrier(task: Task) -> Carrier:
+    return Carrier(
+        id=task.id, task_id=task.id, tree=task.id, title=task.title, base_sha=task.base_sha,
+        head_sha=task.head_sha, pr_number=task.pr_number, pr_url=task.pr_url, merge_sha=task.merge_sha,
+        checks=task.checks,
+    )
+
+
+def revert_carrier(release: ReleaseCandidate, task: Task) -> Carrier:
+    revert = release.revert
+    return Carrier(
+        id=f"{REVERT}:{release.id}", task_id=release.task_id, tree=f"revert-{release.id}",
+        title=f"Revert: {task.title}"[:120], base_sha=revert.base_sha, head_sha=revert.head_sha,
+        pr_number=revert.pr_number, pr_url=revert.pr_url, merge_sha=revert.fix_sha, checks=revert.checks,
+        release_id=release.id,
+    )
 
 
 class ReleaseWorker:
@@ -45,6 +124,11 @@ class ReleaseWorker:
         github: GitHubClient,
         required: list[RequiredCheck],
         clock: Callable[[], datetime] = utcnow,
+        *,
+        gateway: ModelsGateway,
+        suite: Any,
+        service: httpx.Client | None = None,
+        render: RenderClient | None = None,
     ) -> None:
         self.settings = settings
         self.store = store
@@ -52,11 +136,19 @@ class ReleaseWorker:
         self.github = github
         self.required = required
         self.clock = clock
+        self.gateway = gateway
+        self.suite = suite
+        self.service = service or httpx.Client(timeout=SERVICE_TIMEOUT)
+        self.commands = CommandsPolicy(settings.commands_policy)
         self.ops = OperationLog(store.db)
         self._wake = threading.Condition()
         self._pending = False
         self._stopping = False
         self._thread: threading.Thread | None = None
+        self.queue = ReleaseQueue(
+            settings, store, github, render, ServiceCheck(self.service, settings.service_url), clock, self.ops,
+            self._pause,
+        )
         store.signal_handlers.append(self.on_signal)
 
     def on_signal(self, name: str, task_id: str) -> None:
@@ -67,6 +159,11 @@ class ReleaseWorker:
         with self._wake:
             self._pending = True
             self._wake.notify_all()
+
+    def _pause(self, seconds: float) -> bool:
+        with self._wake:
+            self._wake.wait_for(lambda: self._stopping, seconds)
+            return not self._stopping
 
     def start(self) -> None:
         with self._wake:
@@ -105,210 +202,766 @@ class ReleaseWorker:
 
     def run_once(self) -> None:
         for task_id in self.candidates():
-            for _ in range(STEPS_PER_PASS):
-                if self._stopping:
+            self._drive(lambda: self.step(task_id), task_id)
+        self._drive(self.revert_step, "revert")
+        self._drive(self.queue.step, "queue")
+
+    def _drive(self, step: Callable[[], bool], name: str) -> None:
+        for _ in range(STEPS_PER_PASS):
+            if self._stopping:
+                return
+            try:
+                if not step():
                     return
-                try:
-                    if not self.step(task_id):
-                        break
-                except (GitHubError, GitHubUnavailable) as error:
-                    logger.warning("release step of %s stopped: %s", task_id, error)
-                    break
-                except Exception:
-                    logger.exception("release step failed: %s", task_id)
-                    break
+            except (GitHubError, GitHubUnavailable, RenderError, RenderUnavailable) as error:
+                logger.warning("release step of %s stopped: %s", name, error)
+                return
+            except Exception:
+                logger.exception("release step failed: %s", name)
+                return
+
+    def decide(self, participant: Participant, release_id: str, request: ReleaseDecisionRequest) -> Decision:
+        return self.queue.decide(participant, release_id, request)
 
     def step(self, task_id: str) -> bool:
         task = self.store.get_task(task_id)
         if task.status not in (S.awaiting_integration, S.cancelled):
             return False
+        c = task_carrier(task)
         pending = self.ops.open_for(task_id)
         if task.status == S.cancelled:
-            pending = [operation for operation in pending if operation.kind != PUSH]
+            pending = [operation for operation in pending if operation.kind not in (PUSH, PR_REVIEW)]
         if pending:
-            return self._reconcile(task, pending[0])
+            return self._reconcile(c, pending[0])
         if task.status == S.cancelled:
             closed = self.ops.find(f"{CLOSE_PR}:{task_id}")
-            if task.pr_number is None or (closed is not None and closed.status == OpStatus.succeeded):
+            if task.merge_sha or task.pr_number is None or (closed is not None and closed.status == OpStatus.succeeded):
                 return False
-            return self._close(task)
-        return self._integrate(task)
+            return self._close(c)
+        return self._integrate(c)
+
+    def revert_step(self) -> bool:
+        with self.store.db.connection() as conn:
+            blocked = self.store.queue_state(conn)["release_blocked_by"]
+            release = self.store.load_candidate(conn, blocked) if blocked else None
+        if release is None or release.revert is None or release.revert.status not in ("pending", "active"):
+            return False
+        c = revert_carrier(release, self.store.get_task(release.task_id))
+        if release.revert.status == "pending":
+            return self._start_revert(c, release)
+        pending = [op for op in self.ops.open_for(c.task_id, c.release_id) if op.kind in INTEGRATION_OPS]
+        if pending and release.revert.source == "auto":
+            return self._reconcile(c, pending[0])
+        return self._integrate(c)
+
+    def _start_revert(self, c: Carrier, release: ReleaseCandidate) -> bool:
+        if release.revert.source == "resume":
+            fix = release.revert.fix_sha
+            try:
+                in_main = self.github.compare(fix, "main")
+                after = self.github.compare(release.commit_sha, fix)
+            except GitHubError as error:
+                if error.status in (404, 422):
+                    return self._halt(c, f"Исправляющий commit {fix[:7]} не найден в репозитории.", step=REVERT)
+                logger.warning("fix commit of %s is not checked: %s", release.id, error)
+                return False
+            except GitHubUnavailable as error:
+                logger.warning("fix commit of %s is not checked: %s", release.id, error)
+                return False
+            if in_main.get("status") not in ("ahead", "identical") or in_main.get("behind_by") != 0:
+                return self._halt(c, f"Исправляющий commit {fix[:7]} не входит в историю main.", step=REVERT)
+            if after.get("status") != "ahead":
+                return self._halt(
+                    c, f"Исправляющий commit {fix[:7]} не является потомком откатанного {release.commit_sha[:7]}.",
+                    step=REVERT,
+                )
+            with self.store.db.locked_transaction() as conn:
+                self._save_in(conn, c, status="active")
+                self._event(
+                    conn, c, TaskEventType.role_finished,
+                    {"step": REVERT, "outcome": "ok", "summary": f"Исправляющий commit {fix[:7]} принят: проверяется итоговый commit."},
+                )
+            return True
+        key = f"{REVERT}:{release.id}"
+        found = self.ops.find(key)
+        if found is not None and found.status == OpStatus.started:
+            self.ops.mark(found, OpStatus.failed, detail="restart")
+        operation, allowed = self.ops.begin(REVERT, key, c.task_id, release.id)
+        if not allowed:
+            return False
+        try:
+            commits = self.workspace.first_parent(release.expected_previous_sha, release.commit_sha)
+            base, head = self.workspace.revert_branch(c.tree, commits)
+        except WorkspaceError as error:
+            with self.store.db.locked_transaction() as conn:
+                self.ops.finish(conn, operation, OpStatus.failed, detail=str(error)[:300])
+                self._halt_in(conn, c, f"Revert откатанного выпуска не создан: {error}", step=REVERT)
+            return False
+        with self.store.db.locked_transaction() as conn:
+            self.ops.finish(conn, operation, OpStatus.succeeded, external_ref=head)
+            self._save_in(conn, c, status="active", base_sha=base)
+            self._event(
+                conn, c, TaskEventType.tool_called,
+                {"arguments": f"{c.branch} {' '.join(sha[:7] for sha, *_ in commits)}", "result": "ok"},
+                tool="git_revert",
+            )
+        return True
 
     def _status(self, task_id: str) -> TaskStatus:
         return self.store.get_task(task_id).status
 
-    def _halt(self, task: Task, reason: str) -> bool:
-        self.store.halt(task.id, S.needs_attention, statuses=INTEGRATING, role=None, step="release", reason=reason)
+    def _active(self, c: Carrier) -> bool:
+        with self.store.db.connection() as conn:
+            return self._active_in(conn, c)
+
+    def _active_in(self, conn: Connection, c: Carrier) -> bool:
+        if c.release_id is None:
+            return self.store.load_task(conn, c.task_id).status == S.awaiting_integration
+        release = self.store.load_candidate(conn, c.release_id)
+        return (
+            self.store.queue_state(conn)["release_blocked_by"] == c.release_id
+            and release.revert is not None
+            and release.revert.status == "active"
+        )
+
+    def _carrier_in(self, conn: Connection, c: Carrier) -> Carrier:
+        task = self.store.load_task(conn, c.task_id)
+        if c.release_id is None:
+            return task_carrier(task)
+        return revert_carrier(self.store.load_candidate(conn, c.release_id), task)
+
+    def _reload(self, c: Carrier) -> Carrier:
+        with self.store.db.connection() as conn:
+            return self._carrier_in(conn, c)
+
+    def _save_in(self, conn: Connection, c: Carrier, **fields: Any) -> None:
+        if c.release_id is not None:
+            release = self.store.load_candidate(conn, c.release_id)
+            update = {("fix_sha" if name == "merge_sha" else name): value for name, value in fields.items()}
+            self.store.update_candidate(conn, c.release_id, revert=release.revert.model_copy(update=update))
+            return
+        values = {name: _json(value.model_dump()) if isinstance(value, BaseModel) else value for name, value in fields.items()}
+        assignments = "".join(f"{name} = :{name}, " for name in values)
+        conn.execute(
+            f"UPDATE tasks SET {assignments}version = version + 1, updated_at = :now WHERE id = :id",
+            values | {"now": to_text(utcnow()), "id": c.task_id},
+        )
+
+    def _event(self, conn: Connection, c: Carrier, event_type: TaskEventType, payload: dict[str, Any], **kwargs: Any) -> None:
+        if c.release_id is not None:
+            payload = payload | {"revert_of": c.release_id}
+        self.store.record_event(conn, c.task_id, event_type, payload, **kwargs)
+
+    def _halt_in(
+        self, conn: Connection, c: Carrier, reason: str, *, step: str = "release", role: AgentRole | None = None,
+        failure_kind: FailureKind | None = None,
+    ) -> None:
+        if c.release_id is None:
+            self.store.halt_in(
+                conn, c.task_id, S.failed if failure_kind else S.needs_attention, statuses=INTEGRATING, role=role,
+                step=step, reason=reason, failure_kind=failure_kind,
+            )
+            return
+        release = self.store.load_candidate(conn, c.release_id)
+        if release.revert is None or release.revert.status not in ("pending", "active"):
+            return
+        self._save_in(conn, c, status="needs_attention", reason=reason)
+        self._event(
+            conn, c, TaskEventType.role_finished,
+            {"step": step, "outcome": "blocked", "summary": f"Исправление после отката остановлено: {reason}"[:300]},
+            role=role,
+        )
+
+    def _halt(
+        self, c: Carrier, reason: str, *, step: str = "release", role: AgentRole | None = None,
+        failure_kind: FailureKind | None = None,
+    ) -> bool:
+        with self.store.db.locked_transaction() as conn:
+            self._halt_in(conn, c, reason, step=step, role=role, failure_kind=failure_kind)
         return False
 
-    def _integrate(self, task: Task) -> bool:
+    def _integrate(self, c: Carrier) -> bool:
+        if c.merge_sha:
+            return self._finish(c)
         try:
-            head = self.workspace.head(task.id)
+            head = self.workspace.head(c.tree)
         except WorkspaceError as error:
-            return self._halt(task, f"Рабочая копия задачи недоступна: {error}")
-        if task.head_sha != head:
-            return self._push(task, head)
-        if task.pr_number is None:
-            return self._open_pr(task)
-        return self._check(task)
+            return self._halt(c, f"Рабочая копия задачи недоступна: {error}")
+        if c.head_sha != head:
+            return self._push(c, head)
+        if c.pr_number is None:
+            return self._open_pr(c)
+        return self._check(c)
 
-    def _push(self, task: Task, head: str) -> bool:
+    def _push(self, c: Carrier, head: str) -> bool:
         try:
-            found = self.workspace.verify_branch(task.id)
+            found = self.workspace.verify_branch(c.tree, c.base_sha)
         except WorkspaceError as error:
             found = [str(error)]
         if found:
-            return self._halt(task, f"Повторная проверка ветки перед push не пройдена: {'; '.join(found)}")
+            return self._halt(c, f"Повторная проверка ветки перед push не пройдена: {'; '.join(found)}")
         token = self.github.auth.token()
-        if self._status(task.id) != S.awaiting_integration:
+        if not self._active(c):
             return False
-        operation, allowed = self.ops.begin(PUSH, f"{PUSH}:{task.id}:{head}", task.id)
+        operation, allowed = self.ops.begin(PUSH, f"{PUSH}:{c.id}:{head}", c.task_id, c.release_id)
         if not allowed:
             if operation.status == OpStatus.succeeded:
-                self._apply_push(operation, task.id, head)
+                self._apply_push(operation, c, head)
                 return True
             return False
-        result = self.workspace.push(task.id, self.settings.push_url, token, head)
+        result = self.workspace.push(c.tree, self.settings.push_url, token, head)
         if result == PushResult.ok:
-            self._apply_push(operation, task.id, head)
+            self._apply_push(operation, c, head)
             return True
         if result == PushResult.rejected:
             with self.store.db.locked_transaction() as conn:
                 self.ops.finish(conn, operation, OpStatus.failed, detail="rejected")
-                self.store.halt_in(
-                    conn, task.id, S.needs_attention, statuses=INTEGRATING, role=None, step="git_push",
-                    reason=f"GitHub отклонил push ветки {branch_name(task.id)}: ветка изменена вне офиса или push запрещён.",
+                self._halt_in(
+                    conn, c,
+                    f"GitHub отклонил push ветки {c.branch}: ветка изменена вне офиса или push запрещён.",
+                    step="git_push",
                 )
             return False
         if operation.attempt >= MAX_ATTEMPTS:
-            self._unknown(task, operation, f"Push ветки {branch_name(task.id)} не выполнен за {MAX_ATTEMPTS} попытки.")
+            self._unknown(c, operation, f"Push ветки {c.branch} не выполнен за {MAX_ATTEMPTS} попытки.")
         return False
 
-    def _open_pr(self, task: Task) -> bool:
-        branch = branch_name(task.id)
-        found = self.github.pulls(branch, "open")
+    def _open_pr(self, c: Carrier) -> bool:
+        found = self.github.pulls(c.branch, "open")
         if found:
-            self._apply_pr(None, task.id, found[0])
+            self._apply_pr(None, c, found[0])
             return True
-        if self._status(task.id) != S.awaiting_integration:
+        if not self._active(c):
             return False
-        body = self._body(task)
-        operation, allowed = self.ops.begin(CREATE_PR, f"{CREATE_PR}:{task.id}", task.id)
+        body = self._body(c)
+        operation, allowed = self.ops.begin(CREATE_PR, f"{CREATE_PR}:{c.id}", c.task_id, c.release_id)
         if not allowed:
             return False
         pr = None
         status = None
         try:
-            pr = self.github.create_pr(branch, task.title, body)
+            pr = self.github.create_pr(c.branch, c.title, body)
         except GitHubUnavailable:
             pass
         except GitHubError as error:
             status = error.status
         if pr is not None:
-            self._apply_pr(operation, task.id, pr)
+            self._apply_pr(operation, c, pr)
             return True
         if status is not None and status < 500:
             with self.store.db.locked_transaction() as conn:
                 self.ops.finish(conn, operation, OpStatus.failed, detail=f"HTTP {status}")
-                self.store.halt_in(
-                    conn, task.id, S.needs_attention, statuses=INTEGRATING, role=None, step="create_pr",
-                    reason=f"GitHub отклонил создание PR: HTTP {status}.",
-                )
+                self._halt_in(conn, c, f"GitHub отклонил создание PR: HTTP {status}.", step="create_pr")
             return False
         if operation.attempt >= MAX_ATTEMPTS:
-            self._unknown(task, operation, f"PR не создан за {MAX_ATTEMPTS} попытки.")
+            self._unknown(c, operation, f"PR не создан за {MAX_ATTEMPTS} попытки.")
         return False
 
-    def _check(self, task: Task) -> bool:
+    def _check(self, c: Carrier) -> bool:
         minutes = f"{self.settings.checks_timeout_minutes:g}"
         try:
-            pr = self.github.get_pr(task.pr_number)
+            pr = self.github.get_pr(c.pr_number)
             head = (pr.get("head") or {}).get("sha")
             if pr.get("state") != "open":
-                return self._halt(task, f"PR #{task.pr_number} закрыт вне офиса.")
-            if head != task.head_sha:
-                if self.github.branch_sha(branch_name(task.id)) != task.head_sha:
+                return self._halt(c, f"PR #{c.pr_number} закрыт вне офиса.")
+            if head != c.head_sha:
+                if self.github.branch_sha(c.branch) != c.head_sha:
                     return self._halt(
-                        task, f"Ветка PR #{task.pr_number} изменена вне офиса: head {str(head)[:7]} вместо "
-                        f"{task.head_sha[:7]}."
+                        c, f"Ветка PR #{c.pr_number} изменена вне офиса: head {str(head)[:7]} вместо "
+                        f"{c.head_sha[:7]}."
                     )
-                if self._checks_expired(task):
-                    return self._halt(task, f"Head PR #{task.pr_number} не обновился за {minutes} мин.")
+                if self._checks_expired(c):
+                    return self._halt(c, f"Head PR #{c.pr_number} не обновился за {minutes} мин.")
                 return False
-            summary = self.summary(task)
+            summary = self.summary(c)
         except (GitHubError, GitHubUnavailable) as error:
-            logger.warning("checks of %s are not read: %s", task.id, error)
-            if self._checks_expired(task):
-                return self._halt(task, f"Обязательные проверки PR не прочитаны за {minutes} мин: {error}.")
+            logger.warning("checks of %s are not read: %s", c.id, error)
+            if self._checks_expired(c):
+                return self._halt(c, f"Обязательные проверки PR не прочитаны за {minutes} мин: {error}.")
             return False
-        if task.checks != summary:
+        if c.checks != summary:
             with self.store.db.locked_transaction() as conn:
-                conn.execute(
-                    "UPDATE tasks SET checks = :checks, version = version + 1, updated_at = :now WHERE id = :id",
-                    {"checks": _json(summary.model_dump()), "now": to_text(utcnow()), "id": task.id},
-                )
-                self.store.record_event(conn, task.id, TaskEventType.checks_status, summary.model_dump())
+                self._save_in(conn, c, checks=summary)
+                self._event(conn, c, TaskEventType.checks_status, summary.model_dump())
         failed = [check for check in summary.checks if check.status == "completed" and check.conclusion != "success"]
         if failed:
-            return self._close(self.store.get_task(task.id))
+            return self._close(self._reload(c))
         waiting = [check.name for check in summary.checks if check.status != "completed"]
-        if waiting and self._checks_expired(task):
-            return self._halt(task, f"Обязательные проверки PR не завершились за {minutes} мин: {', '.join(waiting)}.")
+        if waiting:
+            if self._checks_expired(c):
+                return self._halt(
+                    c, f"Обязательные проверки PR не завершились за {minutes} мин: {', '.join(waiting)}."
+                )
+            return False
+        return self._review(self._reload(c))
+
+    def _review(self, c: Carrier) -> bool:
+        try:
+            found = self.workspace.verify_branch(c.tree, c.base_sha)
+        except WorkspaceError as error:
+            found = [str(error)]
+        if found:
+            return self._halt(c, f"Повторная проверка ветки перед ревью PR не пройдена: {'; '.join(found)}")
+        with self.store.db.connection() as conn:
+            review = self.store.load_review(conn, c.task_id, c.head_sha)
+        if review is None:
+            return self._ask_reviewer(c)
+        if review.verdict == "reject":
+            return self._close(c)
+        return self._merge(c, review)
+
+    def _ask_reviewer(self, c: Carrier) -> bool:
+        if not self._active(c):
+            return False
+        operation, allowed = self.ops.begin(PR_REVIEW, f"{PR_REVIEW}:{c.id}:{c.head_sha}", c.task_id, c.release_id)
+        if not allowed:
+            return False
+        if c.release_id is None:
+            try:
+                self.store.reserve_pr_review(c.task_id, self.settings.pr_review_calls)
+            except BudgetExceeded:
+                return self._review_failed(
+                    c, operation, f"Исчерпан предел обращений агента ревью PR: {self.settings.pr_review_calls}."
+                )
+        reason = None
+        try:
+            user = self._review_input(c)
+            profile = self.store.get_task(c.task_id).profile
+            reply = self.gateway.structured(
+                self.store, c.task_id, profile, AgentRole.pr_reviewer, PR_REVIEW, PR_REVIEWER, user, PrReview
+            )
+        except InvalidModelResponse:
+            reason = "Ответ агента ревью PR не соответствует схеме или неполон; решение не принято, PR открыт."
+        except ProviderError:
+            reason = "Агент ревью PR недоступен: основной и резервный провайдеры вернули ошибку; PR открыт."
+        except ContextTooLarge as error:
+            reason = f"Вход агента ревью PR не помещается в окно модели: {error}"
+        except WorkspaceError as error:
+            reason = f"Diff для агента ревью PR не получен: {error}"
+        if reason is not None:
+            return self._review_failed(c, operation, reason)
+        self._apply_review(operation, c, reply)
+        return True
+
+    def _review_failed(self, c: Carrier, operation: Operation, reason: str) -> bool:
+        with self.store.db.locked_transaction() as conn:
+            self.ops.finish(conn, operation, OpStatus.failed, detail=reason[:300])
+            self._halt_in(conn, c, reason, step=PR_REVIEW, role=AgentRole.pr_reviewer)
         return False
 
-    def _close(self, task: Task) -> bool:
-        if self._status(task.id) not in (S.awaiting_integration, S.cancelled):
+    def _apply_review(self, operation: Operation, c: Carrier, reply: PrReview) -> None:
+        review_id = new_id("prv")
+        with self.store.db.locked_transaction() as conn:
+            conn.execute(
+                "INSERT INTO pr_reviews (id, task_id, head_sha, verdict, reasons, required_changes, checklist, model, "
+                "created_at) VALUES (:id, :task_id, :head, :verdict, :reasons, :changes, :checklist, :model, :now)",
+                {
+                    "id": review_id,
+                    "task_id": c.task_id,
+                    "head": c.head_sha,
+                    "verdict": reply.verdict,
+                    "reasons": reply.reasons,
+                    "changes": _json(reply.required_changes),
+                    "checklist": _json([item.model_dump() for item in reply.checklist]),
+                    "model": self._review_model(conn, c.task_id),
+                    "now": to_text(utcnow()),
+                },
+            )
+            self.ops.finish(conn, operation, OpStatus.succeeded, external_ref=review_id)
+            self._event(
+                conn, c, TaskEventType.pr_review,
+                {"review_id": review_id, "head_sha": c.head_sha, "verdict": reply.verdict},
+                role=AgentRole.pr_reviewer,
+            )
+
+    def _review_model(self, conn: Any, task_id: str) -> str:
+        row = conn.fetchone(
+            "SELECT payload FROM task_events WHERE task_id = :id AND tool = 'model' AND role = :role "
+            "ORDER BY seq DESC LIMIT 1",
+            {"id": task_id, "role": AgentRole.pr_reviewer.value},
+        )
+        arguments = str(json.loads(row["payload"]).get("arguments", "")) if row else ""
+        return arguments.split(" ", 1)[-1] or "unknown"
+
+    def _summaries(self, task_id: str) -> dict[AgentRole, str]:
+        summaries = {AgentRole.qa: "нет данных", AgentRole.critic: "нет данных"}
+        for event in self.store.events_after(task_id, 0, limit=100000):
+            if event.type == TaskEventType.role_finished and event.role in summaries:
+                summaries[event.role] = str(event.payload.get("summary", ""))
+        return summaries
+
+    def _review_input(self, c: Carrier) -> str:
+        task = self.store.get_task(c.task_id)
+        checks = "\n".join(
+            f"{check.name}: {check.status} {check.conclusion or ''}".strip()
+            for check in (c.checks.checks if c.checks else [])
+        )
+        diff = self.workspace.diff_range(c.tree, c.base_sha, c.head_sha, REVIEW_DIFF_LIMIT)
+        checklist = Entry("Чек-лист", "\n".join(f"- {key}: {label}" for key, label in CHECKLIST.items()), required=True)
+        checks_entry = Entry(f"Обязательные проверки PR #{c.pr_number} для head {c.head_sha}", checks, required=True)
+        diff_entry = Entry(f"Diff {str(c.base_sha)[:7]}..{str(c.head_sha)[:7]}", diff)
+        if c.release_id is not None:
+            release = self.store.get_candidate(c.release_id)
+            fixed = [
+                Entry(
+                    "Назначение PR",
+                    f"Revert выпуска {release.expected_previous_sha[:7]}..{release.commit_sha[:7]} задачи "
+                    f"«{task.title}» после отката на Render: main возвращается к опубликованному состоянию.",
+                    required=True,
+                ),
+                Entry("Причина отката", release.blocked_reason or "нет данных", required=True),
+                checks_entry,
+                checklist,
+                Entry(
+                    "Изменённые файлы",
+                    "\n".join(self.workspace.changed_names(c.tree, c.base_sha, c.head_sha)),
+                    required=True,
+                ),
+                diff_entry,
+            ]
+        else:
+            summaries = self._summaries(task.id)
+            spec = task.spec
+            criteria = (
+                "\n".join(f"{index}. {item}" for index, item in enumerate(spec.acceptance_criteria, 1)) if spec else ""
+            )
+            fixed = [
+                Entry("Текст задачи участника", task.text, required=True),
+                Entry(
+                    "Требования",
+                    f"{spec.summary}\n\nКритерии приёмки:\n{criteria}" if spec else "нет данных",
+                    required=True,
+                ),
+                checks_entry,
+                Entry("Итог QA последнего цикла", summaries[AgentRole.qa], required=True),
+                Entry("Итог критика последнего цикла", summaries[AgentRole.critic], required=True),
+                checklist,
+                Entry("Изменённые файлы", "\n".join(task.changed_files), required=True),
+                diff_entry,
+            ]
+        budget = self.gateway.input_budget(task.profile, AgentRole.pr_reviewer)
+        return assemble(PR_REVIEWER, fixed, [], budget)
+
+    def _merge(self, c: Carrier, review: PullRequestReview) -> bool:
+        number = c.pr_number
+        try:
+            pr = self.github.get_pr(number)
+        except (GitHubError, GitHubUnavailable) as error:
+            logger.warning("PR of %s is not read before merge: %s", c.id, error)
             return False
-        operation, allowed = self.ops.begin(CLOSE_PR, f"{CLOSE_PR}:{task.id}", task.id)
+        head = (pr.get("head") or {}).get("sha")
+        if pr.get("state") != "open":
+            return self._halt(c, f"PR #{number} закрыт вне офиса до слияния.")
+        if head != review.head_sha:
+            return self._halt(c, self._stale_review(number, head, review.head_sha))
+        with self.store.db.locked_transaction() as conn:
+            if not self._active_in(conn, c):
+                return False
+            operation, allowed = self.ops.begin_in(
+                conn, MERGE_PR, f"{MERGE_PR}:{c.id}:{review.head_sha}", c.task_id, c.release_id
+            )
+            if allowed:
+                self._save_in(conn, c)
+                self._event(conn, c, TaskEventType.merge_started, {"pr_number": number, "head_sha": review.head_sha})
+        if not allowed:
+            return False
+        result = None
+        status = None
+        try:
+            result = self.github.merge_pr(number, review.head_sha, f"{c.title} (#{number})")
+        except GitHubUnavailable:
+            pass
+        except GitHubError as error:
+            status = error.status
+        sha = result.get("sha") if isinstance(result, dict) and result.get("merged") is True else None
+        if isinstance(sha, str) and sha:
+            self._apply_merge(operation, c, sha)
+            return True
+        if status is not None and 400 <= status < 500:
+            return self._merge_refused(c, operation, review.head_sha, status)
+        return False
+
+    def _stale_review(self, number: int | None, head: Any, reviewed: str) -> str:
+        return (
+            f"Head PR #{number} изменился после решения агента ревью: {str(head)[:7]} вместо {reviewed[:7]}. "
+            "Решение недействительно, слияние не выполнено."
+        )
+
+    def _merge_refused(self, c: Carrier, operation: Operation, reviewed: str, status: int) -> bool:
+        pr = None
+        try:
+            pr = self.github.get_pr(c.pr_number)
+        except (GitHubError, GitHubUnavailable) as error:
+            logger.warning("PR of %s is not read after refused merge: %s", c.id, error)
+        head = (pr.get("head") or {}).get("sha") if pr else None
+        if pr is not None and pr.get("merged") and pr.get("merge_commit_sha") and head == reviewed:
+            self._apply_merge(operation, c, pr["merge_commit_sha"])
+            return True
+        if pr is not None and head != reviewed:
+            reason = self._stale_review(c.pr_number, head, reviewed)
+        else:
+            reason = f"GitHub отклонил слияние PR #{c.pr_number}: HTTP {status}."
+        with self.store.db.locked_transaction() as conn:
+            self.ops.finish(conn, operation, OpStatus.failed, detail=f"HTTP {status}")
+            self._halt_in(conn, c, reason, step=MERGE_PR)
+        return False
+
+    def _apply_merge(self, operation: Operation, c: Carrier, sha: str) -> None:
+        with self.store.db.locked_transaction() as conn:
+            current = self._carrier_in(conn, c)
+            self.ops.finish(conn, operation, OpStatus.succeeded, external_ref=sha)
+            self._save_in(conn, c, merge_sha=sha, checks=None)
+            self._event(conn, c, TaskEventType.pr_merged, {"pr_number": current.pr_number, "merge_sha": sha})
+
+    def _finish(self, c: Carrier) -> bool:
+        minutes = f"{self.settings.checks_timeout_minutes:g}"
+        sha = c.merge_sha
+        required = [(check, check.push_event) for check in self.required if check.push_event]
+        if not required:
+            return self._halt(c, "Нет обязательных проверок итогового commit: workflow без события push.")
+        try:
+            summary, run_ids = self._summary(sha, required, lambda run: run.get("head_branch") == "main")
+        except (GitHubError, GitHubUnavailable) as error:
+            logger.warning("checks of merge commit of %s are not read: %s", c.id, error)
+            if self._checks_expired(c):
+                return self._halt(c, f"Проверки итогового commit не прочитаны за {minutes} мин: {error}.")
+            return False
+        if c.checks != summary:
+            with self.store.db.locked_transaction() as conn:
+                self._save_in(conn, c, checks=summary)
+                self._event(conn, c, TaskEventType.checks_status, summary.model_dump())
+        failed = [
+            f"{check.name} ({check.conclusion})"
+            for check in summary.checks
+            if check.status == "completed" and check.conclusion != "success"
+        ]
+        if failed:
+            return self._fail_final(c, f"Обязательные проверки итогового commit {sha[:7]} не пройдены: {', '.join(failed)}.")
+        waiting = [check.name for check in summary.checks if check.status != "completed"]
+        if waiting:
+            if self._checks_expired(c):
+                return self._halt(
+                    c, f"Проверки итогового commit не завершились за {minutes} мин: {', '.join(waiting)}."
+                )
+            return False
+        report = self._final_suite(self._reload(c))
+        if report is None:
+            return False
+        return self._candidate(self._reload(c), report, run_ids)
+
+    def _fail_final(self, c: Carrier, reason: str) -> bool:
+        return self._halt(c, reason, step="merge_checks", failure_kind=FailureKind.checks_failed)
+
+    def _final_suite(self, c: Carrier) -> CheckReport | None:
+        sha = c.merge_sha
+        require = True
+        if c.release_id is not None:
+            try:
+                with self.workspace.lock:
+                    self.workspace.git("fetch", "--quiet", "origin", "main", timeout=NETWORK_TIMEOUT)
+                require = bool(self.workspace.qa_files(sha))
+            except WorkspaceError as error:
+                self._halt(c, f"Итоговый commit {sha[:7]} не получен: {error}")
+                return None
+        commands = [self.commands.steps[name].command for name in SUITE if require or name != "e2e"]
+        for saved in self.store.check_reports(c.task_id, sha):
+            if saved.suite_hash and {check.command for check in saved.checks} >= set(commands):
+                return self._judge(c, saved, commands)
+        try:
+            with self.workspace.lock:
+                self.workspace.git("fetch", "--quiet", "origin", "main", timeout=NETWORK_TIMEOUT)
+            self.suite.reset_task(c.task_id)
+            report = self.suite.run_suite(c.task_id, sha, sha, require_e2e=require)
+        except (SandboxError, SandboxCancelled, WorkspaceError, OSError) as error:
+            self._halt(c, f"Критический E2E итогового commit {sha[:7]} не выполнен: {error}")
+            return None
+        return self._judge(c, report, commands)
+
+    def _judge(self, c: Carrier, report: CheckReport, commands: list[str]) -> CheckReport | None:
+        sha = c.merge_sha[:7]
+        failed = [f"{check.command} (exit {check.exit_code})" for check in report.checks if check.exit_code != 0]
+        if any(check.exit_code != 0 and check.command in commands for check in report.checks):
+            self._fail_final(c, f"Критический E2E итогового commit {sha} не пройден: {', '.join(failed)}.")
+            return None
+        found = {check.command for check in report.checks}
+        missing = [f"{command} (не выполнен)" for command in commands if command not in found]
+        if failed or missing or not report.suite_hash:
+            details = ", ".join(failed + missing) or "нет хеша набора"
+            self._halt(c, f"Набор проверок итогового commit {sha} выполнен не полностью: {details}.")
+            return None
+        return report
+
+    def _candidate(self, c: Carrier, report: CheckReport, run_ids: list[str]) -> bool:
+        sha = c.merge_sha
+        with self.store.db.connection() as conn:
+            existing = self._release_id(conn, c.task_id, sha)
+        if existing is not None:
+            return c.release_id is not None and self._link(c, existing)
+        if self.queue.busy():
+            return False
+        try:
+            previous = self.queue.reconcile_published()
+        except QueueBusy:
+            return False
+        except BaseUnavailable as error:
+            return self._halt(c, f"Кандидат выпуска не создан: {error}")
+        with self.store.db.locked_transaction() as conn:
+            current = self._carrier_in(conn, c)
+            if not self._active_in(conn, c) or current.merge_sha != sha:
+                return False
+            if self._release_id(conn, c.task_id, sha) is not None or self.queue.busy_in(conn):
+                return False
+            task = self.store.load_task(conn, c.task_id)
+            review = self.store.load_review(conn, c.task_id, current.head_sha) if current.head_sha else None
+            origin, decision = ReleaseOrigin.task, None
+            if c.release_id is not None:
+                revert = self.store.load_candidate(conn, c.release_id).revert
+                origin = ReleaseOrigin.auto_revert if revert.source == "auto" else ReleaseOrigin.resume
+                decision = revert.decision_id
+            candidate = self.store.create_candidate(
+                conn,
+                task_id=c.task_id,
+                kind=ReleaseKind.release,
+                commit_sha=sha,
+                expected_previous_sha=previous,
+                spec_hash=task.spec.spec_hash if task.spec else (report.spec_hash or ""),
+                suite_hash=report.suite_hash or "",
+                ci_run_ids=run_ids,
+                pr_url=current.pr_url,
+                pr_review_id=review.id if review else None,
+                e2e=report,
+                origin=origin,
+                origin_decision_id=decision,
+            )
+            if c.release_id is None:
+                self.store.transition(conn, c.task_id, S.awaiting_release, expected_from=S.awaiting_integration)
+            else:
+                self._save_in(conn, c, status="merged", candidate_id=candidate.id)
+        if c.release_id is not None and c.head_sha:
+            with suppress(WorkspaceError):
+                self.workspace.remove_worktree(c.tree)
+        return True
+
+    def _link(self, c: Carrier, candidate_id: str) -> bool:
+        with self.store.db.locked_transaction() as conn:
+            current = self._carrier_in(conn, c)
+            if not self._active_in(conn, c) or current.merge_sha != c.merge_sha:
+                return False
+            found = self.store.load_candidate(conn, candidate_id)
+            short = c.merge_sha[:7]
+            if found.status != ReleaseStatus.pending:
+                self._halt_in(
+                    conn, c, f"Кандидат выпуска {short} уже создан и находится в статусе {found.status}: укажите другой commit."
+                )
+                return False
+            self._save_in(conn, c, status="merged", candidate_id=found.id)
+            self._event(
+                conn, c, TaskEventType.role_finished,
+                {"step": "release", "outcome": "ok", "summary": f"Кандидат выпуска {short} уже создан: выпуск продолжится с ним."},
+            )
+        if c.head_sha:
+            with suppress(WorkspaceError):
+                self.workspace.remove_worktree(c.tree)
+        return True
+
+    def _release_id(self, conn: Any, task_id: str, sha: str) -> str | None:
+        row = conn.fetchone(
+            "SELECT id FROM release_candidates WHERE task_id = :id AND commit_sha = :sha AND kind = :kind "
+            "ORDER BY CASE status WHEN :pending THEN 0 WHEN :revoked THEN 2 ELSE 1 END, created_at DESC, id DESC "
+            "LIMIT 1",
+            {
+                "id": task_id,
+                "sha": sha,
+                "kind": ReleaseKind.release.value,
+                "pending": ReleaseStatus.pending.value,
+                "revoked": ReleaseStatus.revoked.value,
+            },
+        )
+        return row["id"] if row else None
+
+    def _close(self, c: Carrier) -> bool:
+        if c.release_id is None:
+            if self._status(c.task_id) not in (S.awaiting_integration, S.cancelled):
+                return False
+        elif not self._active(c):
+            return False
+        operation, allowed = self.ops.begin(CLOSE_PR, f"{CLOSE_PR}:{c.id}", c.task_id, c.release_id)
         if not allowed:
             return False
         closed = False
         status = None
         try:
-            self.github.close_pr(task.pr_number)
+            self.github.close_pr(c.pr_number)
             closed = True
         except GitHubUnavailable:
             pass
         except GitHubError as error:
             status = error.status
         if closed:
-            self._apply_close(operation, task.id)
+            self._apply_close(operation, c)
             return True
         if status is not None and status < 500:
-            self._unknown(task, operation, f"GitHub отклонил закрытие PR #{task.pr_number}: HTTP {status}.")
+            self._unknown(c, operation, f"GitHub отклонил закрытие PR #{c.pr_number}: HTTP {status}.")
         elif operation.attempt >= MAX_ATTEMPTS:
-            self._unknown(task, operation, f"PR #{task.pr_number} не закрыт за {MAX_ATTEMPTS} попытки.")
+            self._unknown(c, operation, f"PR #{c.pr_number} не закрыт за {MAX_ATTEMPTS} попытки.")
         return False
 
-    def _reconcile(self, task: Task, operation: Operation) -> bool:
+    def _reconcile_review(self, c: Carrier, operation: Operation) -> bool:
+        with self.store.db.connection() as conn:
+            review = self.store.load_review(conn, c.task_id, operation.key.rsplit(":", 1)[1])
+            row = conn.fetchone(
+                "SELECT MAX(recorded_at) AS since FROM decisions WHERE operation = 'task_decision' "
+                "AND object_id = :id AND decision = 'retry'",
+                {"id": c.task_id},
+            )
+        if review is not None:
+            self.ops.mark(operation, OpStatus.succeeded)
+            return True
+        retried = from_text(row["since"]) if c.release_id is None and row and row["since"] else None
+        if retried is not None and retried > operation.started_at:
+            self.ops.mark(operation, OpStatus.failed, detail="retry")
+            return True
+        if operation.status == OpStatus.started:
+            self._unknown(
+                c, operation,
+                "Исход обращения к агенту ревью PR не установлен: ответ мог быть получен, но не сохранён. "
+                "Повторное обращение — только после решения «Повторить».",
+            )
+        return False
+
+    def _reconcile(self, c: Carrier, operation: Operation) -> bool:
+        if operation.kind == PR_REVIEW:
+            return self._reconcile_review(c, operation)
         outcome: tuple[OpStatus, Any] | None = None
         try:
-            outcome = self._verify(task, operation)
+            outcome = self._verify(c, operation)
         except (GitHubError, GitHubUnavailable) as error:
             logger.warning("reconcile of %s stopped: %s", operation.key, error)
         if outcome is None:
             limit = timedelta(minutes=self.settings.reconcile_timeout_minutes)
-            since = max(operation.started_at, self._last_event(task.id, "type = 'status_changed'") or operation.started_at)
+            since = max(operation.started_at, self._last_event(c.task_id, "type = 'status_changed'") or operation.started_at)
             if self.clock() - since > limit:
-                self._unknown(task, operation, "Исход операции не установлен: GitHub недоступен.")
+                self._unknown(c, operation, "Исход операции не установлен: GitHub недоступен.")
             return False
         status, value = outcome
         if status == OpStatus.unknown:
-            self._unknown(task, operation, value)
+            self._unknown(c, operation, value)
             return False
         if status == OpStatus.failed:
             self.ops.mark(operation, OpStatus.failed, detail=value)
             return True
         if operation.kind == PUSH:
-            self._apply_push(operation, task.id, value)
+            self._apply_push(operation, c, value)
         elif operation.kind == CREATE_PR:
-            self._apply_pr(operation, task.id, value)
+            self._apply_pr(operation, c, value)
+        elif operation.kind == MERGE_PR:
+            self._apply_merge(operation, c, value)
         else:
-            self._apply_close(operation, task.id)
+            self._apply_close(operation, c)
         return True
 
-    def _verify(self, task: Task, operation: Operation) -> tuple[OpStatus, Any]:
-        branch = branch_name(task.id)
+    def _verify(self, c: Carrier, operation: Operation) -> tuple[OpStatus, Any] | None:
+        branch = c.branch
         if operation.kind == PUSH:
             sha = operation.key.rsplit(":", 1)[1]
             remote = self.github.branch_sha(branch)
@@ -324,87 +977,106 @@ class ReleaseWorker:
             if self.github.pulls(branch, "closed"):
                 return OpStatus.unknown, f"PR ветки {branch} закрыт вне офиса."
             return OpStatus.failed, "not found"
-        pr = self.github.get_pr(task.pr_number)
+        pr = self.github.get_pr(c.pr_number)
+        if operation.kind == MERGE_PR:
+            reviewed = operation.key.rsplit(":", 1)[1]
+            head = (pr.get("head") or {}).get("sha")
+            if pr.get("merged") and pr.get("merge_commit_sha"):
+                if head != reviewed:
+                    return OpStatus.unknown, self._stale_review(c.pr_number, head, reviewed)
+                return OpStatus.succeeded, pr["merge_commit_sha"]
+            if pr.get("state") == "closed":
+                return OpStatus.unknown, f"PR #{c.pr_number} закрыт без слияния."
+            return None
         if pr.get("state") == "closed":
             return OpStatus.succeeded, None
         return OpStatus.failed, "open"
 
-    def _unknown(self, task: Task, operation: Operation, reason: str) -> None:
+    def _unknown(self, c: Carrier, operation: Operation, reason: str) -> None:
         with self.store.db.locked_transaction() as conn:
             self.ops.finish(conn, operation, OpStatus.unknown, detail=reason)
-            current = self.store.load_task(conn, task.id)
+            if c.release_id is not None:
+                self._halt_in(conn, c, reason, step=operation.kind)
+                return
+            current = self.store.load_task(conn, c.task_id)
             if current.status == S.awaiting_integration:
                 self.store.halt_in(
-                    conn, task.id, S.needs_attention, statuses=INTEGRATING, role=None, step=operation.kind,
+                    conn, c.task_id, S.needs_attention, statuses=INTEGRATING, role=None, step=operation.kind,
                     reason=reason,
                 )
             elif operation.kind != PUSH:
                 self.store.record_event(
                     conn,
-                    task.id,
+                    c.task_id,
                     TaskEventType.operation_unknown,
                     {"kind": operation.kind, "pr_number": current.pr_number, "reason": reason},
                 )
 
-    def _apply_push(self, operation: Operation, task_id: str, sha: str) -> None:
+    def _apply_push(self, operation: Operation, c: Carrier, sha: str) -> None:
         with self.store.db.locked_transaction() as conn:
             self.ops.finish(conn, operation, OpStatus.succeeded, external_ref=sha)
-            conn.execute(
-                "UPDATE tasks SET head_sha = :sha, checks = NULL, version = version + 1, updated_at = :now "
-                "WHERE id = :id",
-                {"sha": sha, "now": to_text(utcnow()), "id": task_id},
-            )
-            self.store.record_event(
-                conn,
-                task_id,
-                TaskEventType.tool_called,
-                {"arguments": f"{branch_name(task_id)} {sha}", "result": "ok"},
-                tool="git_push",
+            self._save_in(conn, c, head_sha=sha, checks=None)
+            self._event(
+                conn, c, TaskEventType.tool_called, {"arguments": f"{c.branch} {sha}", "result": "ok"}, tool="git_push"
             )
 
-    def _apply_pr(self, operation: Operation | None, task_id: str, pr: dict[str, Any]) -> None:
+    def _apply_pr(self, operation: Operation | None, c: Carrier, pr: dict[str, Any]) -> None:
         number = int(pr["number"])
         url = str(pr["html_url"])
         with self.store.db.locked_transaction() as conn:
             if operation is not None:
                 self.ops.finish(conn, operation, OpStatus.succeeded, external_ref=str(number))
-            conn.execute(
-                "UPDATE tasks SET pr_number = :number, pr_url = :url, version = version + 1, updated_at = :now "
-                "WHERE id = :id",
-                {"number": number, "url": url, "now": to_text(utcnow()), "id": task_id},
-            )
-            self.store.record_event(conn, task_id, TaskEventType.pr_opened, {"pr_number": number, "pr_url": url})
+            self._save_in(conn, c, pr_number=number, pr_url=url)
+            self._event(conn, c, TaskEventType.pr_opened, {"pr_number": number, "pr_url": url})
 
-    def _apply_close(self, operation: Operation, task_id: str) -> None:
+    def _apply_close(self, operation: Operation, c: Carrier) -> None:
         with self.store.db.locked_transaction() as conn:
-            task = self.store.load_task(conn, task_id)
-            self.ops.finish(conn, operation, OpStatus.succeeded, external_ref=str(task.pr_number))
-            self.store.record_event(conn, task_id, TaskEventType.pr_closed, {"pr_number": task.pr_number})
-            if task.status != S.awaiting_integration:
+            current = self._carrier_in(conn, c)
+            self.ops.finish(conn, operation, OpStatus.succeeded, external_ref=str(current.pr_number))
+            self._event(conn, c, TaskEventType.pr_closed, {"pr_number": current.pr_number})
+            if not self._active_in(conn, c):
+                return
+            review = self.store.load_review(conn, c.task_id, current.head_sha)
+            if review is not None and review.verdict == "reject":
+                changes = "; ".join(review.required_changes)
+                self._halt_in(
+                    conn, c, f"Агент ревью отклонил PR #{current.pr_number}: {review.reasons} Что изменить: {changes}",
+                    step=PR_REVIEW, role=AgentRole.pr_reviewer, failure_kind=FailureKind.pr_rejected,
+                )
                 return
             failed = [
                 f"{check.name} ({check.conclusion})"
-                for check in (task.checks.checks if task.checks else [])
+                for check in (current.checks.checks if current.checks else [])
                 if check.status == "completed" and check.conclusion != "success"
             ]
-            self.store.halt_in(
-                conn, task_id, S.failed, statuses=INTEGRATING, role=None, step="pr_checks",
-                reason=f"Обязательные проверки PR не пройдены: {', '.join(failed)}. PR #{task.pr_number} закрыт.",
-                failure_kind=FailureKind.checks_failed,
+            self._halt_in(
+                conn, c, f"Обязательные проверки PR не пройдены: {', '.join(failed)}. PR #{current.pr_number} закрыт.",
+                step="pr_checks", failure_kind=FailureKind.checks_failed,
             )
 
-    def summary(self, task: Task) -> PullRequestChecks:
-        runs = self.github.runs(task.head_sha)
+    def summary(self, c: Carrier | Task) -> PullRequestChecks:
+        required = [(check, check.pr_event) for check in self.required]
+        return self._summary(
+            c.head_sha,
+            required,
+            lambda run: any(pr.get("number") == c.pr_number for pr in run.get("pull_requests") or []),
+        )[0]
+
+    def _summary(
+        self, sha: str, required_checks: list[tuple[RequiredCheck, str]], belongs: Callable[[dict[str, Any]], bool]
+    ) -> tuple[PullRequestChecks, list[str]]:
+        runs = self.github.runs(sha)
         apps: dict[int, int | None] = {}
         jobs: dict[int, list[dict[str, Any]]] = {}
         checks = []
-        for required in self.required:
+        counted: list[str] = []
+        for required, event in required_checks:
             matching = [
                 run for run in runs
                 if run.get("path") == required.workflow
-                and run.get("event") == required.pr_event
-                and run.get("head_sha") == task.head_sha
-                and any(pr.get("number") == task.pr_number for pr in run.get("pull_requests") or [])
+                and run.get("event") == event
+                and run.get("head_sha") == sha
+                and belongs(run)
             ]
             if not matching:
                 checks.append(PullRequestCheck(name=required.name, status="missing", conclusion=None, url=None))
@@ -433,7 +1105,9 @@ class ReleaseWorker:
                     url=job.get("html_url"),
                 )
             )
-        return PullRequestChecks(head_sha=task.head_sha, checks=checks)
+            if str(run["id"]) not in counted:
+                counted.append(str(run["id"]))
+        return PullRequestChecks(head_sha=sha, checks=checks), counted
 
     def _last_event(self, task_id: str, condition: str) -> datetime | None:
         with self.store.db.connection() as conn:
@@ -443,15 +1117,24 @@ class ReleaseWorker:
             )
         return from_text(row["since"]) if row and row["since"] else None
 
-    def _checks_expired(self, task: Task) -> bool:
-        since = self._last_event(task.id, "type = 'pr_opened' OR (type = 'tool_called' AND tool = 'git_push')")
-        return self.clock() - (since or task.updated_at) > timedelta(minutes=self.settings.checks_timeout_minutes)
+    def _checks_expired(self, c: Carrier) -> bool:
+        since = self._last_event(
+            c.task_id,
+            "type IN ('pr_opened', 'pr_merged', 'decision_recorded') OR (type = 'tool_called' AND tool = 'git_push')",
+        )
+        return self.clock() - (since or self.clock()) > timedelta(minutes=self.settings.checks_timeout_minutes)
 
-    def _body(self, task: Task) -> str:
-        summaries = {AgentRole.qa: "нет данных", AgentRole.critic: "нет данных"}
-        for event in self.store.events_after(task.id, 0, limit=100000):
-            if event.type == TaskEventType.role_finished and event.role in summaries:
-                summaries[event.role] = str(event.payload.get("summary", ""))
+    def _body(self, c: Carrier) -> str:
+        task = self.store.get_task(c.task_id)
+        if c.release_id is not None:
+            release = self.store.get_candidate(c.release_id)
+            return (
+                f"## Исправление после отката\n\nRevert выпуска `{release.id}` "
+                f"({release.expected_previous_sha[:7]}..{release.commit_sha[:7]}) задачи «{task.title}».\n\n"
+                f"## Причина отката\n\n{release.blocked_reason or 'нет данных'}\n\n"
+                f"Задача офиса: `{task.id}`.\n"
+            )
+        summaries = self._summaries(task.id)
         goal = task.spec.summary if task.spec else task.text
         criteria = "\n".join(f"- {item}" for item in task.spec.acceptance_criteria) if task.spec else "- нет данных"
         return (

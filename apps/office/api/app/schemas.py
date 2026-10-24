@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -49,6 +49,8 @@ SLOTS_TOTAL = 3
 class FailureKind(StrEnum):
     checks_failed = "checks_failed"
     pr_rejected = "pr_rejected"
+    deploy_failed = "deploy_failed"
+    verify_failed = "verify_failed"
 
 
 class ModelProfile(StrEnum):
@@ -63,6 +65,7 @@ class AgentRole(StrEnum):
     developer = "developer"
     qa = "qa"
     critic = "critic"
+    pr_reviewer = "pr_reviewer"
 
 
 class TaskEventType(StrEnum):
@@ -82,6 +85,13 @@ class TaskEventType(StrEnum):
     checks_status = "checks_status"
     pr_closed = "pr_closed"
     operation_unknown = "operation_unknown"
+    pr_review = "pr_review"
+    merge_started = "merge_started"
+    pr_merged = "pr_merged"
+    rollback_status = "rollback_status"
+    release_blocked = "release_blocked"
+    release_unblocked = "release_unblocked"
+    external_publish = "external_publish"
 
 
 class TaskDecision(StrEnum):
@@ -91,8 +101,8 @@ class TaskDecision(StrEnum):
 
 
 class ReleaseDecision(StrEnum):
-    approve_release = "approve_release"
     rollback = "rollback"
+    resume_releases = "resume_releases"
 
 
 class ReleaseKind(StrEnum):
@@ -102,12 +112,24 @@ class ReleaseKind(StrEnum):
 
 class ReleaseStatus(StrEnum):
     pending = "pending"
-    approved = "approved"
     deploying = "deploying"
+    verifying = "verifying"
+    rolling_back = "rolling_back"
     released = "released"
     failed = "failed"
-    rolled_back = "rolled_back"
+    superseded = "superseded"
     revoked = "revoked"
+    rolled_back = "rolled_back"
+
+
+ACTIVE_RELEASE_STATUSES = frozenset({ReleaseStatus.deploying, ReleaseStatus.verifying, ReleaseStatus.rolling_back})
+
+
+class ReleaseOrigin(StrEnum):
+    task = "task"
+    auto_revert = "auto_revert"
+    resume = "resume"
+    manual_rollback = "manual_rollback"
 
 
 class ContractModel(BaseModel):
@@ -162,6 +184,22 @@ class PullRequestChecks(ContractModel):
     checks: list[PullRequestCheck]
 
 
+class PullRequestReviewItem(ContractModel):
+    item: str
+    ok: bool
+    note: str
+
+
+class PullRequestReview(ContractModel):
+    id: str
+    head_sha: str
+    verdict: Literal["approve", "reject"]
+    reasons: str
+    required_changes: list[str]
+    checklist: list[PullRequestReviewItem]
+    created_at: datetime
+
+
 class Task(ContractModel):
     id: str
     title: str = Field(max_length=80)
@@ -182,6 +220,10 @@ class Task(ContractModel):
     head_sha: str | None
     failure_kind: FailureKind | None
     checks: PullRequestChecks | None
+    pr_review: PullRequestReview | None
+    merge_sha: str | None
+    merge_pending: bool
+    integration_started: bool
     changed_files: list[str]
     fix_cycles: int = Field(ge=0, le=2)
     usage: Usage
@@ -224,6 +266,7 @@ class ReleaseDecisionRequest(ContractModel):
     decision: ReleaseDecision
     expected_version: int = Field(ge=1)
     idempotency_key: str = Field(min_length=8, max_length=64)
+    fix_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
 
 
 class Decision(ContractModel):
@@ -246,6 +289,43 @@ class DeployResult(ContractModel):
     error: str | None
 
 
+class VerifyResult(ContractModel):
+    expected_sha: str
+    ok: bool
+    fault: bool
+    attempts: int = Field(ge=0)
+    health: bool
+    version: str | None
+    page_version: str | None
+    error: str | None
+    checked_at: datetime
+
+
+class RollbackResult(ContractModel):
+    target_sha: str
+    target_deploy_id: str
+    render_deploy_id: str | None
+    render_status: str | None
+    started_at: datetime
+    finished_at: datetime | None
+    verify: VerifyResult | None
+    error: str | None
+
+
+class RevertResult(ContractModel):
+    status: Literal["pending", "active", "needs_attention", "merged"]
+    source: Literal["auto", "resume"]
+    base_sha: str | None
+    head_sha: str | None
+    pr_number: int | None
+    pr_url: str | None
+    checks: PullRequestChecks | None
+    fix_sha: str | None
+    decision_id: str | None
+    candidate_id: str | None
+    reason: str | None
+
+
 class ReleaseCandidate(ContractModel):
     id: str
     task_id: str
@@ -259,10 +339,25 @@ class ReleaseCandidate(ContractModel):
     ci_run_ids: list[str]
     pr_url: str | None
     created_at: datetime
-    approved_by: str | None
-    approved_at: datetime | None
     is_published: bool
     deploy: DeployResult | None
+    pr_review_id: str | None
+    e2e: CheckReport | None
+    origin: ReleaseOrigin
+    origin_decision_id: str | None
+    superseded_by: str | None
+    blocked_reason: str | None
+    verify: VerifyResult | None
+    rollback: RollbackResult | None
+    revert: RevertResult | None
+
+
+class ReleaseQueueState(ContractModel):
+    configured: bool
+    active_release_id: str | None
+    release_blocked_by: str | None
+    blocked_reason: str | None
+    published_sha: str | None
 
 
 class Slots(ContractModel):

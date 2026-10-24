@@ -1,5 +1,5 @@
 import { useRef } from 'react'
-import type { ApiError } from '@/api/types'
+import type { ApiError, ErrorCode } from '@/api/types'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import {
@@ -13,7 +13,10 @@ import {
 
 export function UpdateNotice() {
   return (
-    <div role="status" className="flex items-center justify-center gap-3 border-b bg-muted px-4 py-2 text-sm">
+    <div
+      role="status"
+      className="flex flex-wrap items-center justify-center gap-3 border-b bg-muted px-4 py-2 pt-[max(0.5rem,env(safe-area-inset-top))] text-sm"
+    >
       <span>Доступна новая версия.</span>
       <Button size="sm" variant="outline" onClick={() => window.location.reload()}>
         Обновить страницу
@@ -66,7 +69,7 @@ export function LoadingStatus({ label }: { label: string }) {
 export function SessionErrorNotice({ error, onRetry }: { error: ApiError; onRetry: () => void }) {
   return (
     <main className="flex flex-1 items-center justify-center p-4">
-      <Alert variant="destructive" className="w-full max-w-sm">
+      <Alert variant="destructive" className="w-full max-w-sm [overflow-wrap:anywhere]">
         <AlertTitle>Не удалось проверить сеанс</AlertTitle>
         <AlertDescription>
           <p>{error.message}</p>
@@ -79,15 +82,24 @@ export function SessionErrorNotice({ error, onRetry }: { error: ApiError; onRetr
   )
 }
 
+const RUN_ERROR_TITLES: Partial<Record<ErrorCode, string>> = {
+  service_unavailable: 'Нет связи с сервером',
+  quota_exceeded: 'Лимит запросов исчерпан',
+  rate_limited: 'Слишком много запросов',
+  provider_unavailable: 'Модели временно недоступны',
+  provider_outcome_unknown: 'Ответ не завершён',
+  response_truncated: 'Ответ не завершён',
+  run_cancelled: 'Запрос отменён',
+}
+
 export function RunErrorNotice({ error }: { error: ApiError }) {
   const cancelled = error.code === 'run_cancelled'
   return (
-    <Alert variant={cancelled ? 'default' : 'destructive'} className="mx-4 w-auto">
-      <AlertTitle>{cancelled ? 'Запрос отменён' : 'Не удалось получить ответ'}</AlertTitle>
+    <Alert variant={cancelled ? 'default' : 'destructive'} className="mx-3 w-auto [overflow-wrap:anywhere] md:mx-4">
+      <AlertTitle>{RUN_ERROR_TITLES[error.code] ?? 'Ошибка сервера'}</AlertTitle>
       <AlertDescription>
         <p>{error.message}</p>
         {error.retryable && <p>Запрос можно повторить позже.</p>}
-        <p className="text-xs">Код операции: {error.operation_id}</p>
       </AlertDescription>
     </Alert>
   )

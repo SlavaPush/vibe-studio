@@ -20,6 +20,7 @@ from app.github import github_client
 from app.intake import UNAVAILABLE, IntakeFilter
 from app.models_gateway import ModelsGateway
 from app.release import ReleaseWorker
+from app.render import render_client
 from app.required_checks import load_required_checks
 from app.runner import Checkpoints, Runner
 from app.sandbox import Sandbox
@@ -31,6 +32,7 @@ from app.schemas import (
     Participant,
     ReleaseCandidate,
     ReleaseDecisionRequest,
+    ReleaseQueueState,
     Slots,
     Task,
     TaskCreate,
@@ -81,7 +83,7 @@ def create_app(
     db = Database(settings.database_url)
     db.init_schema()
     notifier = EventNotifier()
-    store = TaskStore(db, notifier.notify)
+    store = TaskStore(db, notifier.notify, settings.pr_review_calls)
     sessions = SessionStore(db, settings, AccessCodes(settings))
     models = gateway or ModelsGateway(settings)
     intake = IntakeFilter(models, settings)
@@ -93,7 +95,7 @@ def create_app(
     if runner and office_workspace is not None and sandbox is not None:
         office_runner = Runner(settings, store, office_workspace, sandbox, models, Checkpoints(settings.database_url))
     office_release = None
-    if office_runner is not None and office_workspace is not None:
+    if office_runner is not None and office_workspace is not None and sandbox is not None:
         if settings.github_app_configured:
             github = github_client(
                 settings.github_app_id,
@@ -102,8 +104,18 @@ def create_app(
                 settings.github_repo,
                 base_url=settings.github_api_url,
             )
+            render = None
+            if settings.render_configured:
+                render = render_client(
+                    settings.render_api_key, settings.render_service_id, base_url=settings.render_api_url
+                )
+            else:
+                logger.warning(
+                    "Render не настроен (RENDER_API_KEY, RENDER_SERVICE_ID): кандидаты выпуска ждут в очереди."
+                )
             office_release = ReleaseWorker(
-                settings, store, office_workspace, github, load_required_checks(settings.checkout_root)
+                settings, store, office_workspace, github, load_required_checks(settings.checkout_root),
+                gateway=models, suite=sandbox, render=render,
             )
         else:
             logger.warning(
@@ -283,7 +295,22 @@ def create_app(
     def release_decision(
         release_id: str, body: ReleaseDecisionRequest, participant: CurrentParticipant
     ) -> Decision:
+        if office_release is not None:
+            return office_release.decide(participant, release_id, body)
         return decide_release(store, participant, release_id, body)
+
+    @app.get("/api/release-queue")
+    def release_queue(_: CurrentParticipant) -> ReleaseQueueState:
+        with db.connection() as conn:
+            state = store.queue_state(conn)
+            blocked = store.load_candidate(conn, state["release_blocked_by"]) if state["release_blocked_by"] else None
+        return ReleaseQueueState(
+            configured=office_release is not None and office_release.queue.render is not None,
+            active_release_id=state["active_release_id"],
+            release_blocked_by=state["release_blocked_by"],
+            blocked_reason=blocked.blocked_reason if blocked else None,
+            published_sha=state["published_sha"],
+        )
 
     @app.get("/api/slots")
     def slots(_: CurrentParticipant) -> Slots:

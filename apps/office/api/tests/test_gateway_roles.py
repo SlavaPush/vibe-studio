@@ -16,6 +16,8 @@ from app.roles import (
     CLIPPED,
     ContextTooLarge,
     CriticReview,
+    QA,
+    QA_API_FILES,
     Entry,
     QaTurn,
     ResearchNotes,
@@ -130,6 +132,36 @@ def test_fallback_is_counted_as_separate_call(setup):
         "critic/review anthropic/claude-sonnet-5-5",
         "critic/review openai/gpt-6.1-sol",
     ]
+
+
+def test_qa_routes(setup):
+    gateway = setup[-1]()
+    assert [target.name for target in gateway.targets(ModelProfile.local, AgentRole.qa)] == ["ollama/qwen3:8b"]
+    expected = {
+        ModelProfile.cloud: (["anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol"], "high"),
+        ModelProfile.hybrid: (["anthropic/claude-haiku-5-5", "openai/gpt-6-luna"], "low"),
+    }
+    for profile, (names, effort) in expected.items():
+        targets = gateway.targets(profile, AgentRole.qa)
+        assert [target.name for target in targets] == names
+        assert [(target.effort, target.max_output_tokens) for target in targets] == [(effort, 16000)] * 2
+
+
+def test_qa_prompt_requires_mock_module_and_exact_locators():
+    for rule in (
+        'import { mockApi, fixtures } from "./support/mock-api"',
+        "await mockApi(page)",
+        "exact: true",
+        'page.getByLabel("Сообщение", { exact: true })',
+        "не кликай и не жди элементы, которых нет в подмене",
+        "expect(...).toBeVisible()",
+        "падать на проверке expect, а не на ошибке локатора",
+        'page.goto("/")',
+        "без сети",
+        "только в файл, указанный в данных",
+    ):
+        assert rule in QA
+    assert "apps/chat/web/e2e/office/support/mock-api.ts" in QA_API_FILES
 
 
 def test_both_providers_failing_is_provider_error(setup):

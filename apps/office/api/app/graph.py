@@ -1,7 +1,9 @@
 import hashlib
 import json
+import os
 import threading
 from datetime import timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -23,7 +25,6 @@ from app.roles import (
     CriticReview,
     Entry,
     Finding,
-    ModelFinding,
     QaTurn,
     ResearchNotes,
     ResearchPlan,
@@ -43,7 +44,8 @@ S = TaskStatus
 GRAPH_STATUSES = frozenset({S.awaiting_spec_approval, S.developing, S.reviewing})
 DEV_TURNS = 6
 QA_TURNS = 3
-QA_ATTEMPTS = 2
+QA_ATTEMPTS = 3
+QA_EXHAUSTED = "после трёх попыток"
 VERIFY_RETURNS = 2
 MAX_FIX_CYCLES = 2
 INFRA_RETRIES = 1
@@ -51,6 +53,12 @@ LISTING_LIMIT = 200
 STEP_OUTPUT = 8 * 1024
 DIFF_LIMIT = 200 * 1024
 MAX_FETCHES = 3
+PASSED_ON_BASE = "Тест прошёл на исходной версии интерфейса. Он должен проверять новое поведение и не проходить без изменений разработчика."
+TEST_ERROR_HINT = (
+    "Исправьте тест: подмените API через mockApi из ./support/mock-api до page.goto; ищите элементы по роли и точному "
+    "имени ({ exact: true }) или через getByLabel с точным текстом; не обращайтесь к элементам, которых нет в подмене; "
+    "ждите видимого состояния через expect. На исходной версии тест должен падать утверждением expect, а не ошибкой локатора."
+)
 
 
 class Stopped(Exception):
@@ -84,6 +92,22 @@ def spec_hash(body: dict[str, Any]) -> str:
 def commit_message(summary: str, role: AgentRole, marker: str) -> str:
     title = " ".join(summary.split())[:72] or f"Изменения роли {role.value}"
     return f"{title}\n\nOffice-Role: {role.value}\nOffice-Round: {marker}"
+
+
+def at_line(line: int | None) -> str:
+    return f" (строка {line})" if line else ""
+
+
+def error_feedback(message: str, line: int | None, version: str) -> str:
+    return f"Тест QA завершился ошибкой до проверки утверждения на {version}{at_line(line)}:\n{message}\n\n{TEST_ERROR_HINT}"
+
+
+def recheck_feedback(message: str, line: int | None) -> str:
+    return (
+        f"Тест не проходит на версии задачи{at_line(line)}:\n{message}\n\nПроверьте свой тест. Если ошибка в тесте, "
+        "исправьте его. Если тест верен и ошибка в изменении разработчика, оставьте файл теста без изменений: "
+        "замечание получит разработчик."
+    )
 
 
 def describe(action: Action) -> str:
@@ -456,100 +480,149 @@ class TaskGraph:
                 return result
         self.halt(AgentRole.qa, "qa", f"Нет свидетельства QA: {result.reason}")
 
-    def load_draft(self, path: Any) -> tuple[list[int], list[ModelFinding]] | None:
+    def load_qa_state(self, path: Path) -> dict[str, Any] | None:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            return list(data["criteria_covered"]), [ModelFinding.model_validate(item) for item in data["findings"]]
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError):
             return None
+        return data if isinstance(data, dict) and isinstance(data.get("qa_try"), int) else None
+
+    def save_qa_state(self, path: Path, data: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_name(f".{path.name}.tmp")
+        temp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        os.replace(temp, path)
+
+    def test_hash(self, test_file: str) -> str | None:
+        try:
+            data = (self.workspace.worktree_path(self.task_id) / test_file).read_bytes()
+        except OSError:
+            return None
+        return hashlib.sha256(data).hexdigest()
+
+    def ask_qa(self, task: Task, test_file: str, feedback: str) -> dict[str, Any]:
+        fixed = self.spec_entries(task) + [Entry("Файл теста QA", test_file, required=True)]
+        root = self.workspace.worktree_path(self.task_id)
+        api_files = [rel for rel in QA_API_FILES if (root / rel).is_file()]
+        if api_files:
+            fixed.append(Entry("Контракт API vibe-chat, клиент и примеры ответов", "\n".join(api_files), required=True))
+        if feedback:
+            fixed.append(Entry("Результат прошлой попытки", feedback, required=True))
+        fixed.append(Entry("Файлы apps/chat/web/src", self.listing()))
+        reply = self.turns(AgentRole.qa, "qa", QA, fixed, QaTurn, QA_TURNS, S.reviewing, test_file)
+        self.guard(S.reviewing)
+        return {
+            "summary": reply.summary,
+            "criteria_covered": [item for item in reply.criteria_covered if 1 <= item <= len(task.spec.acceptance_criteria)],
+            "findings": [item.model_dump() for item in reply.findings],
+        }
+
+    def qa_commit(self, qa_state: dict[str, Any], marker: str) -> str:
+        round_marker = f"{marker}-{qa_state['qa_try']}"
+        message = commit_message(qa_state["answer"]["summary"], AgentRole.qa, round_marker)
+        sha = self.workspace.commit(self.task_id, message, AgentRole.qa)
+        if sha is not None:
+            return sha
+        head = self.workspace.head(self.task_id)
+        if (
+            head != qa_state["head_before"]
+            and self.workspace.trailer(self.task_id, head, "Office-Role") == "qa"
+            and self.workspace.trailer(self.task_id, head, "Office-Round") == round_marker
+        ):
+            return head
+        return qa_state["head_before"]
+
+    def qa_check(
+        self, task: Task, qa_state: dict[str, Any], test_file: str
+    ) -> tuple[str | None, str, dict[str, Any] | None]:
+        pending = qa_state.get("pending")
+        qa_state["pending"] = None
+        if not (self.workspace.worktree_path(self.task_id) / test_file).is_file():
+            return f"Файл теста {test_file} не создан.", f"QA не создал тест {QA_EXHAUSTED}.", None
+        if pending and not qa_state["changed"]:
+            return None, "", pending
+        qa_sha = qa_state["qa_sha"]
+        base = self.evidence(task.base_sha, qa_sha, test_file)
+        if base.status == "passed":
+            return PASSED_ON_BASE, f"Тест QA проходит на исходной версии {QA_EXHAUSTED}.", None
+        after = base if base.status in ("invalid", "test_error") else self.evidence(qa_sha, qa_sha, test_file)
+        if after.status == "invalid":
+            return after.reason, f"Тест QA обращается к API vibe-chat без подмены {QA_EXHAUSTED}.", None
+        if after.status == "test_error":
+            version = "исходной версии" if after is base else "версии задачи"
+            first = (after.message.splitlines() or [""])[0][:200]
+            return (
+                error_feedback(after.message, after.line, version),
+                f"Тест QA завершается ошибкой до проверки утверждения {QA_EXHAUSTED}: {first}",
+                None,
+            )
+        failure = {"line": after.line, "message": after.message} if after.status == "failed" else None
+        if failure and not qa_state["recheck_used"] and qa_state["qa_try"] < QA_ATTEMPTS:
+            qa_state["recheck_used"] = True
+            qa_state["pending"] = failure
+            return recheck_feedback(after.message, after.line), "", None
+        return None, "", failure
 
     def qa(self, state: State) -> State:
         task = self.guard(S.reviewing)
         cycle = task.fix_cycles
-        dev_sha = state["dev_sha"]
         marker = f"{self.attempt}-{state['dev_round']}"
         test_file = f"{QA_TEST_DIR}/{self.task_id}.pw.ts"
+        path = self.settings.artifacts_dir / self.task_id / f"qa-state-{marker}.json"
+        qa_state = self.load_qa_state(path) or {
+            "qa_try": 1, "phase": "start", "feedback": "", "recheck_used": False, "pending": None
+        }
+        if qa_state["phase"] == "done":
+            return {"qa_findings": qa_state["findings"]}
         self.started(AgentRole.qa, "qa")
-        feedback = ""
-        draft_path =self.settings.artifacts_dir / self.task_id / f"qa-draft-{marker}.json"
-        for qa_try in range(1, QA_ATTEMPTS + 1):
-            head = self.workspace.head(self.task_id)
-            draft = None
-            if (
-                qa_try == 1
-                and head != dev_sha
-                and self.workspace.trailer(self.task_id, head, "Office-Role") == "qa"
-                and self.workspace.trailer(self.task_id, head, "Office-Round") == marker
-            ):
-                draft = self.load_draft(draft_path)
-            if draft is not None:
-                qa_sha = head
-                covered, model_findings = draft
-            else:
-                fixed = self.spec_entries(task) + [Entry("Файл теста QA", test_file, required=True)]
-                root = self.workspace.worktree_path(self.task_id)
-                api_files = [rel for rel in QA_API_FILES if (root / rel).is_file()]
-                if api_files:
-                    fixed.append(Entry("Контракт API vibe-chat, клиент и примеры ответов", "\n".join(api_files), required=True))
-                if feedback:
-                    fixed.append(Entry("Результат прошлой попытки", feedback, required=True))
-                fixed.append(Entry("Файлы apps/chat/web/src", self.listing()))
-                reply = self.turns(AgentRole.qa, "qa", QA, fixed, QaTurn, QA_TURNS, S.reviewing, test_file)
-                covered = [item for item in reply.criteria_covered if 1 <= item <= len(task.spec.acceptance_criteria)]
-                model_findings = list(reply.findings)
-                self.guard(S.reviewing)
-                draft_path.parent.mkdir(parents=True, exist_ok=True)
-                draft_path.write_text(
-                    json.dumps(
-                        {"criteria_covered": covered, "findings": [item.model_dump() for item in model_findings]},
-                        ensure_ascii=False,
-                    ),
-                    encoding="utf-8",
+        while True:
+            if qa_state["phase"] == "checked":
+                qa_state.update(qa_try=qa_state["qa_try"] + 1, phase="start")
+            if qa_state["phase"] == "start":
+                qa_state.update(
+                    phase="calling", head_before=self.workspace.head(self.task_id), hash_before=self.test_hash(test_file)
                 )
-                sha = self.workspace.commit(
-                    self.task_id, commit_message(reply.summary, AgentRole.qa, marker), AgentRole.qa
+                self.save_qa_state(path, qa_state)
+            if qa_state["phase"] == "calling":
+                answer = self.ask_qa(task, test_file, qa_state["feedback"])
+                qa_state.update(phase="answered", answer=answer, changed=self.test_hash(test_file) != qa_state["hash_before"])
+                self.save_qa_state(path, qa_state)
+            if qa_state["phase"] == "answered":
+                qa_state.update(phase="committed", qa_sha=self.qa_commit(qa_state, marker))
+                self.save_qa_state(path, qa_state)
+            feedback, reason, failure = self.qa_check(task, qa_state, test_file)
+            if feedback is None:
+                break
+            if qa_state["qa_try"] >= QA_ATTEMPTS:
+                self.halt(AgentRole.qa, "qa", reason)
+            qa_state.update(phase="checked", feedback=feedback)
+            self.save_qa_state(path, qa_state)
+        answer = qa_state["answer"]
+        covered = answer["criteria_covered"]
+        findings = [
+            Finding(id=f"qa-{cycle}-{index}", source="qa", **item)
+            for index, item in enumerate(answer["findings"], 1)
+        ]
+        if failure is not None:
+            findings.append(
+                Finding(
+                    id=f"qa-{cycle}-e2e",
+                    source="qa",
+                    blocking=True,
+                    criterion=covered[0] if covered else None,
+                    file=test_file,
+                    line=failure["line"],
+                    text=failure["message"],
                 )
-                qa_sha = sha or self.workspace.head(self.task_id)
-            if not (self.workspace.worktree_path(self.task_id) / test_file).is_file():
-                feedback = f"Файл теста {test_file} не создан."
-                if qa_try == QA_ATTEMPTS:
-                    self.halt(AgentRole.qa, "qa", "QA не создал тест после двух попыток.")
-                continue
-            base = self.evidence(task.base_sha, qa_sha, test_file)
-            if base.status == "passed":
-                feedback = "Тест прошёл на исходной версии интерфейса. Он должен проверять новое поведение и не проходить без изменений разработчика."
-                if qa_try == QA_ATTEMPTS:
-                    self.halt(AgentRole.qa, "qa", "Тест QA проходит на исходной версии после двух попыток.")
-                continue
-            after = base if base.status == "invalid" else self.evidence(qa_sha, qa_sha, test_file)
-            if after.status == "invalid":
-                feedback = after.reason
-                if qa_try == QA_ATTEMPTS:
-                    self.halt(AgentRole.qa, "qa", "Тест QA обращается к API vibe-chat без подмены после двух попыток.")
-                continue
-            findings = [
-                Finding(id=f"qa-{cycle}-{index}", source="qa", **item.model_dump())
-                for index, item in enumerate(model_findings, 1)
-            ]
-            if after.status == "failed":
-                findings.append(
-                    Finding(
-                        id=f"qa-{cycle}-e2e",
-                        source="qa",
-                        blocking=True,
-                        criterion=covered[0] if covered else None,
-                        file=test_file,
-                        line=after.line,
-                        text=after.message,
-                    )
-                )
-            data = [item.model_dump() for item in findings]
-            self.artifact(f"review-{cycle}-qa.json", {"qa_sha": qa_sha, "findings": data}, AgentRole.qa)
-            blocking = any(item.blocking for item in findings)
-            summary = "Тест QA не проходит на версии задачи." if after.status == "failed" else "Тест QA проходит на версии задачи и не проходит на исходной."
-            self.finished(AgentRole.qa, "qa", "blocked" if blocking else "ok", summary)
-            return {"qa_findings": data}
-        raise Stopped("qa attempts exhausted")
+            )
+        data = [item.model_dump() for item in findings]
+        self.artifact(f"review-{cycle}-qa.json", {"qa_sha": qa_state["qa_sha"], "findings": data}, AgentRole.qa)
+        blocking = any(item.blocking for item in findings)
+        summary = "Тест QA не проходит на версии задачи." if failure is not None else "Тест QA проходит на версии задачи и не проходит на исходной."
+        self.finished(AgentRole.qa, "qa", "blocked" if blocking else "ok", summary)
+        qa_state.update(phase="done", findings=data)
+        self.save_qa_state(path, qa_state)
+        return {"qa_findings": data}
 
     def critic(self, state: State) -> State:
         task = self.guard(S.reviewing)

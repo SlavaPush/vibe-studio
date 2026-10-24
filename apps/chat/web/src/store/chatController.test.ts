@@ -171,6 +171,37 @@ describe('createChatController', () => {
     expect(store.getState().errors[NO_CONVERSATION]?.code).toBe('service_unavailable')
   })
 
+  it('ошибка загрузки списка диалогов попадает в состояние, успешная загрузка её очищает', async () => {
+    const conversations = vi
+      .fn()
+      .mockRejectedValueOnce(error(0, 'service_unavailable'))
+      .mockResolvedValueOnce({ items: [conversation] })
+    const { store, controller } = setup(fakeApi({ conversations }))
+    await controller.start()
+    expect(store.getState().errors[NO_CONVERSATION]?.code).toBe('service_unavailable')
+    expect(store.getState().sessionChecked).toBe(true)
+
+    await controller.signIn('code')
+    expect(store.getState().errors[NO_CONVERSATION]).toBeUndefined()
+    expect(store.getState().conversations).toEqual([conversation])
+  })
+
+  it('успешное создание диалога не стирает более позднюю ошибку того же экрана', async () => {
+    const createConversation = vi
+      .fn()
+      .mockRejectedValueOnce(error(500, 'internal_error'))
+      .mockResolvedValueOnce(conversation)
+    const { store, controller } = setup(fakeApi({ conversations: vi.fn().mockResolvedValue({ items: [] }), createConversation }))
+    await controller.start()
+    await controller.createConversation()
+    expect(store.getState().errors[NO_CONVERSATION]?.code).toBe('internal_error')
+
+    const later = error(429, 'rate_limited').error
+    store.setError(NO_CONVERSATION, later)
+    await controller.createConversation()
+    expect(store.getState().errors[NO_CONVERSATION]).toBe(later)
+  })
+
   it('повторяет отправку, если тело успешного ответа не прочитано', async () => {
     const { run } = testRun('run-body')
     const bodies: string[] = []

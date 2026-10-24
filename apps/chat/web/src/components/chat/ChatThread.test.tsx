@@ -43,6 +43,7 @@ describe('ChatThread', () => {
     expect(notes).toHaveLength(1)
     expect(notes[0]).toHaveAccessibleName('Модель переключена')
     expect(notes[0]).toHaveTextContent('Запрос выполнен моделью gpt-6.1-sol')
+    expect(notes[0]).toHaveTextContent('Выбор модели в списке не изменился.')
 
     answers = screen.getAllByRole('article', { name: 'Ответ ассистента' })
     expect(answers).toHaveLength(1)
@@ -68,8 +69,92 @@ describe('ChatThread', () => {
     const answer = await screen.findByRole('article', { name: 'Ответ ассистента' })
     const status = within(answer).getByRole('status')
     expect(status.textContent).toBe('Думаю…')
-    expect(status.querySelector('[aria-hidden="true"]')?.children).toHaveLength(3)
+    const dots = status.querySelector('[aria-hidden="true"]')?.children
+    expect(dots).toHaveLength(3)
+    for (const dot of Array.from(dots ?? [])) expect(dot).toHaveClass('motion-reduce:animate-none')
     expect(screen.queryByText('Ответ готовится…')).not.toBeInTheDocument()
+  })
+
+  it('область сообщений доступна с клавиатуры, поле «Сообщение» имеет id для ссылки перехода', () => {
+    const store = createChatStore(testState())
+    render(
+      <ChatThread
+        store={store}
+        actions={{ send: () => {}, cancel: () => {} }}
+        loadAssetUrl={() => new Promise(() => {})}
+      />,
+    )
+
+    const log = screen.getByRole('log', { name: 'Сообщения диалога' })
+    expect(log).toHaveAttribute('tabindex', '0')
+    log.focus()
+    expect(log).toHaveFocus()
+    expect(screen.getByRole('textbox', { name: 'Сообщение' })).toHaveAttribute('id', 'composer-input')
+  })
+
+  it('пустой существующий диалог и экран без диалога показывают разные подсказки', async () => {
+    const store = createChatStore({ ...testState(), activeConversationId: null })
+    render(
+      <ChatThread
+        store={store}
+        actions={{ send: () => {}, cancel: () => {} }}
+        loadAssetUrl={() => new Promise(() => {})}
+      />,
+    )
+
+    expect(screen.getByText('Напишите сообщение, чтобы начать диалог.')).toBeInTheDocument()
+    act(() => store.selectConversation(CONVERSATION_ID))
+    expect(await screen.findByText('Сообщений пока нет. Напишите первый запрос.')).toBeInTheDocument()
+    expect(screen.queryByText('Напишите сообщение, чтобы начать диалог.')).not.toBeInTheDocument()
+  })
+
+  it('системное сообщение check_unavailable объясняет, что модель не вызывалась', async () => {
+    const store = createChatStore({
+      ...testState(),
+      messages: {
+        [CONVERSATION_ID]: [
+          {
+            ...testRun('run-check').userMessage,
+            id: 'system-check',
+            role: 'system',
+            kind: 'check_unavailable',
+            text: 'Проверка безопасности временно недоступна.',
+          },
+        ],
+      },
+    })
+    render(
+      <ChatThread
+        store={store}
+        actions={{ send: () => {}, cancel: () => {} }}
+        loadAssetUrl={() => new Promise(() => {})}
+      />,
+    )
+
+    const note = await screen.findByRole('note', { name: 'Проверка недоступна' })
+    expect(note).toHaveTextContent('Проверка безопасности временно недоступна.')
+    expect(note).toHaveTextContent('Сообщение не передано модели. Повторите позже.')
+  })
+
+  it('кнопки composer содержат иконку и сохраняют доступное имя', async () => {
+    const store = createChatStore(testState())
+    const { run, userMessage } = testRun('run-1')
+    render(
+      <ChatThread
+        store={store}
+        actions={{ send: () => {}, cancel: () => {} }}
+        loadAssetUrl={() => new Promise(() => {})}
+      />,
+    )
+
+    const send = await screen.findByRole('button', { name: 'Отправить' })
+    expect(send.querySelector('svg')).not.toBeNull()
+
+    act(() => store.startRun(run, userMessage))
+    const enqueue = await screen.findByRole('button', { name: 'В очередь' })
+    const stop = screen.getByRole('button', { name: 'Остановить' })
+    expect(enqueue.querySelector('svg')).not.toBeNull()
+    expect(stop.querySelector('svg')).not.toBeNull()
   })
 
   it('сохраняет отметку незавершённого ответа после отмены и нового запроса', async () => {

@@ -44,6 +44,13 @@ PLAN_EVENT_TYPES = [
     "checks_status",
     "pr_closed",
     "operation_unknown",
+    "pr_review",
+    "merge_started",
+    "pr_merged",
+    "rollback_status",
+    "release_blocked",
+    "release_unblocked",
+    "external_publish",
 ]
 
 

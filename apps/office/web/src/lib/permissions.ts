@@ -2,11 +2,12 @@ import type {
   Participant,
   ReleaseCandidate,
   ReleaseDecision,
+  ReleaseQueueState,
   Task,
   TaskDecision,
   TaskStatus,
 } from '@/api/types'
-import { FAILURE_KIND_LABELS, STATUS_LABELS } from '@/lib/labels'
+import { STATUS_LABELS, failureLabel } from '@/lib/labels'
 
 export type Permission = { allowed: true } | { allowed: false; reason: string }
 
@@ -25,19 +26,28 @@ export const TASK_DECISION_STATUSES: Record<TaskDecision, readonly TaskStatus[]>
 
 const ALLOWED: Permission = { allowed: true }
 
+export const RELEASE_ADMIN_ONLY = 'Откат и возобновление выпуска доступны только администратору.'
+
 export function canAct(participant: Participant, target: Task, action: TaskDecision): Permission
 export function canAct(
   participant: Participant,
   target: ReleaseCandidate,
   action: ReleaseDecision,
+  queue?: ReleaseQueueState | null,
 ): Permission
 export function canAct(
   participant: Participant,
   target: Task | ReleaseCandidate,
   action: TaskDecision | ReleaseDecision,
+  queue?: ReleaseQueueState | null,
 ): Permission {
   if ('owner_id' in target) {
-    if (participant.id !== target.owner_id) {
+    const adminRetry =
+      action === 'retry' &&
+      participant.role === 'admin' &&
+      target.status === 'needs_attention' &&
+      target.integration_started
+    if (participant.id !== target.owner_id && !adminRetry) {
       return { allowed: false, reason: 'Решения по задаче принимает только её владелец.' }
     }
     if (!TASK_DECISION_STATUSES[action as TaskDecision].includes(target.status)) {
@@ -46,29 +56,48 @@ export function canAct(
     if (action === 'approve_spec' && target.spec === null) {
       return { allowed: false, reason: 'Требования ещё не подготовлены.' }
     }
+    if (action === 'cancel' && target.merge_sha !== null) {
+      return { allowed: false, reason: 'PR задачи уже слит в main: отмена недоступна.' }
+    }
+    if (action === 'cancel' && target.merge_pending) {
+      return { allowed: false, reason: 'Выполняется слияние PR задачи: отмена недоступна.' }
+    }
     if (action === 'retry' && target.status === 'failed' && target.failure_kind !== null) {
       return {
         allowed: false,
-        reason: `${FAILURE_KIND_LABELS[target.failure_kind]} Повтор недоступен: поставьте новую задачу.`,
+        reason: `${failureLabel(target)} Повтор недоступен: поставьте новую задачу.`,
       }
     }
-    if (action === 'retry' && target.usage.model_calls >= target.usage.model_calls_limit) {
+    const integration = target.status === 'needs_attention' && target.integration_started
+    if (
+      action === 'retry' &&
+      !integration &&
+      target.usage.model_calls >= target.usage.model_calls_limit
+    ) {
       return { allowed: false, reason: 'Бюджет обращений к моделям исчерпан. Повтор недоступен.' }
     }
     return ALLOWED
   }
 
   if (participant.role !== 'admin') {
-    return {
-      allowed: false,
-      reason: 'Подтверждение выпуска и откат доступны только администратору.',
-    }
+    return { allowed: false, reason: RELEASE_ADMIN_ONLY }
   }
-  if (action === 'approve_release' && target.status !== 'pending') {
-    return { allowed: false, reason: 'Подтвердить можно только ожидающего кандидата.' }
-  }
-  if (action === 'rollback' && !(target.status === 'released' && target.is_published)) {
+  if (
+    action === 'rollback' &&
+    !(target.status === 'released' && target.is_published && target.kind === 'release')
+  ) {
     return { allowed: false, reason: 'Откатить можно только опубликованный сейчас выпуск.' }
+  }
+  if (action === 'resume_releases') {
+    if (!queue?.configured) {
+      return { allowed: false, reason: 'Выпуск не настроен.' }
+    }
+    const halted =
+      target.blocked_reason !== null &&
+      (target.status === 'pending' || queue.active_release_id === target.id)
+    if (queue.release_blocked_by !== target.id && !halted) {
+      return { allowed: false, reason: 'Возобновить можно только остановленный выпуск.' }
+    }
   }
   return ALLOWED
 }

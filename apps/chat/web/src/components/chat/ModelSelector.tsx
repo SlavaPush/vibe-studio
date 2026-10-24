@@ -27,8 +27,10 @@ export function ModelSelector({ models, value, onChange }: ModelSelectorProps) {
   const choices: ModelChoice[] = ['auto', 'image', ...textModels.map((model) => model.value)]
 
   return (
-    <div className="flex items-center gap-2">
-      <Label htmlFor="model-select">Модель</Label>
+    <div className="flex min-w-0 flex-1 items-center gap-2 md:flex-none">
+      <Label htmlFor="model-select" className="sr-only md:not-sr-only">
+        Модель
+      </Label>
       <Select
         value={value}
         onValueChange={(next) => {
@@ -36,7 +38,7 @@ export function ModelSelector({ models, value, onChange }: ModelSelectorProps) {
           if (choice) onChange(choice)
         }}
       >
-        <SelectTrigger id="model-select" className="w-56" aria-describedby="model-select-hint">
+        <SelectTrigger id="model-select" className="w-full min-w-0 md:w-56" aria-describedby="model-select-hint">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>

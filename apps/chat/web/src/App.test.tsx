@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { describe, expect, it, vi } from 'vitest'
 import { ApiRequestError, type ApiClient } from '@/api/client'
 import { createChatController, type ChatController } from '@/store/chatController'
-import { createChatStore, initialChatState } from '@/store/conversations'
+import { createChatStore, initialChatState, NO_CONVERSATION } from '@/store/conversations'
 import { draftKey } from '@/store/drafts'
 import { watchVersion } from '@/store/versionWatch'
 import { CONVERSATION_ID, switchedRunEvents, testRun, testState } from '@/test/fixtures'
@@ -49,10 +49,106 @@ describe('App', () => {
     )
     render(<App store={store} controller={fakeController()} />)
 
-    expect(await screen.findByText('Ответ не завершён')).toBeInTheDocument()
-    expect(screen.getByText('Не удалось получить ответ')).toBeInTheDocument()
-    expect(screen.getByText('Исход запроса к модели неизвестен.')).toBeInTheDocument()
-    expect(screen.getByText('Код операции: op_partial')).toBeInTheDocument()
+    const answer = await screen.findByRole('article', { name: 'Ответ ассистента' })
+    expect(within(answer).getByText('Ответ не завершён')).toBeInTheDocument()
+    const alert = screen.getByRole('alert')
+    expect(within(alert).getByText('Ответ не завершён')).toBeInTheDocument()
+    expect(alert).toHaveTextContent('Исход запроса к модели неизвестен.')
+    expect(alert).not.toHaveTextContent('op_partial')
+    expect(screen.queryByText(/Код операции/)).not.toBeInTheDocument()
+  })
+
+  it('показывает версию приложения в списке диалогов', () => {
+    const store = createChatStore(testState())
+    render(<App store={store} controller={fakeController()} version="v-test" />)
+    const aside = screen.getByRole('navigation', { name: 'Диалоги' }).closest('aside')!
+    expect(within(aside).getByText('Версия: v-test')).toBeInTheDocument()
+  })
+
+  it('ссылка быстрого перехода переводит фокус на поле «Сообщение»', () => {
+    const store = createChatStore(testState())
+    render(<App store={store} controller={fakeController()} />)
+    const link = screen.getByRole('link', { name: 'Перейти к полю сообщения' })
+    expect(link).toHaveAttribute('href', '#composer-input')
+    link.focus()
+    expect(link).toHaveFocus()
+    fireEvent.click(link)
+    expect(screen.getByRole('textbox', { name: 'Сообщение' })).toHaveFocus()
+  })
+
+  it('без диалогов показывает пустое состояние списка и экрана', () => {
+    const store = createChatStore({
+      ...testState(),
+      conversations: [],
+      activeConversationId: null,
+      messages: {},
+      loaded: {},
+    })
+    render(<App store={store} controller={fakeController()} />)
+    expect(
+      screen.getByText('Диалогов пока нет. Диалог создаётся при отправке первого сообщения.'),
+    ).toBeInTheDocument()
+    expect(screen.getByText('Напишите сообщение, чтобы начать диалог.')).toBeInTheDocument()
+    expect(screen.queryByText('Сообщений пока нет. Напишите первый запрос.')).not.toBeInTheDocument()
+  })
+
+  it('при сетевой ошибке загрузки списка показывает уведомление без пустого состояния', async () => {
+    const api = {
+      models: vi.fn().mockResolvedValue({ items: [] }),
+      me: vi.fn().mockResolvedValue(testState().session),
+      conversations: vi
+        .fn()
+        .mockRejectedValue(
+          new ApiRequestError(
+            { code: 'service_unavailable', message: 'Нет соединения с сервером. Повторите позже.', retryable: true, operation_id: 'network' },
+            0,
+          ),
+        ),
+    } as unknown as ApiClient
+    const store = createChatStore(initialChatState())
+    const controller = createChatController(store, api)
+    render(<App store={store} controller={controller} />)
+    await act(() => controller.start())
+
+    const alert = screen.getByRole('alert')
+    expect(within(alert).getByText('Нет связи с сервером')).toBeInTheDocument()
+    expect(alert).toHaveTextContent('Нет соединения с сервером. Повторите позже.')
+    expect(screen.queryByText(/Диалогов пока нет/)).not.toBeInTheDocument()
+  })
+
+  it('ошибка создания диалога видна на текущем экране и исчезает после успешного создания', async () => {
+    const created = { ...testState().conversations[0], id: 'created-conversation', title: 'Новый' }
+    const createConversation = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new ApiRequestError(
+          { code: 'internal_error', message: 'Не удалось создать диалог.', retryable: true, operation_id: 'op_create' },
+          500,
+        ),
+      )
+      .mockResolvedValueOnce(created)
+    const api = {
+      models: vi.fn().mockResolvedValue({ items: [] }),
+      me: vi.fn().mockResolvedValue(testState().session),
+      conversations: vi.fn().mockResolvedValue({ items: [] }),
+      createConversation,
+      messages: vi.fn().mockResolvedValue({ items: [], active_run_id: null, runs: [] }),
+    } as unknown as ApiClient
+    const store = createChatStore(initialChatState())
+    const controller = createChatController(store, api)
+    render(<App store={store} controller={controller} />)
+    await act(() => controller.start())
+
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Новый диалог' })))
+    const alert = screen.getByRole('alert')
+    expect(within(alert).getByText('Ошибка сервера')).toBeInTheDocument()
+    expect(alert).not.toHaveTextContent('op_create')
+
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Новый диалог' })))
+    expect(screen.getByRole('heading', { name: 'Новый' })).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(store.getState().errors[NO_CONVERSATION]).toBeUndefined()
+    window.localStorage.clear()
   })
 
   it('переименовывает диалог по Enter и отменяет по Escape', () => {
@@ -667,5 +763,123 @@ describe('App', () => {
     expect(createRun.mock.calls[1][0]).toBe(CONVERSATION_ID)
     expect(createRun.mock.calls[1][1].text).toBe(secondVisible.trim())
     window.localStorage.clear()
+  })
+})
+
+describe('App: панель диалогов на мобильной ширине', () => {
+  const OTHER_ID = 'other-conversation'
+
+  function renderWithTwoConversations(overrides: Partial<ChatController> = {}) {
+    const base = testState()
+    const store = createChatStore({
+      ...base,
+      conversations: [
+        ...base.conversations,
+        { ...base.conversations[0], id: OTHER_ID, title: 'Второй диалог' },
+      ],
+    })
+    render(<App store={store} controller={fakeController(overrides)} />)
+  }
+
+  async function openPanel() {
+    const trigger = screen.getByRole('button', { name: 'Открыть список диалогов' })
+    trigger.focus()
+    fireEvent.click(trigger)
+    const panel = await screen.findByRole('dialog', { name: 'Диалоги' })
+    return { trigger, panel }
+  }
+
+  it('закрыта по умолчанию: в документе один список диалогов', () => {
+    renderWithTwoConversations()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.getAllByRole('navigation', { name: 'Диалоги' })).toHaveLength(1)
+    expect(screen.getByRole('button', { name: 'Открыть список диалогов' })).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it('открывается кнопкой меню, переносит фокус внутрь и закрывается при выборе диалога', async () => {
+    const selectConversation = vi.fn()
+    renderWithTwoConversations({ selectConversation })
+    const { trigger, panel } = await openPanel()
+
+    expect(trigger).toHaveAttribute('aria-expanded', 'true')
+    await waitFor(() => expect(panel).toContainElement(document.activeElement as HTMLElement))
+    expect(within(panel).getByRole('navigation', { name: 'Диалоги' })).toBeInTheDocument()
+
+    fireEvent.click(within(panel).getByRole('button', { name: 'Второй диалог' }))
+    expect(selectConversation).toHaveBeenCalledWith(OTHER_ID)
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(trigger).toHaveFocus()
+  })
+
+  it('закрывается после создания нового диалога', async () => {
+    const createConversation = vi.fn()
+    renderWithTwoConversations({ createConversation })
+    const { panel } = await openPanel()
+
+    fireEvent.click(within(panel).getByRole('button', { name: 'Новый диалог' }))
+    expect(createConversation).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  })
+
+  it('не закрывается при переименовании диалога', async () => {
+    const renameConversation = vi.fn()
+    renderWithTwoConversations({ renameConversation })
+    const { panel } = await openPanel()
+
+    fireEvent.click(within(panel).getByRole('button', { name: 'Переименовать диалог «Второй диалог»' }))
+    const input = within(panel).getByRole('textbox', { name: 'Название диалога' })
+    fireEvent.change(input, { target: { value: 'Новое название' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(renameConversation).toHaveBeenCalledWith(OTHER_ID, 'Новое название')
+    expect(screen.getByRole('dialog', { name: 'Диалоги' })).toBe(panel)
+  })
+
+  it.each([
+    ['по Escape', (panel: HTMLElement) => fireEvent.keyDown(panel, { key: 'Escape' })],
+    [
+      'кнопкой закрытия',
+      (panel: HTMLElement) => fireEvent.click(within(panel).getByRole('button', { name: 'Закрыть список диалогов' })),
+    ],
+    [
+      'по нажатию на оверлей',
+      async () => {
+        const overlay = document.querySelector('[data-slot="dialog-overlay"]')
+        if (!overlay) throw new Error('оверлей не найден')
+        await act(() => new Promise((resolve) => setTimeout(resolve, 0)))
+        fireEvent.pointerDown(overlay)
+        fireEvent.click(overlay)
+      },
+    ],
+  ])('закрывается %s и возвращает фокус на кнопку меню', async (_, close) => {
+    renderWithTwoConversations()
+    const { trigger, panel } = await openPanel()
+
+    await close(panel)
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(trigger).toHaveFocus()
+  })
+
+  it('закрывается, когда окно становится шире 768 px', async () => {
+    const listeners = new Set<() => void>()
+    const desktop = {
+      matches: false,
+      media: '(min-width: 768px)',
+      addEventListener: (_type: string, listener: () => void) => listeners.add(listener),
+      removeEventListener: (_type: string, listener: () => void) => listeners.delete(listener),
+    }
+    vi.stubGlobal('matchMedia', (media: string) => (media === desktop.media ? desktop : { ...desktop, media }))
+    try {
+      renderWithTwoConversations()
+      await openPanel()
+      expect(listeners.size).toBe(1)
+
+      act(() => {
+        desktop.matches = true
+        listeners.forEach((listener) => listener())
+      })
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })

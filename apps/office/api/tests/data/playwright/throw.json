@@ -1,0 +1,174 @@
+{
+  "config": {
+    "argv": [
+      "/usr/bin/node",
+      "/usr/bin/playwright",
+      "test",
+      "--config",
+      "/cfg/playwright.config.ts",
+      "throw.pw.ts"
+    ],
+    "configFile": "/cfg/playwright.config.ts",
+    "rootDir": "/qa",
+    "failOnFlakyTests": false,
+    "forbidOnly": true,
+    "fullyParallel": false,
+    "globalSetup": null,
+    "globalTeardown": null,
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {
+      "actualWorkers": 1
+    },
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "/tmp/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "",
+        "name": "",
+        "testDir": "/qa",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.pw.ts"
+        ],
+        "timeout": 5000
+      }
+    ],
+    "filteredProjects": [
+      {
+        "grep": {},
+        "grepInvert": null,
+        "outputDir": "/tmp/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "name": "",
+        "testDir": "/qa",
+        "snapshotDir": "/qa",
+        "testIgnore": [],
+        "testMatch": "**/*.pw.ts",
+        "timeout": 5000,
+        "use": {},
+        "dependencies": [],
+        "ignoreSnapshots": false,
+        "__projectId": ""
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "line",
+        null
+      ],
+      [
+        "json",
+        {
+          "outputFile": "/data/throw.json"
+        }
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "default",
+    "updateSourceMethod": "patch",
+    "version": "1.64.1",
+    "workers": 1,
+    "webServer": null
+  },
+  "suites": [
+    {
+      "title": "apps/chat/web/e2e/office/throw.pw.ts",
+      "file": "apps/chat/web/e2e/office/throw.pw.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "ошибка в коде теста",
+          "ok": false,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 5000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "failed",
+                  "duration": 56,
+                  "error": {
+                    "message": "Error: Список диалогов не задан",
+                    "stack": "Error: Список диалогов не задан\n    at /qa/apps/chat/web/e2e/office/throw.pw.ts:6:42",
+                    "location": {
+                      "file": "/qa/apps/chat/web/e2e/office/throw.pw.ts",
+                      "column": 42,
+                      "line": 6
+                    },
+                    "snippet": "\u001b[0m \u001b[90m 4 |\u001b[39m   \u001b[36mawait\u001b[39m page\u001b[33m.\u001b[39msetContent(\u001b[32m`<textarea aria-label=\"Сообщение\"></textarea>`\u001b[39m)\u001b[33m;\u001b[39m\n \u001b[90m 5 |\u001b[39m   \u001b[36mconst\u001b[39m items \u001b[33m=\u001b[39m \u001b[33mJSON\u001b[39m\u001b[33m.\u001b[39mparse(\u001b[32m\"{\\\"items\\\": null}\"\u001b[39m)\u001b[33m;\u001b[39m\n\u001b[31m\u001b[1m>\u001b[22m\u001b[39m\u001b[90m 6 |\u001b[39m   \u001b[36mif\u001b[39m (\u001b[33m!\u001b[39m\u001b[33mArray\u001b[39m\u001b[33m.\u001b[39misArray(items\u001b[33m.\u001b[39mitems)) \u001b[36mthrow\u001b[39m \u001b[36mnew\u001b[39m \u001b[33mError\u001b[39m(\u001b[32m\"Список диалогов не задан\"\u001b[39m)\u001b[33m;\u001b[39m\n \u001b[90m   |\u001b[39m                                          \u001b[31m\u001b[1m^\u001b[22m\u001b[39m\n \u001b[90m 7 |\u001b[39m   \u001b[36mawait\u001b[39m expect(page\u001b[33m.\u001b[39mgetByLabel(\u001b[32m\"Сообщение\"\u001b[39m\u001b[33m,\u001b[39m { exact\u001b[33m:\u001b[39m \u001b[36mtrue\u001b[39m }))\u001b[33m.\u001b[39mtoBeVisible()\u001b[33m;\u001b[39m\n \u001b[90m 8 |\u001b[39m })\u001b[33m;\u001b[39m\n \u001b[90m 9 |\u001b[39m\u001b[0m"
+                  },
+                  "errors": [
+                    {
+                      "location": {
+                        "file": "/qa/apps/chat/web/e2e/office/throw.pw.ts",
+                        "column": 42,
+                        "line": 6
+                      },
+                      "message": "Error: Список диалогов не задан\n\n  4 |   await page.setContent(`<textarea aria-label=\"Сообщение\"></textarea>`);\n  5 |   const items = JSON.parse(\"{\\\"items\\\": null}\");\n> 6 |   if (!Array.isArray(items.items)) throw new Error(\"Список диалогов не задан\");\n    |                                          ^\n  7 |   await expect(page.getByLabel(\"Сообщение\", { exact: true })).toBeVisible();\n  8 | });\n  9 |\n    at /qa/apps/chat/web/e2e/office/throw.pw.ts:6:42"
+                    }
+                  ],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T12:24:15.591Z",
+                  "annotations": [],
+                  "attachments": [
+                    {
+                      "name": "error-context",
+                      "contentType": "text/markdown",
+                      "path": "/tmp/test-results/apps-chat-web-e2e-office-throw.pw.ts-ошибка-в-коде-теста/error-context.md"
+                    }
+                  ],
+                  "errorLocation": {
+                    "file": "/qa/apps/chat/web/e2e/office/throw.pw.ts",
+                    "column": 42,
+                    "line": 6
+                  }
+                }
+              ],
+              "status": "unexpected"
+            }
+          ],
+          "id": "d8dde2b5f00a6980791f-894ea1a3e4becaae43e1",
+          "file": "apps/chat/web/e2e/office/throw.pw.ts",
+          "line": 3,
+          "column": 5
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-10-24T12:24:15.311Z",
+    "duration": 483.067,
+    "expected": 0,
+    "skipped": 0,
+    "unexpected": 1,
+    "flaky": 0
+  }
+}

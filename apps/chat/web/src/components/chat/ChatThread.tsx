@@ -8,6 +8,7 @@ import {
   type AssistantRuntime,
   type MessageState,
 } from '@assistant-ui/react'
+import { ArrowUp, ListPlus, Square } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ApiRequestError } from '@/api/client'
 import type { AssetRef, AssetUrl, Effort, ModelProfile, SystemMessageKind } from '@/api/types'
@@ -35,6 +36,15 @@ const SYSTEM_TITLES: Record<SystemMessageKind, string> = {
   refusal: 'Запрос отклонён',
   check_unavailable: 'Проверка недоступна',
 }
+
+const SYSTEM_HINTS: Partial<Record<SystemMessageKind, string>> = {
+  model_switched: 'Выбор модели в списке не изменился.',
+  check_unavailable: 'Сообщение не передано модели. Повторите позже.',
+}
+
+const COMPOSER_BUTTON = 'rounded-full md:h-9 md:w-auto md:rounded-md md:px-4'
+
+const COMPOSER_HINT_ID = 'composer-hint'
 
 const THINKING_DOT_DELAYS = ['[animation-delay:0ms]', '[animation-delay:200ms]', '[animation-delay:400ms]']
 
@@ -99,6 +109,7 @@ export function ChatThread({ store, actions, loadAssetUrl, queue }: ChatThreadPr
     if (!id || state.loaded[id]) return 'ready'
     return state.errors[id] ? 'failed' : 'loading'
   })
+  const noConversation = useChatState(store, (state) => state.activeConversationId === null)
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
@@ -107,13 +118,16 @@ export function ChatThread({ store, actions, loadAssetUrl, queue }: ChatThreadPr
         <ThreadPrimitive.Viewport
           role="log"
           aria-label="Сообщения диалога"
-          className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 py-6"
+          tabIndex={0}
+          className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-3 py-4 outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset md:px-4 md:py-6"
         >
           {historyStatus === 'loading' && <LoadingStatus label="Загрузка сообщений…" />}
           {historyStatus === 'ready' && (
             <AuiIf condition={(state) => state.thread.isEmpty}>
-              <p className="m-auto text-sm text-muted-foreground">
-                Сообщений пока нет. Напишите первый запрос.
+              <p className="m-auto text-center text-sm text-muted-foreground">
+                {noConversation
+                  ? 'Напишите сообщение, чтобы начать диалог.'
+                  : 'Сообщений пока нет. Напишите первый запрос.'}
               </p>
             </AuiIf>
           )}
@@ -124,30 +138,45 @@ export function ChatThread({ store, actions, loadAssetUrl, queue }: ChatThreadPr
           </ThreadPrimitive.Messages>
         </ThreadPrimitive.Viewport>
         {queue}
-        <ComposerPrimitive.Root className="flex items-end gap-2 border-t p-4">
-          <ComposerPrimitive.Input
-            aria-label="Сообщение"
-            placeholder="Напишите сообщение"
-            rows={1}
-            onKeyDown={(event) => {
-              if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return
-              if (sendBlocked || running) event.preventDefault()
-              if (!sendBlocked && running) enqueueComposer()
-            }}
-            className="min-h-9 flex-1 resize-none rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
-          />
-          <AuiIf condition={(state) => !state.thread.isRunning}>
-            <ComposerPrimitive.Send asChild>
-              <Button>Отправить</Button>
-            </ComposerPrimitive.Send>
-          </AuiIf>
-          <AuiIf condition={(state) => state.thread.isRunning}>
-            <EnqueueButton disabled={sendBlocked} onClick={enqueueComposer} />
-            <ComposerPrimitive.Cancel asChild>
-              <Button variant="outline">Остановить</Button>
-            </ComposerPrimitive.Cancel>
-          </AuiIf>
-        </ComposerPrimitive.Root>
+        <div className="border-t p-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
+          <ComposerPrimitive.Root className="flex items-end gap-2">
+            <ComposerPrimitive.Input
+              id="composer-input"
+              aria-label="Сообщение"
+              aria-describedby={noConversation ? undefined : COMPOSER_HINT_ID}
+              placeholder="Спросите что-нибудь…"
+              rows={1}
+              onKeyDown={(event) => {
+                if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return
+                if (sendBlocked || running) event.preventDefault()
+                if (!sendBlocked && running) enqueueComposer()
+              }}
+              className="max-h-40 min-h-10 min-w-0 flex-1 resize-none overflow-y-auto rounded-md border border-input bg-transparent px-3 py-2 text-base shadow-xs md:min-h-9 md:text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring"
+            />
+            <AuiIf condition={(state) => !state.thread.isRunning}>
+              <ComposerPrimitive.Send asChild>
+                <Button size="icon" className={COMPOSER_BUTTON}>
+                  <ArrowUp className="md:hidden" />
+                  <span className="sr-only md:not-sr-only">Отправить</span>
+                </Button>
+              </ComposerPrimitive.Send>
+            </AuiIf>
+            <AuiIf condition={(state) => state.thread.isRunning}>
+              <EnqueueButton disabled={sendBlocked} onClick={enqueueComposer} />
+              <ComposerPrimitive.Cancel asChild>
+                <Button variant="outline" size="icon" className={COMPOSER_BUTTON}>
+                  <Square className="fill-current md:hidden" />
+                  <span className="sr-only md:not-sr-only">Остановить</span>
+                </Button>
+              </ComposerPrimitive.Cancel>
+            </AuiIf>
+          </ComposerPrimitive.Root>
+          {!noConversation && (
+            <p id={COMPOSER_HINT_ID} className="mt-2 text-xs text-muted-foreground">
+              Enter — отправить, Shift+Enter — новая строка
+            </p>
+          )}
+        </div>
       </ThreadPrimitive.Root>
     </AssistantRuntimeProvider>
   )
@@ -156,8 +185,15 @@ export function ChatThread({ store, actions, loadAssetUrl, queue }: ChatThreadPr
 function EnqueueButton({ disabled, onClick }: { disabled: boolean; onClick: () => void }) {
   const empty = useAuiState((state) => state.composer.isEmpty)
   return (
-    <Button type="button" disabled={disabled || empty} onClick={onClick}>
-      В очередь
+    <Button
+      type="button"
+      size="icon"
+      className={COMPOSER_BUTTON}
+      disabled={disabled || empty}
+      onClick={onClick}
+    >
+      <ListPlus className="md:hidden" />
+      <span className="sr-only md:not-sr-only">В очередь</span>
     </Button>
   )
 }
@@ -220,10 +256,10 @@ function AssetImage({ asset, loadAssetUrl }: { asset: AssetRef; loadAssetUrl: Lo
   }, [url])
 
   return (
-    <Card className="w-64 overflow-hidden py-0">
+    <Card className="w-64 max-w-full overflow-hidden py-0">
       <CardContent className="p-0">
         {error ? (
-          <div role="alert" className="flex flex-col gap-2 p-3 text-sm text-destructive">
+          <div role="alert" className="flex flex-col gap-2 p-3 text-sm [overflow-wrap:anywhere] text-destructive">
             <p>{error}</p>
             <Button size="sm" variant="outline" onClick={() => setAttempt((value) => value + 1)}>
               Повторить
@@ -268,7 +304,7 @@ function ChatMessage({ message, models, loadAssetUrl }: ChatMessageProps) {
         aria-label={SYSTEM_TITLES[kind]}
         data-kind={kind}
         className={cn(
-          'mx-auto w-full max-w-prose rounded-md border px-3 py-2 text-sm',
+          'mx-auto w-full max-w-prose rounded-md border px-3 py-2 text-sm [overflow-wrap:anywhere]',
           kind === 'refusal'
             ? 'border-destructive/50 text-destructive'
             : 'border-dashed bg-muted text-muted-foreground',
@@ -276,13 +312,14 @@ function ChatMessage({ message, models, loadAssetUrl }: ChatMessageProps) {
       >
         <p className="font-medium">{SYSTEM_TITLES[kind]}</p>
         <p>{text}</p>
+        {SYSTEM_HINTS[kind] && <p>{SYSTEM_HINTS[kind]}</p>}
       </div>
     )
   }
 
   if (message.role === 'user') {
     return (
-      <div className="ml-auto max-w-[80%] rounded-lg bg-secondary px-3 py-2 text-sm whitespace-pre-wrap text-secondary-foreground">
+      <div className="ml-auto max-w-[85%] rounded-lg bg-secondary px-3 py-2 text-sm [overflow-wrap:anywhere] whitespace-pre-wrap text-secondary-foreground md:max-w-[80%]">
         {text}
       </div>
     )
@@ -291,7 +328,10 @@ function ChatMessage({ message, models, loadAssetUrl }: ChatMessageProps) {
   const model = models.find((profile) => profile.id === custom.effective_model)
   const isPending = message.status?.type === 'running'
   return (
-    <article aria-label="Ответ ассистента" className="flex max-w-[80%] flex-col gap-2 text-sm">
+    <article
+      aria-label="Ответ ассистента"
+      className="flex max-w-[85%] min-w-0 flex-col gap-2 text-sm [overflow-wrap:anywhere] md:max-w-[80%]"
+    >
       {custom.asset && <AssetImage asset={custom.asset} loadAssetUrl={loadAssetUrl} />}
       {text && <p className="whitespace-pre-wrap">{text}</p>}
       {custom.incomplete && <p className="text-xs text-destructive">Ответ не завершён</p>}

@@ -14,6 +14,7 @@ import {
   type CheckReport,
   type Participant,
   type PullRequestCheck,
+  type PullRequestReview,
   type Task,
   type TaskDecision,
   type TaskEvent,
@@ -26,12 +27,14 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { openTaskEvents, type StreamState } from '@/lib/events'
 import {
   AGENT_ROLE_LABELS,
+  CHECKLIST_LABELS,
   CHECK_STATUS_LABELS,
   DECISION_LABELS,
   EVENT_TYPE_LABELS,
-  FAILURE_KIND_LABELS,
   PROFILE_LABELS,
+  REVIEW_VERDICT_LABELS,
   STATUS_LABELS,
+  failureLabel,
   formatDateTime,
 } from '@/lib/labels'
 import { TASK_DECISION_STATUSES, canAct } from '@/lib/permissions'
@@ -143,11 +146,10 @@ export function TaskCard({ task, participant, run, onRefresh }: TaskCardProps) {
       </CardHeader>
       <CardContent className="grid gap-4">
         {task.status === 'failed' && task.failure_kind && (
-          <p className="text-sm text-destructive">
-            Причина ошибки: {FAILURE_KIND_LABELS[task.failure_kind]}
-          </p>
+          <p className="text-sm text-destructive">Причина ошибки: {failureLabel(task)}</p>
         )}
-        {(task.pr_url || task.checks) && <PullRequestPanel task={task} />}
+        {(task.pr_url || task.checks || task.merge_sha) && <PullRequestPanel task={task} />}
+        {task.pr_review && <ReviewPanel review={task.pr_review} />}
         {actions.length > 0 && (
           <div className="grid gap-2">
             <div className="flex flex-wrap gap-2">
@@ -285,7 +287,15 @@ function checkLabel(check: PullRequestCheck): string {
   return CHECK_STATUS_LABELS[check.status] ?? check.status
 }
 
+function commitUrl(task: Task, sha: string): string | null {
+  if (!task.pr_url || !/\/pull\/\d+$/.test(task.pr_url)) return null
+  return task.pr_url.replace(/\/pull\/\d+$/, `/commit/${sha}`)
+}
+
 function PullRequestPanel({ task }: { task: Task }) {
+  const mergeUrl = task.merge_sha ? commitUrl(task, task.merge_sha) : null
+  const mergeChecks = task.checks !== null && task.checks.head_sha === task.merge_sha
+  const checksLabel = mergeChecks ? 'Обязательные проверки итогового commit' : 'Обязательные проверки PR'
   return (
     <section aria-labelledby="task-pr-heading" className="grid gap-2 text-sm">
       <h3 id="task-pr-heading" className="font-medium">
@@ -303,12 +313,30 @@ function PullRequestPanel({ task }: { task: Task }) {
       ) : (
         <p className="text-muted-foreground">PR ещё не открыт.</p>
       )}
+      {task.merge_sha && (
+        <p>
+          PR слит в main, итоговый commit{' '}
+          {mergeUrl ? (
+            <a
+              href={mergeUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label={`Итоговый commit ${task.merge_sha.slice(0, 7)}`}
+              className="font-mono underline underline-offset-4"
+            >
+              {task.merge_sha.slice(0, 7)}
+            </a>
+          ) : (
+            <code className="font-mono">{task.merge_sha.slice(0, 7)}</code>
+          )}
+        </p>
+      )}
       {task.checks && (
         <div className="grid gap-1">
           <p className="text-muted-foreground">
-            Обязательные проверки для <code className="font-mono">{task.checks.head_sha.slice(0, 7)}</code>
+            {checksLabel} для <code className="font-mono">{task.checks.head_sha.slice(0, 7)}</code>
           </p>
-          <ul aria-label="Обязательные проверки PR" className="grid gap-1">
+          <ul aria-label={checksLabel} className="grid gap-1">
             {task.checks.checks.map((check) => (
               <li key={check.name} className="flex flex-wrap items-center gap-2">
                 <code className="font-mono">{check.name}</code>
@@ -329,6 +357,46 @@ function PullRequestPanel({ task }: { task: Task }) {
           </ul>
         </div>
       )}
+    </section>
+  )
+}
+
+function ReviewPanel({ review }: { review: PullRequestReview }) {
+  return (
+    <section aria-labelledby="task-review-heading" className="grid gap-2 text-sm">
+      <h3 id="task-review-heading" className="flex flex-wrap items-center gap-2 font-medium">
+        Решение агента ревью PR
+        <Badge variant={review.verdict === 'approve' ? 'secondary' : 'destructive'}>
+          {REVIEW_VERDICT_LABELS[review.verdict]}
+        </Badge>
+      </h3>
+      <p className="text-muted-foreground">
+        Для head <code className="font-mono">{review.head_sha.slice(0, 7)}</code>,{' '}
+        <time dateTime={review.created_at}>{formatDateTime(review.created_at)}</time>
+      </p>
+      <p>{review.reasons}</p>
+      {review.required_changes.length > 0 && (
+        <div className="grid gap-1">
+          <h4 className="font-medium">Что изменить</h4>
+          <ul aria-label="Что изменить" className="list-disc pl-5">
+            {review.required_changes.map((change) => (
+              <li key={change}>{change}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <div className="grid gap-1">
+        <h4 className="font-medium">Чек-лист</h4>
+        <ul aria-label="Чек-лист агента ревью" className="grid gap-1">
+          {review.checklist.map((item) => (
+            <li key={item.item} className="flex flex-wrap items-center gap-2">
+              <Badge variant={item.ok ? 'secondary' : 'destructive'}>{item.ok ? 'В порядке' : 'Замечание'}</Badge>
+              <span>{CHECKLIST_LABELS[item.item] ?? item.item}</span>
+              {item.note && <span className="text-muted-foreground">{item.note}</span>}
+            </li>
+          ))}
+        </ul>
+      </div>
     </section>
   )
 }

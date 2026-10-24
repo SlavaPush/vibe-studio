@@ -19,7 +19,7 @@ export type TaskStatus = (typeof TASK_STATUSES)[number]
 
 export const SLOT_STATUSES: readonly TaskStatus[] = ['awaiting_spec_approval', 'developing', 'reviewing']
 
-export const FAILURE_KINDS = ['checks_failed', 'pr_rejected'] as const
+export const FAILURE_KINDS = ['checks_failed', 'pr_rejected', 'deploy_failed', 'verify_failed'] as const
 export type FailureKind = (typeof FAILURE_KINDS)[number]
 
 export const SLOTS_TOTAL = 3
@@ -27,7 +27,7 @@ export const SLOTS_TOTAL = 3
 export const MODEL_PROFILES = ['local', 'cloud', 'hybrid'] as const
 export type ModelProfile = (typeof MODEL_PROFILES)[number]
 
-export const AGENT_ROLES = ['supervisor', 'researcher', 'developer', 'qa', 'critic'] as const
+export const AGENT_ROLES = ['supervisor', 'researcher', 'developer', 'qa', 'critic', 'pr_reviewer'] as const
 export type AgentRole = (typeof AGENT_ROLES)[number]
 
 export const TASK_EVENT_TYPES = [
@@ -47,13 +47,20 @@ export const TASK_EVENT_TYPES = [
   'checks_status',
   'pr_closed',
   'operation_unknown',
+  'pr_review',
+  'merge_started',
+  'pr_merged',
+  'rollback_status',
+  'release_blocked',
+  'release_unblocked',
+  'external_publish',
 ] as const
 export type TaskEventType = (typeof TASK_EVENT_TYPES)[number]
 
 export const TASK_DECISIONS = ['approve_spec', 'cancel', 'retry'] as const
 export type TaskDecision = (typeof TASK_DECISIONS)[number]
 
-export const RELEASE_DECISIONS = ['approve_release', 'rollback'] as const
+export const RELEASE_DECISIONS = ['rollback', 'resume_releases'] as const
 export type ReleaseDecision = (typeof RELEASE_DECISIONS)[number]
 
 export const RELEASE_KINDS = ['release', 'rollback'] as const
@@ -61,14 +68,19 @@ export type ReleaseKind = (typeof RELEASE_KINDS)[number]
 
 export const RELEASE_STATUSES = [
   'pending',
-  'approved',
   'deploying',
+  'verifying',
+  'rolling_back',
   'released',
   'failed',
-  'rolled_back',
+  'superseded',
   'revoked',
+  'rolled_back',
 ] as const
 export type ReleaseStatus = (typeof RELEASE_STATUSES)[number]
+
+export const RELEASE_ORIGINS = ['task', 'auto_revert', 'resume', 'manual_rollback'] as const
+export type ReleaseOrigin = (typeof RELEASE_ORIGINS)[number]
 
 export interface OfficeSessionRequest {
   access_code: string
@@ -118,6 +130,22 @@ export interface PullRequestChecks {
   checks: PullRequestCheck[]
 }
 
+export interface PullRequestReviewItem {
+  item: string
+  ok: boolean
+  note: string
+}
+
+export interface PullRequestReview {
+  id: string
+  head_sha: string
+  verdict: 'approve' | 'reject'
+  reasons: string
+  required_changes: string[]
+  checklist: PullRequestReviewItem[]
+  created_at: string
+}
+
 export interface Task {
   id: string
   title: string
@@ -138,6 +166,10 @@ export interface Task {
   head_sha: string | null
   failure_kind: FailureKind | null
   checks: PullRequestChecks | null
+  pr_review: PullRequestReview | null
+  merge_sha: string | null
+  merge_pending: boolean
+  integration_started: boolean
   changed_files: string[]
   fix_cycles: number
   usage: Usage
@@ -180,6 +212,7 @@ export interface ReleaseDecisionRequest {
   decision: ReleaseDecision
   expected_version: number
   idempotency_key: string
+  fix_sha?: string
 }
 
 export interface Decision {
@@ -202,6 +235,51 @@ export interface DeployResult {
   error: string | null
 }
 
+export interface VerifyResult {
+  expected_sha: string
+  ok: boolean
+  fault: boolean
+  attempts: number
+  health: boolean
+  version: string | null
+  page_version: string | null
+  error: string | null
+  checked_at: string
+}
+
+export interface RollbackResult {
+  target_sha: string
+  target_deploy_id: string
+  render_deploy_id: string | null
+  render_status: string | null
+  started_at: string
+  finished_at: string | null
+  verify: VerifyResult | null
+  error: string | null
+}
+
+export interface RevertResult {
+  status: 'pending' | 'active' | 'needs_attention' | 'merged'
+  source: 'auto' | 'resume'
+  base_sha: string | null
+  head_sha: string | null
+  pr_number: number | null
+  pr_url: string | null
+  checks: PullRequestChecks | null
+  fix_sha: string | null
+  decision_id: string | null
+  candidate_id: string | null
+  reason: string | null
+}
+
+export interface ReleaseQueueState {
+  configured: boolean
+  active_release_id: string | null
+  release_blocked_by: string | null
+  blocked_reason: string | null
+  published_sha: string | null
+}
+
 export interface ReleaseCandidate {
   id: string
   task_id: string
@@ -215,10 +293,17 @@ export interface ReleaseCandidate {
   ci_run_ids: string[]
   pr_url: string | null
   created_at: string
-  approved_by: string | null
-  approved_at: string | null
   is_published: boolean
   deploy: DeployResult | null
+  pr_review_id: string | null
+  e2e: CheckReport | null
+  origin: ReleaseOrigin
+  origin_decision_id: string | null
+  superseded_by: string | null
+  blocked_reason: string | null
+  verify: VerifyResult | null
+  rollback: RollbackResult | null
+  revert: RevertResult | null
 }
 
 export interface Slots {

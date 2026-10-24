@@ -129,6 +129,26 @@ def test_retry_with_pushed_head_returns_to_integration(office, owner):
     assert office.store.get_task(task_id).status == TaskStatus.awaiting_integration
 
 
+def test_admin_retries_foreign_task_only_after_integration_started(office, owner):
+    _, _, task_id = owner
+    admin, _ = office.login("Админ", admin=True)
+    stranger, _ = office.login("Иван")
+    office.set_task(task_id, status="needs_attention")
+    response = decide(admin, task_id, "retry", version_of(office, task_id), "admin-retry-graph")
+    assert response.status_code == 403
+    assert response.json()["code"] == "forbidden_not_owner"
+    office.set_task(task_id, head_sha="a" * 40)
+    response = decide(stranger, task_id, "retry", version_of(office, task_id), "stranger-retry-pushed")
+    assert response.status_code == 403
+    assert response.json()["code"] == "forbidden_not_owner"
+    response = decide(admin, task_id, "cancel", version_of(office, task_id), "admin-cancel-pushed")
+    assert response.status_code == 403
+    assert response.json()["code"] == "forbidden_not_owner"
+    response = decide(admin, task_id, "retry", version_of(office, task_id), "admin-retry-pushed")
+    assert response.status_code == 200
+    assert office.store.get_task(task_id).status == TaskStatus.awaiting_integration
+
+
 def test_cancel_awaiting_integration(office, owner):
     client, _, task_id = owner
     office.set_task(task_id, status="awaiting_integration", pr_number=3)

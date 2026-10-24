@@ -9,7 +9,13 @@ from app.config import APP_DIR
 QA_TEST_DIR = f"{APP_DIR}/web/e2e/office"
 QA_API_FILES = tuple(
     f"{APP_DIR}/{rel}"
-    for rel in ("contracts/api.md", "web/src/api/client.ts", "web/src/api/types.ts", "web/src/mocks/contract-examples.ts")
+    for rel in (
+        "contracts/api.md",
+        "web/src/api/client.ts",
+        "web/src/api/types.ts",
+        "web/src/mocks/contract-examples.ts",
+        "web/e2e/office/support/mock-api.ts",
+    )
 )
 CLIPPED = " [обрезано]"
 
@@ -125,6 +131,46 @@ class QaTurn(Reply):
 class CriticReview(Reply):
     verdict: Literal["pass", "changes_requested"]
     findings: list[ModelFinding] = Field(max_length=10)
+
+
+CHECKLIST = {
+    "paths": "изменённые пути",
+    "network": "новые сетевые вызовы",
+    "external_navigation": "навигация на внешние URL",
+    "inputs": "новые поля ввода",
+    "system_messages": "скрытие системных сообщений",
+    "sent_text": "изменение отправляемого текста",
+    "third_party_code": "скопированный сторонний код",
+}
+
+
+class ChecklistItem(Reply):
+    item: Literal[
+        "paths", "network", "external_navigation", "inputs", "system_messages", "sent_text", "third_party_code"
+    ]
+    ok: bool
+    note: Annotated[str, clip(500)] = Field(max_length=500)
+
+
+class PrReview(Reply):
+    verdict: Literal["approve", "reject"]
+    checklist: list[ChecklistItem] = Field(min_length=len(CHECKLIST), max_length=len(CHECKLIST))
+    reasons: Annotated[str, clip(2000)] = Field(min_length=1, max_length=2000)
+    required_changes: list[Annotated[str, clip(500)]] = Field(max_length=8)
+
+    @model_validator(mode="after")
+    def consistent(self) -> "PrReview":
+        if not self.reasons.strip():
+            raise ValueError("reasons must not be empty")
+        if sorted(item.item for item in self.checklist) != sorted(CHECKLIST):
+            raise ValueError("checklist must contain every item once")
+        if any(not change.strip() for change in self.required_changes):
+            raise ValueError("required change must not be empty")
+        if self.verdict == "reject" and not self.required_changes:
+            raise ValueError("reject requires required_changes")
+        if self.verdict == "approve" and not all(item.ok for item in self.checklist):
+            raise ValueError("approve requires every checklist item ok")
+        return self
 
 
 class Finding(Reply):
@@ -295,7 +341,19 @@ DEVELOPER = """Ты — разработчик офиса. Ты изменяеш
 QA = """Ты — QA офиса. Ты пишешь один сквозной тест Playwright на TypeScript, который проверяет критерии приёмки на собранном приложении vibe-chat.
 
 Тест пишется только в файл, указанный в данных. Импорт: import { test, expect } from "@playwright/test". Приложение открывается через page.goto("/"). Тест должен не проходить на исходной версии интерфейса и проходить после изменений разработчика.
-Условия запуска: собранное приложение работает без backend и без сети. Каждый запрос к /api/, который тест не подменил, получает ответ с ошибкой, а такой тест не принимается как проверка критериев. Поэтому до page.goto подмени все запросы к API одним обработчиком page.route("**/api/**", ...): по методу и пути запроса верни route.fulfill с contentType "application/json" и телом по контракту API vibe-chat. Пути контракта, клиента API и примеров ответов указаны в данных; прочитай нужные действием read_file.
+Условия запуска: собранное приложение работает без backend и без сети. Каждый запрос к /api/, который тест не подменил, получает ответ с ошибкой, а такой тест не принимается как проверка критериев.
+Обязательные правила:
+- до page.goto подмени API готовым модулем: import { mockApi, fixtures } from "./support/mock-api"; await mockApi(page). mockApi отвечает на все запросы /api/** по контракту: сеанс, модели, версия, один диалог fixtures.conversation, пустая история, создание диалога и задания, поток событий с ответом ассистента fixtures.reply. Другой ответ задай вторым аргументом: await mockApi(page, { "GET /api/conversations/{id}/messages": { body: {...} } }). Неподменённый путь получает 404. Модуль менять нельзя, прочитай его действием read_file;
+- ищи элементы по роли и точному имени: page.getByRole("button", { name: fixtures.conversation.title, exact: true }), или через page.getByLabel("Сообщение", { exact: true }). Имя без exact сравнивается по подстроке и может совпасть с несколькими элементами;
+- не кликай и не жди элементы, которых нет в подмене и в интерфейсе;
+- жди видимого состояния через expect(...).toBeVisible() и другие проверки expect;
+- на исходной версии тест должен падать на проверке expect, а не на ошибке локатора, таймаута действия или кода теста.
+Пример:
+await mockApi(page);
+await page.goto("/");
+await page.getByRole("button", { name: fixtures.conversation.title, exact: true }).click();
+await expect(page.getByLabel("Сообщение", { exact: true })).toBeVisible();
+Пути контракта, клиента API, примеров ответов и модуля подмены указаны в данных; прочитай нужные действием read_file.
 Каждый ответ — один ход: summary, criteria_covered (номера проверяемых критериев), findings (замечания: blocking, criterion или file, line, text; пустой список, если замечаний нет), done и список действий (не больше 8).
 Действия (неиспользуемые поля равны null): list_dir, read_file (path), write_file (path, content — полный текст теста), run_step со step = e2e — запуск тестов на текущей версии.
 Когда тест готов, верни done = true. Ответь только JSON по заданной схеме."""
@@ -303,3 +361,21 @@ QA = """Ты — QA офиса. Ты пишешь один сквозной те
 CRITIC = """Ты — ревьюер-критик офиса. Проверь diff изменений интерфейса vibe-chat по требованиям и отчёту проверок.
 
 Верни verdict (pass или changes_requested) и findings. Каждое замечание: blocking (true — критерий приёмки не выполнен или изменение содержит ошибку), criterion (номер критерия или null), file и line (место в diff или null), text — конкретное описание на русском. У замечания должен быть заполнен criterion или file. Не требуй изменений вне apps/chat/web/src, apps/chat/web/public и apps/chat/web/index.html. Ответь только JSON по заданной схеме."""
+
+PR_REVIEWER = """Ты — агент ревью PR офиса. Ты решаешь, можно ли слить PR с изменением интерфейса vibe-chat в ветку main монорепозитория vibe-studio. Обязательные проверки PR, QA и критик уже пройдены; ты проверяешь изменение как ревьюер перед слиянием.
+
+Проверь diff по требованиям и по каждому пункту чек-листа:
+- paths — изменённые пути: только интерфейс apps/chat/web/ и тесты QA apps/chat/web/e2e/office/;
+- network — новые сетевые вызовы: fetch, XMLHttpRequest, WebSocket, EventSource, sendBeacon, загрузка внешних скриптов и ресурсов;
+- external_navigation — навигация на внешние URL: ссылки, window.open, location, формы с внешним action;
+- inputs — новые поля ввода и данные, которые они собирают;
+- system_messages — скрытие или подмена системных сообщений сервиса (ошибки, переключение модели, предупреждения);
+- sent_text — изменение текста, который интерфейс отправляет на сервер;
+- third_party_code — скопированный сторонний код, лицензии, минифицированные вставки.
+
+Ответ:
+- verdict — approve (слить) или reject (отклонить);
+- checklist — ровно по одному элементу на каждый пункт: item (ключ пункта), ok (true — изменения по пункту нет или оно оправдано требованиями), note (кратко на русском, что найдено);
+- reasons — обоснование решения на русском;
+- required_changes — что изменить, чтобы PR можно было принять (на русском); при reject не меньше одного пункта, при approve — пустой список.
+approve допустим, только если все пункты чек-листа ok и изменение выполняет требования. Ответь только JSON по заданной схеме."""

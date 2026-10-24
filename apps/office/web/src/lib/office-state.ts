@@ -1,9 +1,10 @@
-import type { ReleaseCandidate, Slots, Task } from '@/api/types'
+import type { ReleaseCandidate, ReleaseQueueState, Slots, Task } from '@/api/types'
 import type { StreamState } from '@/lib/events'
 
 export interface OfficeState {
   tasks: Task[]
   releases: ReleaseCandidate[]
+  queue: ReleaseQueueState | null
   slots: Slots | null
   slotsSeq: number
   selectedId: string | null
@@ -14,6 +15,7 @@ export type OfficeAction =
   | { type: 'reset' }
   | { type: 'tasks'; tasks: Task[] }
   | { type: 'releases'; releases: ReleaseCandidate[] }
+  | { type: 'queue'; queue: ReleaseQueueState }
   | { type: 'slots'; seq: number; slots: Slots }
   | { type: 'select'; id: string }
   | { type: 'stream'; stream: StreamState }
@@ -21,6 +23,7 @@ export type OfficeAction =
 export const initialOfficeState: OfficeState = {
   tasks: [],
   releases: [],
+  queue: null,
   slots: null,
   slotsSeq: 0,
   selectedId: null,
@@ -54,6 +57,8 @@ export function officeReducer(state: OfficeState, action: OfficeAction): OfficeS
     }
     case 'releases':
       return { ...state, releases: mergeByVersion(state.releases, action.releases) }
+    case 'queue':
+      return { ...state, queue: action.queue }
     case 'slots':
       return action.seq > state.slotsSeq
         ? { ...state, slots: action.slots, slotsSeq: action.seq }

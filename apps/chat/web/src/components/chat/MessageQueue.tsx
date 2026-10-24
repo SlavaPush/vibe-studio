@@ -46,13 +46,13 @@ export function MessageQueue({ store, onRemove, onResume }: MessageQueueProps) {
         {announcement}
       </p>
       {queue.length > 0 && (
-        <section aria-label="Очередь сообщений" className="flex flex-col gap-2 border-t px-4 py-3 text-sm">
+        <section aria-label="Очередь сообщений" className="flex flex-col gap-2 border-t px-3 py-3 text-sm [overflow-wrap:anywhere] md:px-4">
           <h2 className="text-xs font-medium text-muted-foreground">
             В очереди: {queue.length} из {QUEUE_LIMIT}
           </h2>
           {pause && (
             <div className="flex flex-wrap items-center gap-2">
-              <p role="status" className="text-destructive">
+              <p role="status" className="min-w-0 text-destructive">
                 Очередь приостановлена: {pause.reason === 'request_failed' && pause.error ? pause.error.message : PAUSE_REASONS[pause.reason]}
               </p>
               <Button size="sm" variant="outline" onClick={onResume}>

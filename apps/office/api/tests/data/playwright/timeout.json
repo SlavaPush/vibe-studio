@@ -1,0 +1,166 @@
+{
+  "config": {
+    "argv": [
+      "/usr/bin/node",
+      "/usr/bin/playwright",
+      "test",
+      "--config",
+      "/cfg/playwright.config.ts",
+      "timeout.pw.ts"
+    ],
+    "configFile": "/cfg/playwright.config.ts",
+    "rootDir": "/qa",
+    "failOnFlakyTests": false,
+    "forbidOnly": true,
+    "fullyParallel": false,
+    "globalSetup": null,
+    "globalTeardown": null,
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {
+      "actualWorkers": 1
+    },
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "/tmp/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "",
+        "name": "",
+        "testDir": "/qa",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.pw.ts"
+        ],
+        "timeout": 5000
+      }
+    ],
+    "filteredProjects": [
+      {
+        "grep": {},
+        "grepInvert": null,
+        "outputDir": "/tmp/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "name": "",
+        "testDir": "/qa",
+        "snapshotDir": "/qa",
+        "testIgnore": [],
+        "testMatch": "**/*.pw.ts",
+        "timeout": 5000,
+        "use": {},
+        "dependencies": [],
+        "ignoreSnapshots": false,
+        "__projectId": ""
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "line",
+        null
+      ],
+      [
+        "json",
+        {
+          "outputFile": "/data/timeout.json"
+        }
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "default",
+    "updateSourceMethod": "patch",
+    "version": "1.64.1",
+    "workers": 1,
+    "webServer": null
+  },
+  "suites": [
+    {
+      "title": "apps/chat/web/e2e/office/timeout.pw.ts",
+      "file": "apps/chat/web/e2e/office/timeout.pw.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "ожидание отсутствующего элемента до таймаута теста",
+          "ok": false,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 5000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "timedOut",
+                  "duration": 5030,
+                  "error": {
+                    "message": "\u001b[31mTest timeout of 5000ms exceeded.\u001b[39m",
+                    "stack": "\u001b[31mTest timeout of 5000ms exceeded.\u001b[39m"
+                  },
+                  "errors": [
+                    {
+                      "message": "\u001b[31mTest timeout of 5000ms exceeded.\u001b[39m"
+                    },
+                    {
+                      "location": {
+                        "file": "/qa/apps/chat/web/e2e/office/timeout.pw.ts",
+                        "column": 76,
+                        "line": 5
+                      },
+                      "message": "Error: locator.click: Test timeout of 5000ms exceeded.\nCall log:\n\u001b[2m  - waiting for getByRole('button', { name: 'Диалог из теста', exact: true })\u001b[22m\n\n\n  3 | test(\"ожидание отсутствующего элемента до таймаута теста\", async ({ page }) => {\n  4 |   await page.setContent(`<nav aria-label=\"Диалоги\"><button>Новый диалог</button></nav>`);\n> 5 |   await page.getByRole(\"button\", { name: \"Диалог из теста\", exact: true }).click();\n    |                                                                            ^\n  6 |   await expect(page.getByText(\"Ответ\")).toBeVisible();\n  7 | });\n  8 |\n    at /qa/apps/chat/web/e2e/office/timeout.pw.ts:5:76"
+                    }
+                  ],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-24T12:24:07.555Z",
+                  "annotations": [],
+                  "attachments": [
+                    {
+                      "name": "error-context",
+                      "contentType": "text/markdown",
+                      "path": "/tmp/test-results/apps-chat-web-e2e-office-t-d30ee--элемента-до-таймаута-теста/error-context.md"
+                    }
+                  ]
+                }
+              ],
+              "status": "unexpected"
+            }
+          ],
+          "id": "a552faf302c9dc3a740b-f7c0e138a3859e689ae1",
+          "file": "apps/chat/web/e2e/office/timeout.pw.ts",
+          "line": 3,
+          "column": 5
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-10-24T12:24:07.279Z",
+    "duration": 5483.05,
+    "expected": 0,
+    "skipped": 0,
+    "unexpected": 1,
+    "flaky": 0
+  }
+}

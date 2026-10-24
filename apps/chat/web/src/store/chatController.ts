@@ -1,5 +1,5 @@
 import { ApiRequestError, isNetworkError, type ApiClient } from '@/api/client'
-import type { Message, MessageList, Run, RunEvent, RunEventType, RunStatus, Session } from '@/api/types'
+import type { ApiError, Message, MessageList, Run, RunEvent, RunEventType, RunStatus, Session } from '@/api/types'
 import type { SendResult } from './assistantAdapter'
 import {
   activeRunId,
@@ -62,6 +62,7 @@ export function createChatController(
   let generation = 0
   let restoring = false
   let creating: Promise<string | null> | null = null
+  let createFailure: { key: string; error: ApiError } | null = null
   let persisted: Pick<ChatState, 'queue' | 'queuePause' | 'trackedRunId'> | null = null
 
   store.subscribe(() => {
@@ -198,12 +199,13 @@ export function createChatController(
     try {
       const list = await api.conversations()
       store.setConversations(list.items)
+      store.setError(NO_CONVERSATION, undefined)
       const { activeConversationId, session } = store.getState()
       const saved = session ? readLocal(activeConversationKey(session.user_id)) : ''
       id = activeConversationId ?? list.items.find((item) => item.id === saved)?.id ?? list.items[0]?.id
       if (id) store.selectConversation(id)
     } catch (error) {
-      handleError(error)
+      handleError(error, null)
     } finally {
       if (!store.getState().sessionChecked) store.finishSessionCheck()
     }
@@ -417,12 +419,19 @@ export function createChatController(
     },
 
     async createConversation() {
+      const key = store.getState().activeConversationId ?? NO_CONVERSATION
       try {
         const conversation = await api.createConversation()
+        if (createFailure && store.getState().errors[createFailure.key] === createFailure.error) {
+          store.setError(createFailure.key, undefined)
+        }
+        createFailure = null
         store.addConversation(conversation)
         rememberActive(conversation.id)
       } catch (error) {
-        handleError(error)
+        handleError(error, key)
+        const stored = store.getState().errors[key]
+        if (error instanceof ApiRequestError && stored === error.error) createFailure = { key, error: stored }
       }
     },
 
