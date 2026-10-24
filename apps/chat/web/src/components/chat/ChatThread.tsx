@@ -44,6 +44,8 @@ const SYSTEM_HINTS: Partial<Record<SystemMessageKind, string>> = {
 
 const COMPOSER_BUTTON = 'rounded-full md:h-9 md:w-auto md:rounded-md md:px-4'
 
+const COMPOSER_HINT_ID = 'composer-hint'
+
 const THINKING_DOT_DELAYS = ['[animation-delay:0ms]', '[animation-delay:200ms]', '[animation-delay:400ms]']
 
 export type LoadAssetUrl = (id: string) => Promise<AssetUrl>
@@ -136,37 +138,45 @@ export function ChatThread({ store, actions, loadAssetUrl, queue }: ChatThreadPr
           </ThreadPrimitive.Messages>
         </ThreadPrimitive.Viewport>
         {queue}
-        <ComposerPrimitive.Root className="flex items-end gap-2 border-t p-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
-          <ComposerPrimitive.Input
-            id="composer-input"
-            aria-label="Сообщение"
-            placeholder="Напишите сообщение"
-            rows={1}
-            onKeyDown={(event) => {
-              if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return
-              if (sendBlocked || running) event.preventDefault()
-              if (!sendBlocked && running) enqueueComposer()
-            }}
-            className="max-h-40 min-h-10 min-w-0 flex-1 resize-none overflow-y-auto rounded-md border border-input bg-transparent px-3 py-2 text-base shadow-xs md:min-h-9 md:text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring"
-          />
-          <AuiIf condition={(state) => !state.thread.isRunning}>
-            <ComposerPrimitive.Send asChild>
-              <Button size="icon" className={COMPOSER_BUTTON}>
-                <ArrowUp className="md:hidden" />
-                <span className="sr-only md:not-sr-only">Отправить</span>
-              </Button>
-            </ComposerPrimitive.Send>
-          </AuiIf>
-          <AuiIf condition={(state) => state.thread.isRunning}>
-            <EnqueueButton disabled={sendBlocked} onClick={enqueueComposer} />
-            <ComposerPrimitive.Cancel asChild>
-              <Button variant="outline" size="icon" className={COMPOSER_BUTTON}>
-                <Square className="fill-current md:hidden" />
-                <span className="sr-only md:not-sr-only">Остановить</span>
-              </Button>
-            </ComposerPrimitive.Cancel>
-          </AuiIf>
-        </ComposerPrimitive.Root>
+        <div className="border-t p-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
+          <ComposerPrimitive.Root className="flex items-end gap-2">
+            <ComposerPrimitive.Input
+              id="composer-input"
+              aria-label="Сообщение"
+              aria-describedby={noConversation ? undefined : COMPOSER_HINT_ID}
+              placeholder="Напишите сообщение"
+              rows={1}
+              onKeyDown={(event) => {
+                if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return
+                if (sendBlocked || running) event.preventDefault()
+                if (!sendBlocked && running) enqueueComposer()
+              }}
+              className="max-h-40 min-h-10 min-w-0 flex-1 resize-none overflow-y-auto rounded-md border border-input bg-transparent px-3 py-2 text-base shadow-xs md:min-h-9 md:text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring"
+            />
+            <AuiIf condition={(state) => !state.thread.isRunning}>
+              <ComposerPrimitive.Send asChild>
+                <Button size="icon" className={COMPOSER_BUTTON}>
+                  <ArrowUp className="md:hidden" />
+                  <span className="sr-only md:not-sr-only">Отправить</span>
+                </Button>
+              </ComposerPrimitive.Send>
+            </AuiIf>
+            <AuiIf condition={(state) => state.thread.isRunning}>
+              <EnqueueButton disabled={sendBlocked} onClick={enqueueComposer} />
+              <ComposerPrimitive.Cancel asChild>
+                <Button variant="outline" size="icon" className={COMPOSER_BUTTON}>
+                  <Square className="fill-current md:hidden" />
+                  <span className="sr-only md:not-sr-only">Остановить</span>
+                </Button>
+              </ComposerPrimitive.Cancel>
+            </AuiIf>
+          </ComposerPrimitive.Root>
+          {!noConversation && (
+            <p id={COMPOSER_HINT_ID} className="mt-2 text-xs text-muted-foreground">
+              Enter — отправить, Shift+Enter — новая строка
+            </p>
+          )}
+        </div>
       </ThreadPrimitive.Root>
     </AssistantRuntimeProvider>
   )
