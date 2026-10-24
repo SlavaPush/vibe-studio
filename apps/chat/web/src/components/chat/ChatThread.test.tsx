@@ -72,6 +72,27 @@ describe('ChatThread', () => {
     expect(screen.queryByText('Ответ готовится…')).not.toBeInTheDocument()
   })
 
+  it('кнопки composer содержат иконку и сохраняют доступное имя', async () => {
+    const store = createChatStore(testState())
+    const { run, userMessage } = testRun('run-1')
+    render(
+      <ChatThread
+        store={store}
+        actions={{ send: () => {}, cancel: () => {} }}
+        loadAssetUrl={() => new Promise(() => {})}
+      />,
+    )
+
+    const send = await screen.findByRole('button', { name: 'Отправить' })
+    expect(send.querySelector('svg')).not.toBeNull()
+
+    act(() => store.startRun(run, userMessage))
+    const enqueue = await screen.findByRole('button', { name: 'В очередь' })
+    const stop = screen.getByRole('button', { name: 'Остановить' })
+    expect(enqueue.querySelector('svg')).not.toBeNull()
+    expect(stop.querySelector('svg')).not.toBeNull()
+  })
+
   it('сохраняет отметку незавершённого ответа после отмены и нового запроса', async () => {
     const store = createChatStore(testState())
     const first = testRun('run-1')

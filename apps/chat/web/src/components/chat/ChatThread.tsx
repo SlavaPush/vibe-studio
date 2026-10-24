@@ -8,6 +8,7 @@ import {
   type AssistantRuntime,
   type MessageState,
 } from '@assistant-ui/react'
+import { ArrowUp, ListPlus, Square } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ApiRequestError } from '@/api/client'
 import type { AssetRef, AssetUrl, Effort, ModelProfile, SystemMessageKind } from '@/api/types'
@@ -35,6 +36,8 @@ const SYSTEM_TITLES: Record<SystemMessageKind, string> = {
   refusal: 'Запрос отклонён',
   check_unavailable: 'Проверка недоступна',
 }
+
+const COMPOSER_BUTTON = 'rounded-full md:h-9 md:w-auto md:rounded-md md:px-4'
 
 const THINKING_DOT_DELAYS = ['[animation-delay:0ms]', '[animation-delay:200ms]', '[animation-delay:400ms]']
 
@@ -124,7 +127,7 @@ export function ChatThread({ store, actions, loadAssetUrl, queue }: ChatThreadPr
           </ThreadPrimitive.Messages>
         </ThreadPrimitive.Viewport>
         {queue}
-        <ComposerPrimitive.Root className="flex flex-wrap items-end gap-2 border-t p-4 pb-[max(1rem,env(safe-area-inset-bottom))] md:flex-nowrap">
+        <ComposerPrimitive.Root className="flex items-end gap-2 border-t p-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
           <ComposerPrimitive.Input
             aria-label="Сообщение"
             placeholder="Напишите сообщение"
@@ -134,17 +137,23 @@ export function ChatThread({ store, actions, loadAssetUrl, queue }: ChatThreadPr
               if (sendBlocked || running) event.preventDefault()
               if (!sendBlocked && running) enqueueComposer()
             }}
-            className="max-h-40 min-h-10 min-w-40 flex-1 resize-none overflow-y-auto rounded-md border border-input bg-transparent px-3 py-2 text-base shadow-xs md:min-h-9 md:min-w-auto md:text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            className="max-h-40 min-h-10 min-w-0 flex-1 resize-none overflow-y-auto rounded-md border border-input bg-transparent px-3 py-2 text-base shadow-xs md:min-h-9 md:text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
           />
           <AuiIf condition={(state) => !state.thread.isRunning}>
             <ComposerPrimitive.Send asChild>
-              <Button>Отправить</Button>
+              <Button size="icon" className={COMPOSER_BUTTON}>
+                <ArrowUp className="md:hidden" />
+                <span className="sr-only md:not-sr-only">Отправить</span>
+              </Button>
             </ComposerPrimitive.Send>
           </AuiIf>
           <AuiIf condition={(state) => state.thread.isRunning}>
             <EnqueueButton disabled={sendBlocked} onClick={enqueueComposer} />
             <ComposerPrimitive.Cancel asChild>
-              <Button variant="outline">Остановить</Button>
+              <Button variant="outline" size="icon" className={COMPOSER_BUTTON}>
+                <Square className="fill-current md:hidden" />
+                <span className="sr-only md:not-sr-only">Остановить</span>
+              </Button>
             </ComposerPrimitive.Cancel>
           </AuiIf>
         </ComposerPrimitive.Root>
@@ -156,8 +165,15 @@ export function ChatThread({ store, actions, loadAssetUrl, queue }: ChatThreadPr
 function EnqueueButton({ disabled, onClick }: { disabled: boolean; onClick: () => void }) {
   const empty = useAuiState((state) => state.composer.isEmpty)
   return (
-    <Button type="button" disabled={disabled || empty} onClick={onClick}>
-      В очередь
+    <Button
+      type="button"
+      size="icon"
+      className={COMPOSER_BUTTON}
+      disabled={disabled || empty}
+      onClick={onClick}
+    >
+      <ListPlus className="md:hidden" />
+      <span className="sr-only md:not-sr-only">В очередь</span>
     </Button>
   )
 }
