@@ -481,6 +481,29 @@ describe('ReleaseQueue', () => {
     expect(onRefresh).toHaveBeenCalledWith(blockedRelease)
   })
 
+  it('администратор повторяет revert-PR, требующий внимания, без fix_sha', async () => {
+    const api = fakeApi()
+    const stopped: ReleaseCandidate = {
+      ...blockedRelease,
+      revert: { ...blockedRelease.revert!, status: 'needs_attention', reason: 'Конфликт revert.' },
+    }
+    api.on(`POST /api/releases/${stopped.id}/decisions`, { decision_id: 'dec_14' })
+    renderQueue(admin, [...releases, stopped], releaseQueue)
+    fireEvent.click(screen.getByRole('button', { name: 'Повторить revert-PR' }))
+    const dialog = await screen.findByRole('alertdialog', { name: `Повторить revert-PR выпуска ${stopped.id}?` })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Повторить revert-PR' }))
+    await screen.findByText('Решение записано.')
+    const [body] = api.bodies(`POST /api/releases/${stopped.id}/decisions`) as Record<string, unknown>[]
+    expect(body).toMatchObject({ decision: 'resume_releases', expected_version: stopped.version })
+    expect(body).not.toHaveProperty('fix_sha')
+  })
+
+  it('повтор revert-PR недоступен, пока revert выполняется', () => {
+    fakeApi()
+    renderQueue(admin, [...releases, blockedRelease], releaseQueue)
+    expect(screen.queryByRole('button', { name: 'Повторить revert-PR' })).not.toBeInTheDocument()
+  })
+
   it('остановленный кандидат возобновляется без fix_sha после подтверждения', async () => {
     const api = fakeApi()
     const halted = { ...pending, blocked_reason: 'Состав выпуска не подтверждён: c3d4e5f: нет push.' }

@@ -457,7 +457,7 @@ class ReleaseQueue:
                 return None
 
     def _verify(self, candidate: ReleaseCandidate) -> bool:
-        if self.settings.verify_fault and candidate.kind == ReleaseKind.release:
+        if self.settings.verify_fault and candidate.kind == ReleaseKind.release and candidate.origin == ReleaseOrigin.task:
             result = VerifyResult(
                 expected_sha=candidate.commit_sha, ok=False, fault=True, attempts=0, health=False, version=None,
                 page_version=None, error="Управляемый сбой проверки (OFFICE_VERIFY_FAULT=1): сервис не проверялся.",
@@ -826,14 +826,14 @@ class ReleaseQueue:
         number = pulls[0]["number"]
         login = (self.github.get_pr(number).get("merged_by") or {}).get("login")
         if login == f"{self.settings.github_app_slug}[bot]":
-            if self._office_merge(sha):
+            if self.office_merge(sha):
                 return True, None
             return True, f"PR #{number} слит App, но офис не допускал его к слиянию"
         if login in self.settings.trusted_github_logins:
             return True, None
         return True, f"PR #{number} слит {login or 'неизвестным'}: логин не входит в OFFICE_TRUSTED_GITHUB_LOGINS"
 
-    def _office_merge(self, sha: str) -> bool:
+    def office_merge(self, sha: str) -> bool:
         with self.store.db.connection() as conn:
             merge = conn.fetchone(
                 "SELECT * FROM operations WHERE kind = 'merge_pr' AND status = 'succeeded' AND external_ref = :sha",
@@ -932,12 +932,14 @@ class ReleaseQueue:
                     f"Исправление {request.fix_sha[:7]} уже принято, кандидат исправления создан: "
                     "дождитесь его выпуска или укажите другой commit."
                 )
-            self.store.update_candidate(
-                conn, candidate.id, revert=new_revert("resume", request.fix_sha, decision.decision_id)
-            )
+            resumed = new_revert("resume", request.fix_sha, decision.decision_id)
+            if revert is not None:
+                resumed = resumed.model_copy(update={"attempt": revert.attempt, "tree": revert.tree})
+            self.store.update_candidate(conn, candidate.id, revert=resumed)
             return
         if state["release_blocked_by"] == candidate.id:
-            raise not_allowed("Блокировка после отката снимается публикацией исправления: укажите fix_sha.")
+            self._retry_revert_in(conn, candidate, decision)
+            return
         if not candidate.blocked_reason:
             raise not_allowed("Выпуск не остановлен: возобновлять нечего.")
         if candidate.id == state["active_release_id"]:
@@ -951,6 +953,31 @@ class ReleaseQueue:
         task = self.store.load_task(conn, candidate.task_id)
         if candidate.origin == ReleaseOrigin.task and candidate.kind == ReleaseKind.release and task.status == S.needs_attention:
             self.store.transition(conn, task.id, S.awaiting_release, expected_from=S.needs_attention)
+
+    def _retry_revert_in(self, conn: Connection, candidate: ReleaseCandidate, decision: Decision) -> None:
+        revert = candidate.revert
+        if revert is None or revert.status != "needs_attention":
+            raise not_allowed(
+                "Блокировка после отката снимается публикацией исправления: укажите fix_sha. Без fix_sha решение "
+                "повторяет revert-PR, только когда он требует внимания."
+            )
+        if revert.source == "auto" and revert.fix_sha is not None:
+            raise not_allowed("Revert-PR уже слит в main: укажите fix_sha исправления.")
+        row = conn.fetchone(
+            "SELECT key FROM operations WHERE release_id = :id AND status IN ('started', 'unknown') LIMIT 1",
+            {"id": candidate.id},
+        )
+        if row is not None:
+            raise not_allowed(f"Исход операции {row['key']} не установлен: повтор revert-PR недоступен, укажите fix_sha.")
+        self.store.update_candidate(
+            conn, candidate.id,
+            revert=revert.model_copy(
+                update={
+                    "status": "pending", "source": "auto", "attempt": revert.attempt + 1, "fix_sha": None,
+                    "decision_id": decision.decision_id, "candidate_id": None, "reason": None,
+                }
+            ),
+        )
 
     def _resolve_in(self, conn: Connection, candidate: ReleaseCandidate, live: str) -> None:
         rows = conn.fetchall(

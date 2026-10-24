@@ -313,6 +313,7 @@ def test_restart_after_saved_id_and_during_verification_does_not_post_again(q, m
 
 def failed_verification(q, **settings):
     sha = q.push("apps/chat/web/src/A.tsx", "export const a = 1\n")
+    admit(q, sha)
     release = q.candidate(sha)
     q.service.broken.add(sha[:7])
     worker = q.worker(**settings)
@@ -631,7 +632,7 @@ def test_active_release_defers_new_candidate_and_rollback_keeps_publication(q):
     assert created.expected_previous_sha == first
 
 
-def office_merge(q, sha: str, number: int, head: str = "f" * 40) -> None:
+def admit(q, sha: str, head: str = "f" * 40) -> str:
     task_id = q.office.queued_task(q.me["id"])
     log = OperationLog(q.store.db)
     for kind, key, ref in (("push", f"push:{task_id}:{head}", head), ("merge_pr", f"merge_pr:{task_id}:{head}", sha)):
@@ -642,12 +643,17 @@ def office_merge(q, sha: str, number: int, head: str = "f" * 40) -> None:
         conn.execute(
             "INSERT INTO pr_reviews (id, task_id, head_sha, verdict, reasons, required_changes, checklist, model, "
             "created_at) VALUES (:id, :task, :head, 'approve', 'ok', '[]', '[]', 'model', '2026-10-24T12:00:00.000000Z')",
-            {"id": f"prv_{number}", "task": task_id, "head": head},
+            {"id": f"prv_{sha[:12]}", "task": task_id, "head": head},
         )
         q.store.record_event(
             conn, task_id, TaskEventType.checks_status,
             {"head_sha": head, "checks": [{"name": "office-paths", "status": "completed", "conclusion": "success", "url": None}]},
         )
+    return task_id
+
+
+def office_merge(q, sha: str, number: int, head: str = "f" * 40) -> None:
+    task_id = admit(q, sha, head)
     q.fake.prs[number] = {
         "number": number, "state": "closed", "merged": True, "merge_commit_sha": sha, "merged_at": "2026-10-24T12:00:00Z",
         "merged_by": {"login": "vibe-office[bot]"}, "head": {"ref": f"office/{task_id}", "sha": head},
@@ -805,16 +811,265 @@ def test_revert_conflict_needs_attention_and_keeps_block(q):
     assert q.task(release.task_id).status == "failed"
 
 
-def test_resume_with_fix_sha_publishes_fix_and_unblocks(q):
+def roll_back(q, sha, **settings):
+    release = q.candidate(sha)
+    q.service.broken.add(sha[:7])
+    worker = q.worker(**settings)
+    q.settle(worker)
+    q.render.set("dep-2", "live")
+    q.settle(worker)
+    q.render.set("dep-3", "live")
+    q.settle(worker)
+    assert q.state()["release_blocked_by"] == release.id
+    return worker, release
+
+
+def finish_revert(q, worker, release):
+    head = q.release(release.id).revert.head_sha
+    q.fake.add_pr_runs(head, q.release(release.id).revert.pr_number)
+    drive_revert(q, worker)
+    fix = q.release(release.id).revert.fix_sha
+    q.fake.add_push_runs(fix)
+    drive_revert(q, worker)
+    assert q.release(release.id).revert.status == "merged"
+    [candidate] = [item for item in q.store.list_releases() if item.commit_sha == fix]
+    return candidate
+
+
+def test_revert_undoes_only_office_merges_and_their_qa_test(q):
+    first = q.push("apps/chat/web/src/A.tsx", "export const a = 1\n")
+    admit(q, first, "1" * 40)
+    owner = q.push("apps/office/api/app/x.py", "x = 1\n")
+    qa = "apps/chat/web/e2e/office/tsk_merged.pw.ts"
+    q.origin.write(qa, "import { test } from '@playwright/test'\n\ntest('a', async () => {})\n")
+    second = q.push("apps/chat/web/src/B.tsx", "export const b = 1\n")
+    admit(q, second, "2" * 40)
+    worker, release = roll_back(q, second)
+    drive_revert(q, worker)
+    current = q.release(release.id)
+    assert (current.revert.status, current.revert.pr_number) == ("active", 1)
+    [event] = [item for item in q.events(release.task_id, TaskEventType.tool_called) if item.tool == "git_revert"]
+    assert event.payload["arguments"] == f"office/revert-{release.id} {second[:7]} {first[:7]}"
+    tree = f"revert-{release.id}"
+    assert q.workspace.verify_branch(tree, current.revert.base_sha) == []
+    assert sorted(q.workspace.changed_names(tree, current.revert.base_sha, current.revert.head_sha)) == [
+        "apps/chat/web/e2e/office/tsk_merged.pw.ts", "apps/chat/web/src/A.tsx", "apps/chat/web/src/B.tsx",
+    ]
+    candidate = finish_revert(q, worker, release)
+    files = q.fake.git("ls-tree", "-r", "--name-only", candidate.commit_sha).splitlines()
+    assert "apps/office/api/app/x.py" in files
+    assert not {"apps/chat/web/src/A.tsx", "apps/chat/web/src/B.tsx", qa} & set(files)
+    assert q.suite.calls[-1] == (release.task_id, candidate.commit_sha, candidate.commit_sha, False)
+    assert owner != first
+
+
+def test_revert_without_office_merges_needs_attention(q):
+    sha = q.push("apps/chat/web/src/A.tsx", "export const a = 1\n")
+    worker, release = roll_back(q, sha)
+    drive_revert(q, worker)
+    current = q.release(release.id)
+    assert current.revert.status == "needs_attention"
+    assert "нет слияний PR офиса" in current.revert.reason and "fix_sha" in current.revert.reason
+    assert q.state()["release_blocked_by"] == release.id
+    assert q.fake.prs == {}
+    assert not q.workspace.worktree_path(f"revert-{release.id}").exists()
+    assert [(row["key"], row["status"]) for row in q.ops(release.id) if row["kind"] == "revert"] == [
+        (f"revert:{release.id}", "failed")
+    ]
+
+
+def test_verify_fault_applies_only_to_task_candidates(q):
+    sha = q.push("apps/chat/web/src/A.tsx", "export const a = 1\n")
+    admit(q, sha)
+    worker, release = roll_back(q, sha, verify_fault=True)
+    assert q.release(release.id).verify.fault is True
+    drive_revert(q, worker)
+    candidate = finish_revert(q, worker, release)
+    assert candidate.origin == ReleaseOrigin.auto_revert
+    q.settle(worker)
+    q.render.set(q.release(candidate.id).deploy.render_deploy_id, "live")
+    q.settle(worker)
+    current = q.release(candidate.id)
+    assert (current.status, current.verify.ok, current.verify.fault) == ("released", True, False)
+    assert q.state()["release_blocked_by"] is None
+    assert [path for path, _ in q.render.posts()] == ["/deploys", "/rollback", "/deploys"]
+
+
+def test_retry_revert_after_conflict_reuses_unpushed_branch(q):
     worker, release, sha = failed_verification(q)
     q.push("apps/chat/web/src/A.tsx", "export const a = 2\n")
     q.render.set("dep-3", "live")
     q.settle(worker)
     drive_revert(q, worker)
+    assert q.release(release.id).revert.status == "needs_attention"
+    q.push("apps/chat/web/src/A.tsx", "export const a = 1\n")
+    log = OperationLog(q.store.db)
+    stuck, _ = log.begin("push", f"push:revert:{release.id}:{'0' * 40}", release.task_id, release.id)
+    log.mark(stuck, OpStatus.unknown)
+    refused = q.decide(release.id, "resume_releases", "retry-unknown")
+    assert refused.status_code == 409 and "не установлен" in refused.json()["message"]
+    log.mark(stuck, OpStatus.failed)
+    response = q.decide(release.id, "resume_releases", "retry-revert")
+    assert response.status_code == 200
+    current = q.release(release.id)
+    assert (current.revert.status, current.revert.attempt, current.revert.decision_id) == (
+        "pending", 2, response.json()["decision_id"]
+    )
+    drive_revert(q, worker)
+    current = q.release(release.id)
+    assert (current.revert.status, current.revert.tree, current.revert.pr_number) == ("active", None, 1)
+    assert q.fake.prs[1]["head"]["ref"] == f"office/revert-{release.id}"
+    candidate = finish_revert(q, worker, release)
+    assert (candidate.origin, candidate.origin_decision_id) == (ReleaseOrigin.auto_revert, response.json()["decision_id"])
+    keys = [(row["key"], row["status"]) for row in q.ops(release.id) if row["kind"] == "revert"]
+    assert keys == [(f"revert:{release.id}", "failed"), (f"revert:{release.id}:2", "succeeded")]
+    assert sha != candidate.commit_sha
+
+
+def test_retry_revert_closes_pushed_pr_and_survives_restarts(q, monkeypatch):
+    worker, release, _ = blocked(q)
+    drive_revert(q, worker)
+    first = q.release(release.id).revert
+    q.fake.add_pr_runs(first.head_sha, 1)
+    merge = ("PUT", "/repos/SlavaPush/vibe-studio/pulls/1/merge")
+    q.fake.status[merge] = 405
+    drive_revert(q, worker)
+    current = q.release(release.id)
+    assert current.revert.status == "needs_attention" and q.fake.prs[1]["state"] == "open"
+    del q.fake.status[merge]
+    version = current.version
+    response = q.decide(release.id, "resume_releases", "retry-merge")
+    assert response.status_code == 200
+    replay = q.decide(release.id, "resume_releases", "retry-merge", expected_version=version)
+    assert replay.json() == response.json()
+    assert q.release(release.id).revert.attempt == 2
+    close = q.github.close_pr
+
+    def close_and_crash(number):
+        close(number)
+        raise Crash()
+
+    monkeypatch.setattr(q.github, "close_pr", close_and_crash)
+    with pytest.raises(Crash):
+        q.worker().revert_step()
+    monkeypatch.setattr(q.github, "close_pr", close)
+    assert q.fake.prs[1]["state"] == "closed"
+    assert [row["status"] for row in q.ops(release.id) if row["kind"] == "close_pr"] == ["started"]
+    real = q.workspace.revert_branch
+    monkeypatch.setattr(q.workspace, "revert_branch", lambda *args: (_ for _ in ()).throw(Crash()))
+    with pytest.raises(Crash):
+        q.worker().revert_step()
+    monkeypatch.setattr(q.workspace, "revert_branch", real)
+
+    def restarted():
+        for _ in range(20):
+            if not q.worker().revert_step():
+                return
+        raise AssertionError("revert does not settle")
+
+    restarted()
+    current = q.release(release.id)
+    assert (current.revert.status, current.revert.tree, current.revert.pr_number) == (
+        "active", f"revert-{release.id}-2", 2
+    )
+    assert q.fake.prs[2]["head"]["ref"] == f"office/revert-{release.id}-2"
+    assert not q.workspace.worktree_path(f"revert-{release.id}").exists()
+    q.fake.add_pr_runs(current.revert.head_sha, 2)
+    restarted()
+    fix = q.release(release.id).revert.fix_sha
+    q.fake.add_push_runs(fix)
+    restarted()
+    assert q.release(release.id).revert.status == "merged"
+    again = q.decide(release.id, "resume_releases", "retry-merge", expected_version=version)
+    assert again.json() == response.json()
+    restarted()
+    mutations = q.fake.mutations()
+    assert mutations.count(("POST", "/repos/SlavaPush/vibe-studio/pulls")) == 2
+    assert mutations.count(("PATCH", "/repos/SlavaPush/vibe-studio/pulls/1")) == 1
+    assert q.fake.merges() == 2
+    with q.store.db.connection() as conn:
+        rows = conn.fetchall(
+            "SELECT key, status FROM operations WHERE release_id = :id AND kind IN ('revert', 'close_pr') ORDER BY key",
+            {"id": release.id},
+        )
+    assert [(row["key"], row["status"]) for row in rows] == [
+        (f"close_pr:revert:{release.id}:2:1", "succeeded"),
+        (f"revert:{release.id}", "succeeded"),
+        (f"revert:{release.id}:2", "succeeded"),
+    ]
+    assert [row["key"] for row in q.ops(release.id) if row["status"] in ("started", "unknown")] == []
+    [candidate] = [item for item in q.store.list_releases() if item.commit_sha == fix]
+    q.settle(q.worker())
+    q.render.set(q.release(candidate.id).deploy.render_deploy_id, "live")
+    q.settle(q.current)
+    assert q.release(candidate.id).status == "released"
+    assert q.state()["release_blocked_by"] is None
+
+
+def refuse_merge(q, worker, release):
+    revert = q.release(release.id).revert
+    q.fake.add_pr_runs(revert.head_sha, revert.pr_number)
+    merge = ("PUT", f"/repos/SlavaPush/vibe-studio/pulls/{revert.pr_number}/merge")
+    q.fake.status[merge] = 405
+    drive_revert(q, worker)
+    del q.fake.status[merge]
+    current = q.release(release.id)
+    assert current.revert.status == "needs_attention" and q.fake.prs[revert.pr_number]["state"] == "open"
+
+
+def test_retry_after_rejected_fix_sha_takes_new_attempt_and_closes_open_pr(q):
+    worker, release, _ = blocked(q)
+    drive_revert(q, worker)
+    refuse_merge(q, worker, release)
+    assert q.decide(release.id, "resume_releases", "retry-first").status_code == 200
+    drive_revert(q, worker)
+    assert (q.release(release.id).revert.attempt, q.release(release.id).revert.pr_number) == (2, 2)
+    refuse_merge(q, worker, release)
+    assert q.decide(release.id, "resume_releases", "fix-missing", fix_sha="0" * 40).status_code == 200
+    drive_revert(q, worker)
+    current = q.release(release.id)
+    assert (current.revert.status, current.revert.source, current.revert.attempt) == ("needs_attention", "resume", 2)
+    assert current.revert.tree == f"revert-{release.id}-2"
+    assert q.decide(release.id, "resume_releases", "retry-second").status_code == 200
+    drive_revert(q, worker)
+    current = q.release(release.id)
+    assert (current.revert.status, current.revert.attempt, current.revert.pr_number) == ("active", 3, 3)
+    assert q.fake.prs[3]["head"]["ref"] == f"office/revert-{release.id}-3"
+    assert [q.fake.prs[number]["state"] for number in (1, 2, 3)] == ["closed", "closed", "open"]
+    finish_revert(q, worker, release)
+    keys = [(row["key"], row["status"]) for row in q.ops(release.id) if row["kind"] in ("revert", "close_pr")]
+    assert sorted(keys) == [
+        (f"close_pr:revert:{release.id}:2:1", "succeeded"),
+        (f"close_pr:revert:{release.id}:3:2", "succeeded"),
+        (f"revert:{release.id}", "succeeded"),
+        (f"revert:{release.id}:2", "succeeded"),
+        (f"revert:{release.id}:3", "succeeded"),
+    ]
+
+
+def test_revert_saved_before_retry_fields_is_read_as_first_attempt(q):
+    worker, release, _ = blocked(q)
+    saved = q.release(release.id).revert.model_dump(mode="json")
+    del saved["attempt"], saved["tree"]
+    with q.store.db.locked_transaction() as conn:
+        conn.execute("UPDATE release_candidates SET revert = :revert WHERE id = :id", {"revert": json.dumps(saved), "id": release.id})
+    current = q.release(release.id)
+    assert (current.revert.attempt, current.revert.tree) == (1, None)
+    drive_revert(q, worker)
+    assert q.fake.prs[1]["head"]["ref"] == f"office/revert-{release.id}"
+
+
+def test_resume_with_fix_sha_publishes_fix_and_unblocks(q):
+    worker, release, sha = failed_verification(q)
+    q.push("apps/chat/web/src/A.tsx", "export const a = 2\n")
+    q.render.set("dep-3", "live")
+    q.settle(worker)
+    assert q.release(release.id).revert.status == "pending"
+    assert q.decide(release.id, "resume_releases", "resume-no-fix").json()["code"] == "decision_not_allowed"
+    drive_revert(q, worker)
     fix = q.push("apps/chat/web/src/A.tsx", "export const a = 3\n")
     newer = q.push("apps/chat/web/src/B.tsx", "export const b = 1\n")
     old = q.candidate(sha, base=q.base, origin=ReleaseOrigin.task)
-    assert q.decide(release.id, "resume_releases", "resume-no-fix").json()["code"] == "decision_not_allowed"
     outside = q.decide(release.id, "resume_releases", "resume-wrong-target", fix_sha="0" * 40)
     assert outside.status_code == 200
     drive_revert(q, worker)

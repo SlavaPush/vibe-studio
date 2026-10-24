@@ -105,10 +105,14 @@ def task_carrier(task: Task) -> Carrier:
     )
 
 
+def revert_id(release_id: str, attempt: int) -> str:
+    return f"{REVERT}:{release_id}" if attempt == 1 else f"{REVERT}:{release_id}:{attempt}"
+
+
 def revert_carrier(release: ReleaseCandidate, task: Task) -> Carrier:
     revert = release.revert
     return Carrier(
-        id=f"{REVERT}:{release.id}", task_id=release.task_id, tree=f"revert-{release.id}",
+        id=revert_id(release.id, revert.attempt), task_id=release.task_id, tree=revert.tree or f"revert-{release.id}",
         title=f"Revert: {task.title}"[:120], base_sha=revert.base_sha, head_sha=revert.head_sha,
         pr_number=revert.pr_number, pr_url=revert.pr_url, merge_sha=revert.fix_sha, checks=revert.checks,
         release_id=release.id,
@@ -282,16 +286,35 @@ class ReleaseWorker:
                     {"step": REVERT, "outcome": "ok", "summary": f"Исправляющий commit {fix[:7]} принят: проверяется итоговый commit."},
                 )
             return True
-        key = f"{REVERT}:{release.id}"
-        found = self.ops.find(key)
+        tree = c.tree
+        if release.revert.attempt > 1:
+            if not self._close_previous(c, release):
+                return False
+            if self.github.branch_sha(c.branch) is not None:
+                tree = f"revert-{release.id}-{release.revert.attempt}"
+                with suppress(WorkspaceError):
+                    self.workspace.remove_worktree(c.tree)
+        found = self.ops.find(c.id)
         if found is not None and found.status == OpStatus.started:
             self.ops.mark(found, OpStatus.failed, detail="restart")
-        operation, allowed = self.ops.begin(REVERT, key, c.task_id, release.id)
+        operation, allowed = self.ops.begin(REVERT, c.id, c.task_id, release.id)
         if not allowed:
             return False
+        base_sha, head_sha = release.expected_previous_sha, release.commit_sha
         try:
-            commits = self.workspace.first_parent(release.expected_previous_sha, release.commit_sha)
-            base, head = self.workspace.revert_branch(c.tree, commits)
+            line = self.workspace.first_parent(base_sha, head_sha)
+            commits = [item for item in line if self.queue.office_merge(item[0])]
+            if not commits:
+                with self.store.db.locked_transaction() as conn:
+                    self.ops.finish(conn, operation, OpStatus.failed, detail="no office merges")
+                    self._halt_in(
+                        conn, c,
+                        f"В диапазоне {base_sha[:7]}..{head_sha[:7]} нет слияний PR офиса: revert не создаётся. "
+                        "Исправьте main и укажите fix_sha в решении «Возобновить выпуск».",
+                        step=REVERT,
+                    )
+                return False
+            base, head = self.workspace.revert_branch(tree, commits)
         except WorkspaceError as error:
             with self.store.db.locked_transaction() as conn:
                 self.ops.finish(conn, operation, OpStatus.failed, detail=str(error)[:300])
@@ -299,12 +322,51 @@ class ReleaseWorker:
             return False
         with self.store.db.locked_transaction() as conn:
             self.ops.finish(conn, operation, OpStatus.succeeded, external_ref=head)
-            self._save_in(conn, c, status="active", base_sha=base)
+            self._save_in(
+                conn, c, status="active", base_sha=base, head_sha=None, pr_number=None, pr_url=None, checks=None,
+                fix_sha=None, candidate_id=None, tree=None if tree == f"revert-{release.id}" else tree,
+            )
             self._event(
                 conn, c, TaskEventType.tool_called,
-                {"arguments": f"{c.branch} {' '.join(sha[:7] for sha, *_ in commits)}", "result": "ok"},
+                {"arguments": f"{branch_name(tree)} {' '.join(sha[:7] for sha, *_ in commits)}", "result": "ok"},
                 tool="git_revert",
             )
+        return True
+
+    def _close_previous(self, c: Carrier, release: ReleaseCandidate) -> bool:
+        with self.store.db.connection() as conn:
+            rows = conn.fetchall(
+                "SELECT payload FROM task_events WHERE task_id = :id AND type = 'pr_opened' ORDER BY seq",
+                {"id": c.task_id},
+            )
+        opened = (json.loads(row["payload"]) for row in rows)
+        numbers = dict.fromkeys(payload["pr_number"] for payload in opened if payload.get("revert_of") == release.id)
+        return all(self._close_pr_of(c, release, number) for number in numbers)
+
+    def _close_pr_of(self, c: Carrier, release: ReleaseCandidate, number: int) -> bool:
+        is_open = self.github.get_pr(number).get("state") == "open"
+        key = f"{CLOSE_PR}:{c.id}:{number}"
+        found = self.ops.find(key)
+        if found is not None and found.status == OpStatus.started:
+            self.ops.mark(found, OpStatus.failed if is_open else OpStatus.succeeded, detail="restart")
+        if not is_open:
+            return True
+        operation, allowed = self.ops.begin(CLOSE_PR, key, c.task_id, release.id)
+        if not allowed:
+            return self._halt(c, f"Прежний revert-PR #{number} открыт вне офиса после закрытия.", step=CLOSE_PR)
+        try:
+            self.github.close_pr(number)
+        except GitHubUnavailable:
+            self.ops.mark(operation, OpStatus.failed, detail="unavailable")
+            return False
+        except GitHubError as error:
+            with self.store.db.locked_transaction() as conn:
+                self.ops.finish(conn, operation, OpStatus.failed, detail=f"HTTP {error.status}")
+                self._halt_in(conn, c, f"GitHub отклонил закрытие прежнего revert-PR #{number}: HTTP {error.status}.", step=CLOSE_PR)
+            return False
+        with self.store.db.locked_transaction() as conn:
+            self.ops.finish(conn, operation, OpStatus.succeeded, external_ref=str(number))
+            self._event(conn, c, TaskEventType.pr_closed, {"pr_number": number})
         return True
 
     def _status(self, task_id: str) -> TaskStatus:
@@ -606,7 +668,8 @@ class ReleaseWorker:
                 Entry(
                     "Назначение PR",
                     f"Revert выпуска {release.expected_previous_sha[:7]}..{release.commit_sha[:7]} задачи "
-                    f"«{task.title}» после отката на Render: main возвращается к опубликованному состоянию.",
+                    f"«{task.title}» после отката на Render: отменяются только слияния PR офиса из этого диапазона, "
+                    "commit владельца остаются.",
                     required=True,
                 ),
                 Entry("Причина отката", release.blocked_reason or "нет данных", required=True),
@@ -1130,7 +1193,8 @@ class ReleaseWorker:
             release = self.store.get_candidate(c.release_id)
             return (
                 f"## Исправление после отката\n\nRevert выпуска `{release.id}` "
-                f"({release.expected_previous_sha[:7]}..{release.commit_sha[:7]}) задачи «{task.title}».\n\n"
+                f"({release.expected_previous_sha[:7]}..{release.commit_sha[:7]}) задачи «{task.title}»: "
+                "отменяются только слияния PR офиса, commit владельца остаются.\n\n"
                 f"## Причина отката\n\n{release.blocked_reason or 'нет данных'}\n\n"
                 f"Задача офиса: `{task.id}`.\n"
             )

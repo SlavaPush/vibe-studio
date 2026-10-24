@@ -325,6 +325,8 @@ class RevertResult(ContractModel):
     decision_id: str | None
     candidate_id: str | None
     reason: str | None
+    attempt: int = Field(default=1, ge=1)
+    tree: str | None = None
 
 
 class ReleaseCandidate(ContractModel):

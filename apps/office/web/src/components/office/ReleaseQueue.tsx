@@ -173,6 +173,8 @@ function ResumeForm({ release, run, onRefresh }: { release: ReleaseCandidate; ru
   const [fixSha, setFixSha] = useState('')
   const decision = useReleaseDecision(release, run, onRefresh)
   const valid = FIX_SHA.test(fixSha)
+  const revert = release.revert
+  const retry = revert?.status === 'needs_attention' && !(revert.source === 'auto' && revert.fix_sha)
   return (
     <form
       className="grid gap-2"
@@ -193,6 +195,15 @@ function ResumeForm({ release, run, onRefresh }: { release: ReleaseCandidate; ru
         <Button type="submit" disabled={!valid || decision.pending}>
           {DECISION_LABELS.resume_releases}
         </Button>
+        {retry && (
+          <ConfirmButton
+            label="Повторить revert-PR"
+            title={`Повторить revert-PR выпуска ${release.id}?`}
+            description="Офис закроет прежний revert-PR, если он открыт, заново создаст revert слияний офиса от текущего main и откроет новый PR. Блокировка сохраняется до публикации исправления."
+            disabled={decision.pending}
+            onConfirm={() => void decision.submit(newDecision('resume_releases', release.version))}
+          />
+        )}
       </div>
       <DecisionMessage
         notice={decision.notice}

@@ -178,7 +178,7 @@
 | --- | --- |
 | `rollback` | Кандидат вида `release` в статусе `released` и `is_published = true`; создаётся кандидат вида `rollback` (`origin = manual_rollback`) на версию `expected_previous_sha` этого выпуска. `fix_sha` не указывается |
 | `resume_releases` с `fix_sha` | Кандидат — `release_blocked_by` очереди (выпуск заблокирован после его отката). Офис проверяет, что `fix_sha` входит в `main` и является потомком откатанного commit, выполняет проверки итогового commit и критический E2E и создаёт кандидата исправления (`origin = resume`). Тот же `fix_sha` после создания кандидата исправления (`revert.status = merged`) — `409 decision_not_allowed`, состояние не меняется |
-| `resume_releases` без `fix_sha` | Кандидат остановлен (`blocked_reason` заполнен): активный кандидат очереди (`active_release_id`) или кандидат `pending`. Для активного кандидата офис сначала сверяет Render и сервис: идёт деплой или откат либо запрос деплоя ещё сверяется — `409 decision_not_allowed` с причиной; иначе БД согласуется с опубликованной версией и очередь освобождается. Кандидат `pending` возвращается в очередь |
+| `resume_releases` без `fix_sha` | Кандидат остановлен (`blocked_reason` заполнен): активный кандидат очереди (`active_release_id`) или кандидат `pending`. Для активного кандидата офис сначала сверяет Render и сервис: идёт деплой или откат либо запрос деплоя ещё сверяется — `409 decision_not_allowed` с причиной; иначе БД согласуется с опубликованной версией и очередь освобождается. Кандидат `pending` возвращается в очередь. Кандидат `release_blocked_by` с `revert.status = needs_attention`: revert-PR повторяется с начала (новая попытка `revert.attempt`, прежний открытый revert-PR закрывается), блокировка сохраняется; есть операции кандидата в `started` или `unknown` либо revert-PR уже слит — `409 decision_not_allowed`. Для `release_blocked_by` в другом состоянии `revert` — `409 decision_not_allowed` |
 
 Решение в другом статусе или при невыполненном дополнительном условии получает `409 decision_not_allowed`. Без настроенного Render (`RENDER_API_KEY`, `RENDER_SERVICE_ID`) `resume_releases` недоступен. Подтверждения выпуска администратором нет: решение `approve_release` удалено, запрос с ним получает `422 validation_error`.
 
@@ -336,7 +336,7 @@
 
 `RollbackResult`: `target_sha` (string — прежняя версия), `target_deploy_id` (string — деплой Render, к которому выполняется откат), `render_deploy_id` (string или `null` — деплой отката), `render_status` (string или `null`), `started_at`, `finished_at` (дата-время или `null`), `verify` (`VerifyResult` или `null` — проверка после отката), `error` (string или `null`).
 
-`RevertResult`: `status` (`pending` — ждёт начала, `active` — revert-PR или проверки `fix_sha` выполняются, `needs_attention` — остановлено, `merged` — кандидат исправления создан), `source` (`auto` — revert-PR офиса, `resume` — `fix_sha` администратора), `base_sha` (string или `null` — `main`, от которого создана ветка `office/revert-<release_id>`), `head_sha` (string или `null`), `pr_number`, `pr_url` (revert-PR или `null`), `checks` (`PullRequestChecks` или `null`), `fix_sha` (string или `null` — итоговый commit revert-PR или `fix_sha`), `decision_id` (string или `null`), `candidate_id` (string или `null` — кандидат исправления), `reason` (string или `null` — причина остановки).
+`RevertResult`: `status` (`pending` — ждёт начала, `active` — revert-PR или проверки `fix_sha` выполняются, `needs_attention` — остановлено, `merged` — кандидат исправления создан), `source` (`auto` — revert-PR офиса, `resume` — `fix_sha` администратора), `base_sha` (string или `null` — `main`, от которого создана ветка `office/revert-<release_id>`), `head_sha` (string или `null`), `pr_number`, `pr_url` (revert-PR или `null`), `checks` (`PullRequestChecks` или `null`), `fix_sha` (string или `null` — итоговый commit revert-PR или `fix_sha`), `decision_id` (string или `null`), `candidate_id` (string или `null` — кандидат исправления), `reason` (string или `null` — причина остановки), `attempt` (integer ≥ 1 — номер попытки revert-PR; растёт при повторе решением `resume_releases` без `fix_sha`, сохраняется при `resume_releases` с `fix_sha`; в записях до появления поля — 1), `tree` (string или `null` — имя worktree и ветки `office/<tree>` попытки; `null` — `revert-<release_id>`).
 
 ### `ReleaseQueueState`
 
@@ -1361,7 +1361,9 @@ HTML-отчёт Playwright с этими заголовками не работ�
     "fix_sha": null,
     "decision_id": null,
     "candidate_id": null,
-    "reason": null
+    "reason": null,
+    "attempt": 1,
+    "tree": null
   }
 }
 ```
@@ -1389,7 +1391,7 @@ HTML-отчёт Playwright с этими заголовками не работ�
 
 ### `POST /api/releases/{id}/decisions`
 
-Записывает решение администратора. `rollback` для опубликованного выпуска создаёт кандидата вида `rollback` на версию `expected_previous_sha` выбранного выпуска; он ждёт свободной очереди с приоритетом перед обычными кандидатами. `resume_releases` с `fix_sha` (40 символов hex) запускает выпуск исправления после отката; без `fix_sha` — сверку остановленного выпуска (раздел «Права»). Подтверждения выпуска нет: обычный кандидат деплоится автоматически.
+Записывает решение администратора. `rollback` для опубликованного выпуска создаёт кандидата вида `rollback` на версию `expected_previous_sha` выбранного выпуска; он ждёт свободной очереди с приоритетом перед обычными кандидатами. `resume_releases` с `fix_sha` (40 символов hex) запускает выпуск исправления после отката; без `fix_sha` — сверку остановленного выпуска или повтор revert-PR, требующего внимания, для заблокированного выпуска (раздел «Права»). Подтверждения выпуска нет: обычный кандидат деплоится автоматически.
 
 Запрос:
 

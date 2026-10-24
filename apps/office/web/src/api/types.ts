@@ -271,6 +271,8 @@ export interface RevertResult {
   decision_id: string | null
   candidate_id: string | null
   reason: string | null
+  attempt: number
+  tree: string | null
 }
 
 export interface ReleaseQueueState {
