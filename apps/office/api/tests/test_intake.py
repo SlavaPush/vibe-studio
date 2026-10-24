@@ -10,6 +10,8 @@ from app.intake import CLASS_REASONS, REASON_FORBIDDEN, REASON_MODERATION, REASO
 from app.sessions import COOKIE_NAME
 from conftest import UI_TASK, classification
 
+pytestmark = pytest.mark.pg
+
 REQUEST = httpx.Request("POST", "https://api.example/v1")
 
 

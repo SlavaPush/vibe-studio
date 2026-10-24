@@ -95,6 +95,7 @@ def graph(office, origin, tmp_path):
     return app, client, me
 
 
+@pytest.mark.pg
 def test_full_pass_reaches_awaiting_integration(office, origin, graph):
     app, client, me = graph
     store = app.state.store
@@ -152,6 +153,7 @@ def test_full_pass_reaches_awaiting_integration(office, origin, graph):
     assert store.get_task(task_id).fix_cycles == 0
 
 
+@pytest.mark.pg
 def test_resume_without_recorded_decision_does_not_continue(graph):
     app, client, me = graph
     store = app.state.store
@@ -179,6 +181,7 @@ def test_resume_without_recorded_decision_does_not_continue(graph):
     assert office_commits(app, task_id, "developer") == []
 
 
+@pytest.mark.pg
 def test_restart_while_waiting_for_spec_approval(office, origin, tmp_path, graph):
     app, first_client, me = graph
     task_id = create(app, me["id"])
@@ -195,6 +198,7 @@ def test_restart_while_waiting_for_spec_approval(office, origin, tmp_path, graph
     assert len(events(second, task_id, "decision_required")) == 1
 
 
+@pytest.mark.pg
 def test_recorded_decision_without_resume_continues_on_start(office, origin, tmp_path, graph):
     app, client, me = graph
     task_id = create(app, me["id"])
@@ -207,6 +211,7 @@ def test_recorded_decision_without_resume_continues_on_start(office, origin, tmp
     assert len(second.state.gateway.role_calls("developer")) == 1
 
 
+@pytest.mark.pg
 def test_restart_during_develop_continues_from_checkpoint(office, origin, tmp_path, graph):
     app, client, me = graph
     gateway = app.state.gateway
@@ -236,6 +241,7 @@ def test_restart_during_develop_continues_from_checkpoint(office, origin, tmp_pa
     assert second.state.store.get_task(task_id).usage.model_calls == 5
 
 
+@pytest.mark.pg
 def test_crash_after_developer_commit_does_not_commit_again(office, origin, tmp_path, graph):
     app, client, me = graph
     workspace = app.state.workspace
@@ -261,6 +267,7 @@ def test_crash_after_developer_commit_does_not_commit_again(office, origin, tmp_
 
 
 @pytest.mark.parametrize("target", ["reviewing", "developing"])
+@pytest.mark.pg
 def test_crash_after_transition_does_not_repeat_it(office, origin, tmp_path, graph, target):
     app, client, me = graph
     store = app.state.store
@@ -300,6 +307,7 @@ def test_crash_after_transition_does_not_repeat_it(office, origin, tmp_path, gra
 
 
 @pytest.mark.parametrize("moment", ["before", "after"])
+@pytest.mark.pg
 def test_crash_around_qa_commit_keeps_qa_findings(office, origin, tmp_path, graph, moment):
     app, client, me = graph
     finding = {"blocking": True, "criterion": 1, "file": None, "line": None, "text": "Кнопка не подписана."}
@@ -345,6 +353,7 @@ def test_crash_around_qa_commit_keeps_qa_findings(office, origin, tmp_path, grap
     assert (state["phase"], state["qa_try"], state["qa_sha"]) == ("done", 1, qa_sha)
 
 
+@pytest.mark.pg
 def test_crash_during_qa_call_repeats_same_attempt(office, origin, tmp_path, graph):
     app, client, me = graph
     app.state.gateway.handlers["qa"] = lambda call: crash(app)
@@ -366,6 +375,7 @@ def test_crash_during_qa_call_repeats_same_attempt(office, origin, tmp_path, gra
     assert git(worktree(second, task_id), "log", "-1", "--format=%(trailers:key=Office-Round,valueonly)", qa_sha) == "0-1-1"
 
 
+@pytest.mark.pg
 def test_crash_after_unchanged_recheck_answer_sends_finding_without_new_qa_call(office, origin, tmp_path, graph):
     app, client, me = graph
     store = app.state.store
@@ -409,6 +419,7 @@ def test_crash_after_unchanged_recheck_answer_sends_finding_without_new_qa_call(
     assert len([call for call in second.state.suite.calls if call[3]]) == 2
 
 
+@pytest.mark.pg
 def test_restart_after_second_qa_attempt_continues_with_last_attempt(office, origin, tmp_path, graph, monkeypatch):
     app, client, me = graph
     app.state.suite.e2e = lambda task_id, app_sha, test_file: E2EResult("passed")
@@ -440,6 +451,7 @@ def test_restart_after_second_qa_attempt_continues_with_last_attempt(office, ori
     assert finished[-1].payload["summary"] == "Тест QA проходит на исходной версии после трёх попыток."
 
 
+@pytest.mark.pg
 def test_immediate_approval_after_retry_continues_new_attempt(graph):
     app, client, me = graph
     gateway = app.state.gateway
@@ -513,6 +525,7 @@ def test_recovery_removes_stale_containers_first(graph):
     assert app.state.suite.stale_removed == 1
 
 
+@pytest.mark.pg
 def test_decision_recorded_before_interrupt_is_saved(graph):
     app, client, me = graph
     store = app.state.store
@@ -532,6 +545,7 @@ def test_decision_recorded_before_interrupt_is_saved(graph):
     assert len(app.state.gateway.role_calls("developer")) == 1
 
 
+@pytest.mark.pg
 def test_crash_after_publish_does_not_publish_again(office, origin, tmp_path, graph):
     app, client, me = graph
     store = app.state.store
@@ -587,6 +601,7 @@ def test_checks_failing_three_times_need_attention(graph):
     assert events(app, task_id, "role_finished")[-1].payload["step"] == "verify"
 
 
+@pytest.mark.pg
 def test_three_graphs_run_and_fourth_waits(graph):
     app, client, me = graph
     gateway = app.state.gateway
@@ -621,6 +636,7 @@ def test_three_graphs_run_and_fourth_waits(graph):
     assert app.state.store.get_task(ids[0]).spec is None
 
 
+@pytest.mark.pg
 def test_blocking_critic_finding_returns_to_developer_until_limit(graph):
     app, client, me = graph
     finding = {"blocking": True, "criterion": None, "file": "apps/chat/web/src/App.tsx", "line": 2, "text": "Кнопка не подписана."}
@@ -1025,6 +1041,7 @@ def test_qa_gets_api_files_and_unmocked_note_from_own_run(origin, graph):
     assert "Тест QA обратился к API vibe-chat без подмены: GET /api/conversations." in second.user
 
 
+@pytest.mark.pg
 def test_budget_allows_thirtieth_call_and_stops_thirty_first(graph):
     app, client, me = graph
     task_id = create(app, me["id"], model_calls=28)
@@ -1037,6 +1054,7 @@ def test_budget_allows_thirtieth_call_and_stops_thirty_first(graph):
     assert last.payload["summary"] == "Исчерпан предел обращений к моделям для задачи."
 
 
+@pytest.mark.pg
 def test_model_call_is_counted_before_provider(graph):
     app, client, me = graph
     seen = []
@@ -1134,6 +1152,7 @@ def test_deferred_launch_does_not_restart_cancelled_task(graph):
     assert status(app, task_id) == TaskStatus.cancelled
 
 
+@pytest.mark.pg
 def test_retry_waits_for_running_branch_and_keeps_usage(graph):
     app, client, me = graph
     gateway = app.state.gateway

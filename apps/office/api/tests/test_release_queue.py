@@ -29,6 +29,8 @@ from app.schemas import (
 )
 from conftest import FakeGitHub, FakeRender, FakeService, FakeSuite, ScriptedGateway
 
+pytestmark = pytest.mark.pg
+
 REQUIRED = load_required_checks(CHECKOUT_ROOT)
 
 

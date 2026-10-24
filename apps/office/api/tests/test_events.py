@@ -6,6 +6,8 @@ import pytest
 
 from app.schemas import TaskEvent, TaskEventType, TaskStatus
 
+pytestmark = pytest.mark.pg
+
 
 def read_messages(response, count, comments=False):
     messages, current = [], {}

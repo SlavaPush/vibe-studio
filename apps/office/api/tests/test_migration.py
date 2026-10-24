@@ -8,6 +8,8 @@ from app.db import Database
 from app.schemas import ReleaseKind, TaskStatus
 from app.tasks import TaskStore
 
+pytestmark = pytest.mark.pg
+
 OLD_SCHEMA = Path(__file__).with_name("data") / "schema_1cfa9a5.sql"
 P51_SCHEMA = Path(__file__).with_name("data") / "schema_36bda3f.sql"
 P52_SCHEMA = Path(__file__).with_name("data") / "schema_8dc33dd.sql"

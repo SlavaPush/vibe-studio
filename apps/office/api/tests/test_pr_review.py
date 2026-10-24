@@ -12,6 +12,8 @@ from app.schemas import AgentRole, FailureKind, ModelProfile, TaskEventType, Tas
 from conftest import pr_review_answer
 from test_release_worker import SPEC, Crash, decide, drive, opened, setup  # noqa: F401
 
+pytestmark = pytest.mark.pg
+
 
 def checked(setup):
     worker = opened(setup)

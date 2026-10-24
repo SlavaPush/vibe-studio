@@ -27,6 +27,8 @@ from app.service_check import SERVICE_TIMEOUT
 from app.workspace import PushResult, Workspace
 from conftest import CI_JOBS, FakeGitHub, FakeSuite, ScriptedGateway, git
 
+pytestmark = pytest.mark.pg
+
 SPEC = {
     "version": 1,
     "spec_hash": "sha256:spec",

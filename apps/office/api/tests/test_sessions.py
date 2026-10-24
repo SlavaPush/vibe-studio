@@ -7,6 +7,8 @@ from app.db import to_text, utcnow
 from app.sessions import COOKIE_NAME, token_hash
 from conftest import ACCESS_CODE, ADMIN_CODE
 
+pytestmark = pytest.mark.pg
+
 PROTECTED = [
     ("get", "/api/me"),
     ("get", "/api/tasks"),

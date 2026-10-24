@@ -12,6 +12,7 @@ def task(office):
     return client, office.queued_task(me["id"])
 
 
+@pytest.mark.pg
 def test_empty_report_has_nulls(office, task):
     client, task_id = task
     response = client.get(f"/api/tasks/{task_id}/checks")

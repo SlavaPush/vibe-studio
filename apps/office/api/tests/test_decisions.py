@@ -5,6 +5,8 @@ import pytest
 from app.schemas import TaskStatus
 from app.tasks import SIGNAL_DECISION_RECORDED
 
+pytestmark = pytest.mark.pg
+
 SPEC = {
     "version": 1,
     "spec_hash": "sha256:spec",
