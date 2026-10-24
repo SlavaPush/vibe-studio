@@ -1,0 +1,34 @@
+limits:
+  memory: 3g
+  cpus: "2"
+  pids: 1024
+  tmpfs_size: 1g
+  log_bytes: 2097152
+  artifact_bytes: 20971520
+
+steps:
+  install:
+    command: npm ci --no-audit --no-fund
+    network: true
+    timeout_seconds: 600
+    roles: []
+  lint:
+    command: npm run lint
+    network: false
+    timeout_seconds: 300
+    roles: [developer]
+  test:
+    command: npm run test
+    network: false
+    timeout_seconds: 600
+    roles: [developer]
+  build:
+    command: npm run build
+    network: false
+    timeout_seconds: 600
+    roles: [developer]
+  e2e:
+    command: playwright test --config /office-e2e/playwright.config.ts
+    network: false
+    timeout_seconds: 900
+    roles: [qa]

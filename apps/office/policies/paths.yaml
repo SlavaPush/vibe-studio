@@ -1,0 +1,49 @@
+max_file_bytes: 204800
+max_list_entries: 500
+
+deny:
+  - api/**
+  - contracts/**
+  - infra/**
+  - .git
+  - .git/**
+  - .github/**
+  - "**/.env*"
+  - "**/package.json"
+  - "**/package-lock.json"
+  - "**/npm-shrinkwrap.json"
+  - "**/yarn.lock"
+  - "**/pnpm-lock.yaml"
+  - "**/bun.lock"
+  - "**/bun.lockb"
+  - "**/uv.lock"
+  - "**/pyproject.toml"
+  - "**/Dockerfile"
+  - "**/docker-compose*.yml"
+  - web/vite.config.*
+  - web/vitest.config.*
+  - web/tsconfig*.json
+  - web/components.json
+  - web/.oxlintrc.json
+  - web/scripts/**
+  - web/src/test/**
+  - "**/*.test.*"
+  - "**/*.spec.*"
+  - "**/migrations/**"
+
+read_deny:
+  - .git
+  - .git/**
+  - "**/.env*"
+
+roles:
+  developer:
+    write:
+      - web/src/**
+      - web/public/**
+      - web/index.html
+    extensions: [.ts, .tsx, .css, .json, .svg, .md, .html]
+  qa:
+    write:
+      - web/e2e/office/**/*.pw.ts
+    extensions: [.ts]

@@ -1,0 +1,27 @@
+[project]
+name = "back-office-api"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=2.2.0",
+    "fastapi>=0.161.1",
+    "httpx>=0.28.1",
+    "langgraph>=1.2.16",
+    "langgraph-checkpoint-postgres>=3.2.0",
+    "langgraph-checkpoint-sqlite>=3.1.2",
+    "openai>=3.37.0",
+    "psycopg-pool>=3.3.3",
+    "psycopg[binary]>=3.3.6",
+    "pyyaml>=6.0.3",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+markers = ["docker: реальный Docker и образ sandbox, запуск с OFFICE_TEST_DOCKER=1"]

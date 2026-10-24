@@ -1,0 +1,45 @@
+# Node
+node_modules/
+dist/
+dist-ssr/
+*.tsbuildinfo
+npm-debug.log*
+web/src/mocks/contract-examples.json
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Окружение и секреты
+.env
+.env.*
+!.env.example
+
+# Рабочая область офиса: клон vibe-chat, worktree задач, артефакты, БД
+workspace/
+artifacts/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.db
+
+# Журналы и покрытие
+*.log
+.coverage
+
+# Тесты
+test-results/
+playwright-report/
+coverage/
+
+# Duet
+.duet/
+
+# macOS и редакторы
+.DS_Store
+.idea/
+.vscode/
