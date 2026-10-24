@@ -195,6 +195,7 @@ def test_p52_database_gets_release_queue_columns(database_url):
         assert releases["rel_0"].status == "released" and releases["rel_0"].is_published
         assert all(release.origin == "task" and release.revert is None for release in releases.values())
         with db.connection() as conn:
+            assert conn.fetchone("SELECT access_code_id FROM participants WHERE id = 'prt_1'") == {"access_code_id": None}
             assert store.queue_state(conn) == {
                 "active_release_id": None, "release_blocked_by": None, "published_sha": None,
                 "external_wait_since": None,
