@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import uuid
 from dataclasses import replace
@@ -33,6 +34,8 @@ test("заголовок новой версии и ответ ассистен�
   await expect(page.getByText(fixtures.reply, { exact: true })).toBeVisible();
 });
 """
+PASSED = re.compile(r"^\s+\d+ passed", re.MULTILINE)
+FAILED = re.compile(r"^\s+\d+ failed", re.MULTILINE)
 PROBE ="node -e \"fetch('https://registry.npmjs.org').then(() => process.exit(0), () => process.exit(3))\""
 
 pytestmark = [
@@ -113,7 +116,7 @@ def test_real_sandbox_on_vibe_chat(real, tmp_path):
     urls = after.checks[-1].artifact_urls
     log = client.get(urls[0])
     assert log.status_code == 200
-    assert "1 passed" in log.text
+    assert "title.pw.ts" in log.text and PASSED.search(log.text) and not FAILED.search(log.text)
     [shot] = [url for url in urls if url.endswith("home.png")]
     image = client.get(shot)
     assert image.status_code == 200
@@ -163,4 +166,5 @@ def test_mock_api_module_in_real_sandbox(real):
     assert sandbox.e2e_result(task_id, after, test_file).status == "passed"
     for report in (before, after):
         assert not [url for url in report.checks[-1].artifact_urls if url.endswith("unmocked-api.txt")]
-    assert "1 passed" in client.get(after.checks[-1].artifact_urls[0]).text
+    log = client.get(after.checks[-1].artifact_urls[0]).text
+    assert f"{task_id}.pw.ts" in log and PASSED.search(log) and not FAILED.search(log)

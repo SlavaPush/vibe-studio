@@ -133,8 +133,13 @@ def test_graph_with_real_sandbox_produces_qa_evidence(real):
     assert len(reports) == 3
     before = json.loads(reports[1].read_text())
     assert before["errors"] == []
-    [spec] = [spec for suite in before["suites"] for child in [suite, *suite.get("suites", [])] for spec in child.get("specs", [])]
-    assert spec["file"].endswith(f"{task_id}.pw.ts")
+    [spec] = [
+        spec
+        for suite in before["suites"]
+        for child in [suite, *suite.get("suites", [])]
+        for spec in child.get("specs", [])
+        if spec["file"].endswith(f"{task_id}.pw.ts")
+    ]
     assert spec["tests"][0]["results"][-1]["status"] == "failed"
     qa_review = json.loads((artifacts / "review-0-qa.json").read_text())
     assert qa_review["qa_sha"] == head and qa_review["findings"] == []
