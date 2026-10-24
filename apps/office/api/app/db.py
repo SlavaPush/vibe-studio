@@ -33,6 +33,7 @@ ADDED_COLUMNS = (
     ("scheduler", "release_blocked_by", "TEXT"),
     ("scheduler", "published_sha", "TEXT"),
     ("scheduler", "external_wait_since", "TEXT"),
+    ("participants", "access_code_id", "TEXT"),
 )
 
 logger = logging.getLogger("office.db")
@@ -89,7 +90,7 @@ class Connection:
 
 
 class Database:
-    def __init__(self, url: str) -> None:
+    def __init__(self, url: str, max_size: int = 10) -> None:
         self._pool: ConnectionPool | None = None
         if url.startswith("sqlite:///"):
             self.dialect = "sqlite"
@@ -99,7 +100,7 @@ class Database:
             self._pool = ConnectionPool(
                 url,
                 min_size=1,
-                max_size=10,
+                max_size=max_size,
                 kwargs={"autocommit": True, "row_factory": dict_row},
                 open=True,
             )

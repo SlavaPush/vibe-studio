@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 
 export const COOKIE_MISSING = 'Сеанс не создан, проверьте настройки браузера: панель должна быть открыта по http://localhost:5173, cookie должны быть разрешены.'
+export const CHECK_AGAIN = 'Проверить сеанс снова'
 
 interface AccessGateProps {
   notice: string | null
@@ -24,10 +25,10 @@ function describe(error: unknown): { text: string; pause: number } {
 
 export function AccessGate({ notice, onLogin }: AccessGateProps) {
   const [code, setCode] = useState('')
-  const [name, setName] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [pending, setPending] = useState(false)
   const [pause, setPause] = useState(0)
+  const [loggedIn, setLoggedIn] = useState(false)
   const message = error ?? notice
 
   useEffect(() => {
@@ -36,39 +37,46 @@ export function AccessGate({ notice, onLogin }: AccessGateProps) {
     return () => clearTimeout(timer)
   }, [pause])
 
+  const verify = async (missingText = COOKIE_MISSING) => {
+    setPending(true)
+    try {
+      onLogin(await me())
+      return
+    } catch (failure) {
+      const missing = failure instanceof ApiRequestError && failure.status === 401
+      setError(
+        missing
+          ? missingText
+          : `${describe(failure).text} Код повторно не отправляется: проверьте сеанс снова.`,
+      )
+      setLoggedIn(!missing)
+    }
+    setPending(false)
+  }
+
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (pending || pause > 0) return
-    const displayName = name.trim()
+    if (pending || pause > 0 || loggedIn) return
     if (!code.trim()) {
-      setError('Введите код доступа офиса.')
-      return
-    }
-    if (!displayName || displayName.length > 40) {
-      setError('Укажите имя длиной от 1 до 40 символов.')
+      setError('Введите личный код участника.')
       return
     }
     setPending(true)
     setError(null)
     try {
-      await login({ access_code: code.trim(), display_name: displayName })
+      await login({ access_code: code.trim() })
     } catch (failure) {
       const { text, pause: seconds } = describe(failure)
+      if (!(failure instanceof ApiRequestError) || failure.status === 0) {
+        await verify(text)
+        return
+      }
       setError(text)
       setPause(seconds)
       setPending(false)
       return
     }
-    try {
-      onLogin(await me())
-    } catch (failure) {
-      setError(
-        failure instanceof ApiRequestError && failure.status === 401
-          ? COOKIE_MISSING
-          : describe(failure).text,
-      )
-      setPending(false)
-    }
+    await verify()
   }
 
   return (
@@ -78,31 +86,22 @@ export function AccessGate({ notice, onLogin }: AccessGateProps) {
           <CardTitle>
             <h1>Вход в панель офиса</h1>
           </CardTitle>
-          <CardDescription>Введите код доступа офиса и имя, которое увидят другие участники.</CardDescription>
+          <CardDescription>
+            Введите личный код участника. Это тот же код, что и для чата. Вход по коду одноразовый: имя и роль
+            берутся из кода.
+          </CardDescription>
         </CardHeader>
         <CardContent>
           <form className="grid gap-4" onSubmit={submit} aria-busy={pending} noValidate>
             <div className="grid gap-2">
-              <Label htmlFor="access-code">Код доступа</Label>
+              <Label htmlFor="access-code">Личный код участника</Label>
               <Input
                 id="access-code"
                 value={code}
                 onChange={(event) => setCode(event.target.value)}
                 autoComplete="off"
-                aria-invalid={error !== null}
-                aria-describedby={message ? 'access-error' : undefined}
-                required
-              />
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="display-name">Отображаемое имя</Label>
-              <Input
-                id="display-name"
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-                autoComplete="nickname"
-                maxLength={40}
-                aria-invalid={error !== null}
+                disabled={loggedIn}
+                aria-invalid={error !== null && !loggedIn}
                 aria-describedby={message ? 'access-error' : undefined}
                 required
               />
@@ -112,9 +111,15 @@ export function AccessGate({ notice, onLogin }: AccessGateProps) {
                 {message}
               </p>
             )}
-            <Button type="submit" disabled={pending || pause > 0}>
-              {pending ? 'Входим…' : 'Войти'}
-            </Button>
+            {loggedIn ? (
+              <Button type="button" disabled={pending} onClick={() => void verify()}>
+                {pending ? 'Проверяем…' : CHECK_AGAIN}
+              </Button>
+            ) : (
+              <Button type="submit" disabled={pending || pause > 0}>
+                {pending ? 'Входим…' : 'Войти'}
+              </Button>
+            )}
           </form>
         </CardContent>
       </Card>

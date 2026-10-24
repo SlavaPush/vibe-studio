@@ -26,6 +26,7 @@ class ErrorCode(StrEnum):
     diff_too_large = "diff_too_large"
     validation_error = "validation_error"
     rate_limited = "rate_limited"
+    codes_unavailable = "codes_unavailable"
     internal_error = "internal_error"
 
 

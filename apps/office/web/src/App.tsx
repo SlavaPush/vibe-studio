@@ -21,18 +21,29 @@ import {
   type Task,
   type TaskEvent,
 } from '@/api/types'
-import { AccessGate } from '@/components/office/AccessGate'
+import { AccessGate, CHECK_AGAIN } from '@/components/office/AccessGate'
 import { ReleaseQueue } from '@/components/office/ReleaseQueue'
 import { TaskCard } from '@/components/office/TaskCard'
 import { TaskForm } from '@/components/office/TaskForm'
 import { TaskStack } from '@/components/office/TaskStack'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { AboutDialog } from '@/components/office/AboutDialog'
 import { connectOfficeEvents, type OfficeEvents, type StreamState } from '@/lib/events'
 import { initialOfficeState, officeReducer } from '@/lib/office-state'
 
 const COALESCE_MS = 300
-const SESSION_EXPIRED = 'Сеанс истёк. Войдите по коду офиса снова.'
+const SESSION_EXPIRED = 'Сеанс истёк или код отозван. Для нового входа нужен новый личный код.'
 
 const STREAM_LABELS: Record<StreamState, string> = {
   connecting: 'Подключение к обновлениям…',
@@ -66,6 +77,7 @@ function App() {
   const [participant, setParticipant] = useState<Participant | null>(null)
   const [checking, setChecking] = useState(true)
   const [gateNotice, setGateNotice] = useState<string | null>(null)
+  const [sessionError, setSessionError] = useState<string | null>(null)
   const [state, dispatch] = useReducer(officeReducer, initialOfficeState)
   const [dark, setDark] = useState(false)
   const [leaving, setLeaving] = useState(false)
@@ -85,15 +97,16 @@ function App() {
   }, [headingFocus])
 
   useEffect(() => {
+    if (!checking) return
     let active = true
     me().then(
       (current) => {
-        if (active) setParticipant(current)
+        if (!active) return
+        setSessionError(null)
+        setParticipant(current)
       },
       (error: unknown) => {
-        if (active && !isUnauthorized(error) && error instanceof ApiRequestError) {
-          setGateNotice(error.message)
-        }
+        if (active) setSessionError(isUnauthorized(error) ? null : asApiError(error).message)
       },
     ).finally(() => {
       if (active) setChecking(false)
@@ -101,7 +114,7 @@ function App() {
     return () => {
       active = false
     }
-  }, [])
+  }, [checking])
 
   const endSession = useCallback((notice: string | null) => {
     generation.current += 1
@@ -228,6 +241,22 @@ function App() {
     )
   }
 
+  if (!participant && sessionError) {
+    return (
+      <main className="flex min-h-svh items-center justify-center p-4">
+        <div className="grid max-w-sm gap-4">
+          <h1 className="text-xl font-semibold">Панель офиса</h1>
+          <p role="alert" className="text-sm text-destructive">
+            Не удалось проверить сеанс. {sessionError}
+          </p>
+          <Button type="button" onClick={() => setChecking(true)}>
+            {CHECK_AGAIN}
+          </Button>
+        </div>
+      </main>
+    )
+  }
+
   if (!participant) {
     return (
       <AccessGate
@@ -286,9 +315,26 @@ function App() {
             >
               Тёмная тема
             </Button>
-            <Button type="button" variant="outline" disabled={leaving} onClick={() => void leave()}>
-              {leaving ? 'Выходим…' : 'Выйти'}
-            </Button>
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button type="button" variant="outline" disabled={leaving}>
+                  {leaving ? 'Выходим…' : 'Выйти'}
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Выйти из панели?</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    Вход в офис по личному коду одноразовый. После выхода войти снова по этому коду невозможно, для
+                    нового входа нужен новый код.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Остаться</AlertDialogCancel>
+                  <AlertDialogAction onClick={() => void leave()}>Выйти</AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
           </div>
           {logoutError && (
             <p role="alert" className="w-full text-sm text-destructive">

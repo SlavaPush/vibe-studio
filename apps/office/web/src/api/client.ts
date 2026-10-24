@@ -66,8 +66,8 @@ async function toError(response: Response): Promise<ApiRequestError> {
     body = {}
   }
   const code = typeof body.code === 'string' ? body.code : 'internal_error'
-  const message =
-    response.status >= 500 || typeof body.message !== 'string' ? SERVER_MESSAGE : body.message
+  const serverText = response.status < 500 || code === 'codes_unavailable'
+  const message = serverText && typeof body.message === 'string' ? body.message : SERVER_MESSAGE
   return new ApiRequestError(
     response.status,
     code,

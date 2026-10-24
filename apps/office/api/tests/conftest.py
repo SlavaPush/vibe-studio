@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import threading
 import time
@@ -19,7 +20,9 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.access_codes import access_code_hash
 from app.config import Settings
+from app.db import Database
 from app.main import create_app
 from app.models_gateway import ModelCall, ModelsGateway, ProviderReply
 from app.runner import Checkpoints, Runner
@@ -28,10 +31,16 @@ from app.schemas import ApiError, CheckReport, CheckResult, ModelProfile, Releas
 from app.tasks import IntakeOutcome, TaskStore
 
 PG_URL = os.environ.get("OFFICE_TEST_POSTGRES_URL")
-ACCESS_CODE = "OFFICE-TEST-CODE"
-ADMIN_CODE = "ADMIN-TEST-CODE"
 BASE_URL = "https://testserver"
 CONTRACT = Path(__file__).resolve().parents[2] / "contracts" / "api.md"
+CHAT_API = Path(__file__).resolve().parents[3] / "chat" / "api"
+CHAT_SCHEMA = CHAT_API / "app" / "schema.sql"
+CODE_VECTORS = CHAT_API / "tests" / "data" / "access_code_vectors.json"
+SQLITE_CODES_TABLE = (
+    "CREATE TABLE access_codes (id TEXT PRIMARY KEY, label TEXT NOT NULL UNIQUE, code_hash TEXT NOT NULL UNIQUE, "
+    "revoked_at TEXT, used_at TEXT, office_role TEXT CHECK (office_role IN ('participant', 'admin')), "
+    "office_used_at TEXT)"
+)
 UI_TASK = "Добавить под каждым ответом ассистента кнопку копирования текста ответа в буфер обмена."
 
 
@@ -339,14 +348,28 @@ def check_error_body(response: Any) -> None:
             assert int(response.headers["Retry-After"]) >= 1
 
 
+def sqlite_codes_url(tmp_path: Path) -> str:
+    path = tmp_path / "codes.sqlite"
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(SQLITE_CODES_TABLE)
+        conn.commit()
+    finally:
+        conn.close()
+    return f"sqlite:///{path}"
+
+
 class Office:
-    def __init__(self, database_url: str, tmp_path: Path) -> None:
+    def __init__(self, database_url: str, tmp_path: Path, codes_url: str | None = None) -> None:
         self.anthropic = FakeAnthropic()
         self.openai = FakeOpenAI()
+        self.labels: set[str] = set()
+        codes_url = codes_url or sqlite_codes_url(tmp_path)
+        self.codes = Database(codes_url)
         self.settings = Settings(
             database_url=database_url,
-            access_code=ACCESS_CODE,
-            admin_code=ADMIN_CODE,
+            codes_database_url=codes_url,
+            codes_check_seconds=0,
             allowed_hosts=("testserver",),
             allowed_origins=(BASE_URL,),
             artifacts_dir=tmp_path / "artifacts",
@@ -380,12 +403,35 @@ class Office:
         client.event_hooks["response"] = [check_error_body]
         return client
 
+    def add_code(self, label: str, role: str | None = "participant") -> str:
+        code = "-".join(uuid.uuid4().hex[index:index + 4] for index in range(0, 12, 4))
+        with self.codes.transaction() as conn:
+            conn.execute(
+                "INSERT INTO access_codes (id, label, code_hash, office_role) VALUES (:id, :label, :hash, :role)",
+                {"id": str(uuid.uuid4()), "label": label, "hash": access_code_hash(code), "role": role},
+            )
+        self.labels.add(label)
+        return code
+
+    def code_row(self, label: str) -> dict[str, Any]:
+        with self.codes.connection() as conn:
+            return conn.fetchone(
+                "SELECT CAST(id AS TEXT) AS id, label, office_role, used_at, office_used_at, revoked_at "
+                "FROM access_codes WHERE label = :label",
+                {"label": label},
+            )
+
+    def update_code(self, label: str, assignments: str) -> None:
+        with self.codes.transaction() as conn:
+            conn.execute(f"UPDATE access_codes SET {assignments} WHERE label = :label", {"label": label})
+
     def login(self, name: str = "Мария", *, admin: bool = False, app: FastAPI | None = None) -> tuple[TestClient, dict]:
+        label = name
+        while label in self.labels:
+            label = f"{name} {uuid.uuid4().hex[:4]}"
+        code = self.add_code(label, "admin" if admin else "participant")
         client = self.client(app)
-        response = client.post(
-            "/api/office-session",
-            json={"access_code": ADMIN_CODE if admin else ACCESS_CODE, "display_name": name},
-        )
+        response = client.post("/api/office-session", json={"access_code": code})
         assert response.status_code == 200, response.text
         return client, response.json()
 
@@ -466,7 +512,9 @@ class Office:
                 app.state.runner.shutdown(timeout=10)
             if app.state.workspace is not None:
                 app.state.workspace.shutdown()
+            app.state.sessions.codes.close()
             app.state.store.db.close()
+        self.codes.close()
 
 
 REPO_PATH = "/repos/SlavaPush/vibe-studio"
@@ -845,8 +893,24 @@ def database_url(request: pytest.FixtureRequest, tmp_path: Path):
 
 
 @pytest.fixture
-def office(database_url: str, tmp_path: Path):
-    instance = Office(database_url, tmp_path)
+def codes_url(database_url: str, tmp_path: Path):
+    if database_url.startswith("sqlite:///"):
+        yield sqlite_codes_url(tmp_path)
+        return
+    schema = f"c_{uuid.uuid4().hex[:12]}"
+    with psycopg.connect(PG_URL, autocommit=True) as conn:
+        conn.execute(f"CREATE SCHEMA {schema}")
+        conn.execute(f"SET search_path = {schema}")
+        conn.execute(CHAT_SCHEMA.read_text(encoding="utf-8"))
+    separator = "&" if "?" in PG_URL else "?"
+    yield f"{PG_URL}{separator}options=-csearch_path%3D{schema}"
+    with psycopg.connect(PG_URL, autocommit=True) as conn:
+        conn.execute(f"DROP SCHEMA {schema} CASCADE")
+
+
+@pytest.fixture
+def office(database_url: str, codes_url: str, tmp_path: Path):
+    instance = Office(database_url, tmp_path, codes_url)
     yield instance
     instance.close()
 

@@ -84,7 +84,6 @@ export type ReleaseOrigin = (typeof RELEASE_ORIGINS)[number]
 
 export interface OfficeSessionRequest {
   access_code: string
-  display_name: string
 }
 
 export interface Participant {

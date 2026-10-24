@@ -26,8 +26,8 @@ def _list(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
 @dataclass(frozen=True)
 class Settings:
     database_url: str = "sqlite:///./office.sqlite"
-    access_code: str = ""
-    admin_code: str = ""
+    codes_database_url: str = ""
+    codes_check_seconds: float = 10.0
     allowed_hosts: tuple[str, ...] = DEFAULT_HOSTS
     allowed_origins: tuple[str, ...] = DEFAULT_ORIGINS
     artifacts_dir: Path = Path("../artifacts")
@@ -36,7 +36,7 @@ class Settings:
     anthropic_base_url: str = "https://api.anthropic.com"
     models_policy: Path = POLICIES_DIR / "models.yaml"
     intake_policy: Path = POLICIES_DIR / "intake.yaml"
-    session_ttl_hours: int = 12
+    session_ttl_hours: int = 168
     login_failures_per_minute: int = 5
     tasks_per_hour: int = 5
     intake_timeout_seconds: float = 30.0
@@ -89,8 +89,7 @@ class Settings:
         env = os.environ
         return cls(
             database_url=env.get("OFFICE_DATABASE_URL") or cls.database_url,
-            access_code=env.get("OFFICE_ACCESS_CODE", ""),
-            admin_code=env.get("OFFICE_ADMIN_CODE", ""),
+            codes_database_url=env.get("OFFICE_CODES_DATABASE_URL", ""),
             allowed_hosts=_list(env.get("OFFICE_ALLOWED_HOSTS"), DEFAULT_HOSTS),
             allowed_origins=_list(env.get("OFFICE_ALLOWED_ORIGINS"), DEFAULT_ORIGINS),
             artifacts_dir=Path(env.get("OFFICE_ARTIFACTS_DIR") or "../artifacts"),

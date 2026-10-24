@@ -1,0 +1,11 @@
+[
+  {"code": "abcd-efgh-jkmn", "hash": "ff25e0a8f930ea31f7d2fdefc87340e34d7f6849d0781d0cd87701a5301722c0"},
+  {"code": "zzzz-2345-6789", "hash": "5de4138504e9ae7f0d3eabda3b5e0373807774a0f51042732d5131da5f114044"},
+  {"code": "ABCD-EFGH-JKMN", "hash": "ff25e0a8f930ea31f7d2fdefc87340e34d7f6849d0781d0cd87701a5301722c0"},
+  {"code": " abcd efgh jkmn ", "hash": "ff25e0a8f930ea31f7d2fdefc87340e34d7f6849d0781d0cd87701a5301722c0"},
+  {"code": "abcd\tefgh\njkmn", "hash": "ff25e0a8f930ea31f7d2fdefc87340e34d7f6849d0781d0cd87701a5301722c0"},
+  {"code": "abcd efgh jkmn", "hash": "ff25e0a8f930ea31f7d2fdefc87340e34d7f6849d0781d0cd87701a5301722c0"},
+  {"code": "--abcd--efgh-jkmn-", "hash": "ff25e0a8f930ea31f7d2fdefc87340e34d7f6849d0781d0cd87701a5301722c0"},
+  {"code": "abcdefghjkmn", "hash": "ff25e0a8f930ea31f7d2fdefc87340e34d7f6849d0781d0cd87701a5301722c0"},
+  {"code": "КОД-ДОСТУП-АБВ", "hash": "bc8ac3b4a830dc6c2faa5937ec3e7a3b30e8c0ae57af3c08f66d4dacae86435c"}
+]

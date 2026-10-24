@@ -3,16 +3,10 @@ import type {
   Participant,
   ReleaseCandidate,
   ReleaseQueueState,
-  Role,
   Task,
   TaskEvent,
 } from '@/api/types'
 import examples from './contract-examples.json'
-
-export const ACCESS_CODES: Record<string, Role> = {
-  'OFFICE-2026': 'participant',
-  'ADMIN-2026': 'admin',
-}
 
 export const participants: Participant[] = [
   ...(examples.Participant as Participant[]),

@@ -7,6 +7,7 @@ import {
   decideTask,
   listTasks,
   login,
+  me,
   taskDiff,
 } from '@/api/client'
 import { apiError, fakeApi, json } from '@/test/fake-api'
@@ -63,8 +64,18 @@ describe('клиент API', () => {
     api.on('POST /api/office-session', () =>
       apiError(401, 'invalid_access_code', 'Неверный код доступа офиса.'),
     )
-    const error = await failure(login({ access_code: 'x', display_name: 'Мария' }))
+    const error = await failure(login({ access_code: 'x' }))
     expect(error).toMatchObject({ status: 401, code: 'invalid_access_code', retryAfter: null })
+    expect(api.bodies('POST /api/office-session')).toEqual([{ access_code: 'x' }])
+  })
+
+  it('показывает текст сервера для 503 codes_unavailable', async () => {
+    const api = fakeApi()
+    api.on('GET /api/me', () =>
+      json(503, { code: 'codes_unavailable', message: 'Реестр недоступен.', retryable: true, operation_id: 'op_1' }),
+    )
+    const error = await failure(me())
+    expect(error).toMatchObject({ status: 503, code: 'codes_unavailable', retryable: true, message: 'Реестр недоступен.' })
   })
 
   it('заменяет текст ошибки 500 фиксированным', async () => {
