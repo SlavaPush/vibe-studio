@@ -8,10 +8,12 @@
 
 | Секрет | Где хранится | Кто использует | Права |
 | --- | --- | --- | --- |
-| Токен GitHub | `.env` офиса | Релизный адаптер | Fine-grained token только для репозитория `SlavaPush/vibe-studio`: Contents — read and write, Pull requests — read and write, Commit statuses — read, Checks — read, Actions — read |
+| Ключ GitHub App (`*.pem`) | `.env` офиса | Релизный адаптер | Ключ GitHub App офиса (например, `vibe-office`), установленного только в репозиторий `SlavaPush/vibe-studio`. Релизный адаптер получает по ключу короткоживущий токен установки. Права App: Contents — read and write, Pull requests — read and write, Checks — read, Commit statuses — read, Actions — read, Metadata — read. Права Workflows, Administration, Checks — write и Commit statuses — write не выдаются. App и ключ создаёт владелец на этапе `P5` |
 | Ключ Render API | `.env` офиса | Релизный адаптер | Доступ к сервису Render `elbrus-vibe-chat` (`srv-dbdtap5g1s2s73b13edg`), который публикует `vibe-chat` из `apps/chat` |
 
 Sandbox, агенты и CI не получают эти секреты. Агент не может изменить workflow GitHub Actions, настройки деплоя и политику путей.
+
+GitHub App офиса не входит в список обхода ruleset `main` (`.github/rulesets/main.json`, раздел «Ruleset `main`» корневого `README.md`). Обходит ruleset только роль администратора репозитория.
 
 ## GitHub
 
@@ -26,10 +28,15 @@ Sandbox, агенты и CI не получают эти секреты. Аге�
 
 ### Pull request
 
-1. Офис отправляет ветку `office/<task_id>` в `origin` по HTTPS с токеном. Push в `main`, force push и изменение защиты веток не выполняются.
-2. PR создаётся запросом `POST /repos/SlavaPush/vibe-studio/pulls` с `head = office/<task_id>` и `base = main`. Адрес PR сохраняется в поле задачи `pr_url`, задача переходит в `awaiting_integration`.
+1. Офис отправляет ветку `office/<task_id>` в `origin` по HTTPS с токеном установки GitHub App. Push в `main`, force push и изменение защиты веток не выполняются.
+2. PR создаётся запросом `POST /repos/SlavaPush/vibe-studio/pulls` с `head = office/<task_id>` и `base = main`. Автор ветки и PR — GitHub App офиса. Адрес PR сохраняется в поле задачи `pr_url`, задача переходит в `awaiting_integration`.
 3. Слияние PR выполняет человек в GitHub. Офис не разрешает конфликты автоматически и не обходит защиту веток.
-4. После слияния офис читает PR (`GET /repos/SlavaPush/vibe-studio/pulls/{number}`) и берёт итоговый `merge_commit_sha`. Дальнейшие проверки и выпуск относятся к этому commit.
+4. Ruleset `main` действует на App так же, как на любого участника без права обхода:
+   - контур интерфейса: PR, меняющий только файлы без владельца в `.github/CODEOWNERS`, сливается без одобрений (`required_approving_review_count: 0`);
+   - серверный контур: PR, меняющий файлы с владельцем в `.github/CODEOWNERS`, сливается только после одобрения владельца `@SlavaPush`. Автор PR — App, а не владелец, поэтому владелец может одобрить PR. Новый push снимает прежнее одобрение. На этапе `P4a` такие PR офиса всё равно отклоняются политикой путей и проверкой `office-paths` независимо от одобрения; серверный контур включается на этапе `P5`;
+   - обязательные проверки ruleset привязаны к GitHub Actions (`integration_id: 15368`). Статус или check run с тем же именем, созданный токеном App, не засчитывается. Права Checks — write и Commit statuses — write у App нет.
+5. Без права Workflows токен установки App не может отправить ветку, в которой изменены файлы `.github/workflows/**`: GitHub отклоняет такой push до создания PR. Эта граница действует независимо от ruleset.
+6. После слияния офис читает PR (`GET /repos/SlavaPush/vibe-studio/pulls/{number}`) и берёт итоговый `merge_commit_sha`. Дальнейшие проверки и выпуск относятся к этому commit.
 
 ### Проверка путей `office-paths`
 

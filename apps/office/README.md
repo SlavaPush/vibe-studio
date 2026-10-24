@@ -69,7 +69,7 @@ cd apps/office/api && uv run python -m scripts.check_branch --repo ../../.. --ba
 
 `contracts/api.md` описывает API панели: операции, модели, перечисления, ошибки и права. Примеры JSON размечены маркером `<!-- example: <Модель> -->`. `api/tests/test_contract.py` разбирает каждый пример своей Pydantic-моделью. Скрипт `web/scripts/extract-contract-examples.mjs` извлекает те же примеры в `web/src/mocks/contract-examples.json` перед `npm run dev`, `npm run test` и `npm run build`; файл создаётся автоматически и не хранится в Git.
 
-`contracts/integrations.md` описывает работу офиса с GitHub, Render и `GET /api/version` сервиса `vibe-chat`: ветки задач, PR, обязательные проверки, очередь выпуска, деплой по `commitId` и откат.
+`contracts/integrations.md` описывает работу офиса с GitHub, Render и `GET /api/version` сервиса `vibe-chat`: ветки задач, PR, обязательные проверки, очередь выпуска, деплой по `commitId` и откат. Ветки и PR офиса создаёт GitHub App без права обхода ruleset `main` (раздел «Ruleset `main`» корневого `README.md`).
 
 ## Структура `web/src`
 

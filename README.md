@@ -52,7 +52,34 @@ Docker-тесты офиса клонируют `OFFICE_TEST_TARGET_REPO` и б�
 
 ## CODEOWNERS
 
-`.github/CODEOWNERS` назначает владельца `@SlavaPush` для офиса, серверной части, контракта и инфраструктуры чата, CI, manifest и lock-файлов, клиента API и mock-данных интерфейса, конфигураций сборки и lint, а также тестов. Изменения остальных файлов интерфейса чата не требуют одобрения владельца. Правило действует, когда в настройках репозитория включено обязательное одобрение владельцев кода.
+`.github/CODEOWNERS` назначает владельца `@SlavaPush` для офиса, серверной части, контракта и инфраструктуры чата, CI, manifest и lock-файлов, клиента API и mock-данных интерфейса, конфигураций сборки и lint, а также тестов. Изменения остальных файлов интерфейса чата не требуют одобрения владельца. Правило действует, когда в настройках репозитория включено обязательное одобрение владельцев кода: его включает ruleset `main`.
+
+## Ruleset `main`
+
+`.github/rulesets/main.json` — определение ruleset ветки по умолчанию (`~DEFAULT_BRANCH`) в формате импорта GitHub, `enforcement: active`.
+
+Ruleset требует:
+
+- запрет удаления ветки (`deletion`) и force push (`non_fast_forward`);
+- изменения только через pull request: 0 обязательных одобрений, одобрение владельца кода по `.github/CODEOWNERS` для файлов с владельцем, снятие прежних одобрений после нового push;
+- успешные обязательные проверки `chat-api`, `chat-web`, `chat-containers`, `office-api`, `office-web`, `office-sandbox` и `office-paths` от GitHub Actions (`integration_id: 15368`), без требования актуальной базы. Статус с тем же именем от другого приложения или пользователя не засчитывается. Для веток не `office/*` job `office-paths` пропускается, GitHub считает пропуск успехом.
+
+Обходит ruleset только роль администратора репозитория (`RepositoryRole`, `actor_id: 5`, `bypass_mode: always`): владелец может выполнять push в `main` напрямую. GitHub App офиса в списке обхода нет: офис не может отправить commit в `main` и слить PR в обход правил.
+
+Тест офиса `apps/office/api/tests/test_ruleset.py` сверяет `main.json` с workflow: имена обязательных проверок равны id job в `.github/workflows/*.yml`. При добавлении или переименовании job обновите `main.json` и ruleset на GitHub.
+
+Как применить:
+
+1. Settings → Rules → Rulesets → New ruleset → Import a ruleset.
+2. Выбрать файл `.github/rulesets/main.json` и сохранить.
+
+Если импорт не принимает файл, задайте те же значения вручную.
+
+Как сверить:
+
+1. `GET /repos/SlavaPush/vibe-studio/rulesets` возвращает `id` ruleset `main`.
+2. `GET /repos/SlavaPush/vibe-studio/rulesets/{id}` возвращает действующий ruleset.
+3. Сравнить с `main.json` поля `name`, `target`, `enforcement`, `conditions`, `bypass_actors` и параметры всех правил. Служебные поля ответа (`id`, `node_id`, `_links`, `source`, `source_type`, `created_at`, `updated_at`, `current_user_can_bypass`) не сравниваются.
 
 ## Лицензия
 
