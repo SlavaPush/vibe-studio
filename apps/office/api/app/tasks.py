@@ -18,6 +18,7 @@ from app.schemas import (
     CheckReport,
     FailureKind,
     ModelProfile,
+    PullRequestReview,
     ReleaseCandidate,
     ReleaseKind,
     ReleaseStatus,
@@ -55,9 +56,17 @@ TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
 }
 
 TASK_SELECT = (
-    "SELECT t.*, p.display_name AS owner_name FROM tasks t "
-    "JOIN participants p ON p.id = t.owner_id"
+    "SELECT t.*, p.display_name AS owner_name, r.id AS review_id, r.head_sha AS review_head_sha, "
+    "r.verdict AS review_verdict, r.reasons AS review_reasons, r.required_changes AS review_required_changes, "
+    "r.checklist AS review_checklist, r.created_at AS review_created_at, "
+    "EXISTS (SELECT 1 FROM operations o WHERE o.task_id = t.id AND o.kind = 'merge_pr' "
+    "AND o.status IN ('started', 'unknown')) AS merge_pending, "
+    "EXISTS (SELECT 1 FROM operations o WHERE o.task_id = t.id) AS has_operations FROM tasks t "
+    "JOIN participants p ON p.id = t.owner_id "
+    "LEFT JOIN pr_reviews r ON r.id = (SELECT x.id FROM pr_reviews x WHERE x.task_id = t.id "
+    "ORDER BY x.created_at DESC, x.id DESC LIMIT 1)"
 )
+PR_REVIEW_CALLS_LIMIT = 2
 
 SignalHandler = Callable[[str, str], None]
 
@@ -113,6 +122,12 @@ def task_from_row(row: dict[str, Any]) -> Task:
         head_sha=row["head_sha"],
         failure_kind=row["failure_kind"],
         checks=json.loads(row["checks"]) if row["checks"] else None,
+        pr_review=review_from_row(row) if row.get("review_id") else None,
+        merge_sha=row["merge_sha"],
+        merge_pending=bool(row["merge_pending"]),
+        integration_started=bool(
+            row["head_sha"] or row["pr_number"] is not None or row["merge_sha"] or row["has_operations"]
+        ),
         changed_files=json.loads(row["changed_files"]),
         fix_cycles=row["fix_cycles"],
         usage={
@@ -121,6 +136,18 @@ def task_from_row(row: dict[str, Any]) -> Task:
             "input_tokens": row["input_tokens"],
             "output_tokens": row["output_tokens"],
         },
+    )
+
+
+def review_from_row(row: dict[str, Any]) -> PullRequestReview:
+    return PullRequestReview(
+        id=row["review_id"],
+        head_sha=row["review_head_sha"],
+        verdict=row["review_verdict"],
+        reasons=row["review_reasons"],
+        required_changes=json.loads(row["review_required_changes"]),
+        checklist=json.loads(row["review_checklist"]),
+        created_at=from_text(row["review_created_at"]),
     )
 
 
@@ -156,13 +183,18 @@ def candidate_from_row(row: dict[str, Any]) -> ReleaseCandidate:
         approved_at=from_text(row["approved_at"]) if row["approved_at"] else None,
         is_published=bool(row["is_published"]),
         deploy=json.loads(row["deploy"]) if row["deploy"] else None,
+        pr_review_id=row["pr_review_id"],
+        e2e=json.loads(row["e2e"]) if row["e2e"] else None,
     )
 
 
 class TaskStore:
-    def __init__(self, db: Database, notify: Callable[[], None] = lambda: None) -> None:
+    def __init__(
+        self, db: Database, notify: Callable[[], None] = lambda: None, pr_review_calls: int = PR_REVIEW_CALLS_LIMIT
+    ) -> None:
         self.db = db
         self.notify = notify
+        self.pr_review_calls = pr_review_calls
         self.signal_handlers: list[SignalHandler] = []
 
     def signal(self, conn: Connection, name: str, task_id: str) -> None:
@@ -336,13 +368,14 @@ class TaskStore:
             task = self.load_task(conn, task_id)
             if task is None:
                 raise not_found("Задача не найдена.")
-            if task.usage.model_calls >= task.usage.model_calls_limit:
-                raise BudgetExceeded(f"{task_id}: {task.usage.model_calls_limit} model calls used")
-            conn.execute(
-                "UPDATE tasks SET model_calls = model_calls + 1, version = version + 1, updated_at = :now "
-                "WHERE id = :id",
-                {"now": to_text(utcnow()), "id": task_id},
-            )
+            if role != AgentRole.pr_reviewer:
+                if task.usage.model_calls >= task.usage.model_calls_limit:
+                    raise BudgetExceeded(f"{task_id}: {task.usage.model_calls_limit} model calls used")
+                conn.execute(
+                    "UPDATE tasks SET model_calls = model_calls + 1, version = version + 1, updated_at = :now "
+                    "WHERE id = :id",
+                    {"now": to_text(utcnow()), "id": task_id},
+                )
             self.record_event(
                 conn,
                 task_id,
@@ -351,6 +384,31 @@ class TaskStore:
                 role=role,
                 tool="model",
             )
+
+    def reserve_pr_review(self, task_id: str, limit: int) -> None:
+        with self.db.locked_transaction() as conn:
+            changed = conn.execute(
+                "UPDATE tasks SET pr_review_calls = pr_review_calls + 1, version = version + 1, updated_at = :now "
+                "WHERE id = :id AND pr_review_calls < :limit",
+                {"now": to_text(utcnow()), "id": task_id, "limit": limit},
+            )
+        if changed != 1:
+            raise BudgetExceeded(f"{task_id}: {limit} pr review calls used")
+
+    def pr_review_calls_used(self, conn: Connection, task_id: str) -> int:
+        return conn.fetchone("SELECT pr_review_calls FROM tasks WHERE id = :id", {"id": task_id})["pr_review_calls"]
+
+    def load_review(self, conn: Connection, task_id: str, head_sha: str | None) -> PullRequestReview | None:
+        row = conn.fetchone(
+            "SELECT id AS review_id, head_sha AS review_head_sha, verdict AS review_verdict, "
+            "reasons AS review_reasons, required_changes AS review_required_changes, checklist AS review_checklist, "
+            "created_at AS review_created_at FROM pr_reviews WHERE task_id = :id AND head_sha = :head",
+            {"id": task_id, "head": head_sha},
+        )
+        return None if row is None else review_from_row(row)
+
+    def has_review(self, conn: Connection, task_id: str, head_sha: str | None) -> bool:
+        return self.load_review(conn, task_id, head_sha) is not None
 
     def record_usage(self, task_id: str, input_tokens: int, output_tokens: int) -> None:
         with self.db.locked_transaction() as conn:
@@ -532,9 +590,6 @@ class TaskStore:
         self.transition(conn, task_id, target, expected_from=task.status)
         return True
 
-    def has_operations(self, conn: Connection, task_id: str) -> bool:
-        return conn.fetchone("SELECT id FROM operations WHERE task_id = :id LIMIT 1", {"id": task_id}) is not None
-
     def _promote(self, conn: Connection) -> list[str]:
         promoted: list[str] = []
         used = self.slots_used(conn)
@@ -666,6 +721,23 @@ class TaskStore:
             checks=json.loads(row["checks"]),
         )
 
+    def check_reports(self, task_id: str, commit_sha: str) -> list[CheckReport]:
+        with self.db.connection() as conn:
+            rows = conn.fetchall(
+                "SELECT * FROM check_reports WHERE task_id = :id AND commit_sha = :sha ORDER BY created_at DESC, id DESC",
+                {"id": task_id, "sha": commit_sha},
+            )
+        return [
+            CheckReport(
+                task_id=row["task_id"],
+                commit_sha=row["commit_sha"],
+                spec_hash=row["spec_hash"],
+                suite_hash=row["suite_hash"],
+                checks=json.loads(row["checks"]),
+            )
+            for row in rows
+        ]
+
     def add_check_report(self, report: CheckReport) -> None:
         with self.db.transaction() as conn:
             conn.execute(
@@ -705,13 +777,16 @@ class TaskStore:
         pr_url: str | None,
         status: ReleaseStatus = ReleaseStatus.pending,
         is_published: bool = False,
+        pr_review_id: str | None = None,
+        e2e: CheckReport | None = None,
     ) -> ReleaseCandidate:
         release_id = new_id("rel")
         conn.execute(
             "INSERT INTO release_candidates (id, task_id, kind, status, version, commit_sha, expected_previous_sha, "
-            "spec_hash, suite_hash, ci_run_ids, pr_url, created_at, approved_by, approved_at, is_published, deploy) "
+            "spec_hash, suite_hash, ci_run_ids, pr_url, created_at, approved_by, approved_at, is_published, deploy, "
+            "pr_review_id, e2e) "
             "VALUES (:id, :task_id, :kind, :status, 1, :commit_sha, :previous, :spec_hash, :suite_hash, :ci, "
-            ":pr_url, :now, NULL, NULL, :published, NULL)",
+            ":pr_url, :now, NULL, NULL, :published, NULL, :review, :e2e)",
             {
                 "id": release_id,
                 "task_id": task_id,
@@ -725,6 +800,8 @@ class TaskStore:
                 "pr_url": pr_url,
                 "now": to_text(utcnow()),
                 "published": is_published,
+                "review": pr_review_id,
+                "e2e": _json(e2e.model_dump(mode="json")) if e2e is not None else None,
             },
         )
         self.record_event(

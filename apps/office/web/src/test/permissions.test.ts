@@ -68,6 +68,44 @@ describe('canAct', () => {
     expect(canAct(owner, integrating, 'cancel')).toEqual({ allowed: true })
   })
 
+  it('запрещает отмену после слияния PR', () => {
+    const merged: Task = {
+      ...developing,
+      status: 'needs_attention',
+      pr_number: 3,
+      merge_sha: 'c3d4e5f6a7b8091a2b3c4d5e6f708192a3b4c5d6',
+    }
+    expect(canAct(owner, merged, 'cancel')).toEqual({
+      allowed: false,
+      reason: 'PR задачи уже слит в main: отмена недоступна.',
+    })
+  })
+
+  it('запрещает отмену во время слияния с неустановленным исходом', () => {
+    for (const status of ['awaiting_integration', 'needs_attention'] as const) {
+      const merging: Task = { ...developing, status, pr_number: 3, merge_pending: true }
+      expect(canAct(owner, merging, 'cancel')).toEqual({
+        allowed: false,
+        reason: 'Выполняется слияние PR задачи: отмена недоступна.',
+      })
+    }
+  })
+
+  it('на этапе интеграции не проверяет бюджет графа для повтора', () => {
+    const usage = { ...developing.usage, model_calls: 30 }
+    const pushing: Task = {
+      ...developing,
+      status: 'needs_attention',
+      head_sha: null,
+      pr_number: null,
+      merge_sha: null,
+      integration_started: true,
+      usage,
+    }
+    expect(canAct(owner, pushing, 'retry')).toEqual({ allowed: true })
+    expect(canAct(owner, { ...pushing, integration_started: false }, 'retry').allowed).toBe(false)
+  })
+
   it('запрещает повтор при исчерпанном бюджете обращений', () => {
     const failed: Task = { ...developing, status: 'failed' }
     expect(canAct(owner, failed, 'retry')).toEqual({ allowed: true })

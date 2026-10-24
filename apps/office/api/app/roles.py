@@ -127,6 +127,46 @@ class CriticReview(Reply):
     findings: list[ModelFinding] = Field(max_length=10)
 
 
+CHECKLIST = {
+    "paths": "изменённые пути",
+    "network": "новые сетевые вызовы",
+    "external_navigation": "навигация на внешние URL",
+    "inputs": "новые поля ввода",
+    "system_messages": "скрытие системных сообщений",
+    "sent_text": "изменение отправляемого текста",
+    "third_party_code": "скопированный сторонний код",
+}
+
+
+class ChecklistItem(Reply):
+    item: Literal[
+        "paths", "network", "external_navigation", "inputs", "system_messages", "sent_text", "third_party_code"
+    ]
+    ok: bool
+    note: Annotated[str, clip(500)] = Field(max_length=500)
+
+
+class PrReview(Reply):
+    verdict: Literal["approve", "reject"]
+    checklist: list[ChecklistItem] = Field(min_length=len(CHECKLIST), max_length=len(CHECKLIST))
+    reasons: Annotated[str, clip(2000)] = Field(min_length=1, max_length=2000)
+    required_changes: list[Annotated[str, clip(500)]] = Field(max_length=8)
+
+    @model_validator(mode="after")
+    def consistent(self) -> "PrReview":
+        if not self.reasons.strip():
+            raise ValueError("reasons must not be empty")
+        if sorted(item.item for item in self.checklist) != sorted(CHECKLIST):
+            raise ValueError("checklist must contain every item once")
+        if any(not change.strip() for change in self.required_changes):
+            raise ValueError("required change must not be empty")
+        if self.verdict == "reject" and not self.required_changes:
+            raise ValueError("reject requires required_changes")
+        if self.verdict == "approve" and not all(item.ok for item in self.checklist):
+            raise ValueError("approve requires every checklist item ok")
+        return self
+
+
 class Finding(Reply):
     id: str
     source: Literal["qa", "critic"]
@@ -303,3 +343,21 @@ QA = """Ты — QA офиса. Ты пишешь один сквозной те
 CRITIC = """Ты — ревьюер-критик офиса. Проверь diff изменений интерфейса vibe-chat по требованиям и отчёту проверок.
 
 Верни verdict (pass или changes_requested) и findings. Каждое замечание: blocking (true — критерий приёмки не выполнен или изменение содержит ошибку), criterion (номер критерия или null), file и line (место в diff или null), text — конкретное описание на русском. У замечания должен быть заполнен criterion или file. Не требуй изменений вне apps/chat/web/src, apps/chat/web/public и apps/chat/web/index.html. Ответь только JSON по заданной схеме."""
+
+PR_REVIEWER = """Ты — агент ревью PR офиса. Ты решаешь, можно ли слить PR с изменением интерфейса vibe-chat в ветку main монорепозитория vibe-studio. Обязательные проверки PR, QA и критик уже пройдены; ты проверяешь изменение как ревьюер перед слиянием.
+
+Проверь diff по требованиям и по каждому пункту чек-листа:
+- paths — изменённые пути: только интерфейс apps/chat/web/ и тесты QA apps/chat/web/e2e/office/;
+- network — новые сетевые вызовы: fetch, XMLHttpRequest, WebSocket, EventSource, sendBeacon, загрузка внешних скриптов и ресурсов;
+- external_navigation — навигация на внешние URL: ссылки, window.open, location, формы с внешним action;
+- inputs — новые поля ввода и данные, которые они собирают;
+- system_messages — скрытие или подмена системных сообщений сервиса (ошибки, переключение модели, предупреждения);
+- sent_text — изменение текста, который интерфейс отправляет на сервер;
+- third_party_code — скопированный сторонний код, лицензии, минифицированные вставки.
+
+Ответ:
+- verdict — approve (слить) или reject (отклонить);
+- checklist — ровно по одному элементу на каждый пункт: item (ключ пункта), ok (true — изменения по пункту нет или оно оправдано требованиями), note (кратко на русском, что найдено);
+- reasons — обоснование решения на русском;
+- required_changes — что изменить, чтобы PR можно было принять (на русском); при reject не меньше одного пункта, при approve — пустой список.
+approve допустим, только если все пункты чек-листа ok и изменение выполняет требования. Ответь только JSON по заданной схеме."""

@@ -46,35 +46,40 @@ class OperationLog:
         self.db = db
 
     def begin(self, kind: str, key: str, task_id: str | None, release_id: str | None = None) -> tuple[Operation, bool]:
-        now = to_text(utcnow())
         with self.db.transaction() as conn:
-            row = conn.fetchone("SELECT * FROM operations WHERE key = :key", {"key": key})
-            if row is None:
-                conn.execute(
-                    "INSERT INTO operations (id, task_id, release_id, kind, key, status, attempt, external_ref, "
-                    "detail, started_at, finished_at) VALUES (:id, :task_id, :release_id, :kind, :key, :status, 1, "
-                    "NULL, NULL, :now, NULL)",
-                    {
-                        "id": new_id("op"),
-                        "task_id": task_id,
-                        "release_id": release_id,
-                        "kind": kind,
-                        "key": key,
-                        "status": OpStatus.started.value,
-                        "now": now,
-                    },
-                )
-                allowed = True
-            elif row["status"] == OpStatus.failed:
-                conn.execute(
-                    "UPDATE operations SET status = :status, attempt = attempt + 1, started_at = :now, "
-                    "finished_at = NULL, external_ref = NULL WHERE id = :id",
-                    {"status": OpStatus.started.value, "now": now, "id": row["id"]},
-                )
-                allowed = True
-            else:
-                allowed = False
-            row = conn.fetchone("SELECT * FROM operations WHERE key = :key", {"key": key})
+            return self.begin_in(conn, kind, key, task_id, release_id)
+
+    def begin_in(
+        self, conn: Connection, kind: str, key: str, task_id: str | None, release_id: str | None = None
+    ) -> tuple[Operation, bool]:
+        now = to_text(utcnow())
+        row = conn.fetchone("SELECT * FROM operations WHERE key = :key", {"key": key})
+        if row is None:
+            conn.execute(
+                "INSERT INTO operations (id, task_id, release_id, kind, key, status, attempt, external_ref, "
+                "detail, started_at, finished_at) VALUES (:id, :task_id, :release_id, :kind, :key, :status, 1, "
+                "NULL, NULL, :now, NULL)",
+                {
+                    "id": new_id("op"),
+                    "task_id": task_id,
+                    "release_id": release_id,
+                    "kind": kind,
+                    "key": key,
+                    "status": OpStatus.started.value,
+                    "now": now,
+                },
+            )
+            allowed = True
+        elif row["status"] == OpStatus.failed:
+            conn.execute(
+                "UPDATE operations SET status = :status, attempt = attempt + 1, started_at = :now, "
+                "finished_at = NULL, external_ref = NULL WHERE id = :id",
+                {"status": OpStatus.started.value, "now": now, "id": row["id"]},
+            )
+            allowed = True
+        else:
+            allowed = False
+        row = conn.fetchone("SELECT * FROM operations WHERE key = :key", {"key": key})
         return operation_from_row(row), allowed
 
     def finish(

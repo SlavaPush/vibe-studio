@@ -27,7 +27,7 @@ export const SLOTS_TOTAL = 3
 export const MODEL_PROFILES = ['local', 'cloud', 'hybrid'] as const
 export type ModelProfile = (typeof MODEL_PROFILES)[number]
 
-export const AGENT_ROLES = ['supervisor', 'researcher', 'developer', 'qa', 'critic'] as const
+export const AGENT_ROLES = ['supervisor', 'researcher', 'developer', 'qa', 'critic', 'pr_reviewer'] as const
 export type AgentRole = (typeof AGENT_ROLES)[number]
 
 export const TASK_EVENT_TYPES = [
@@ -47,6 +47,9 @@ export const TASK_EVENT_TYPES = [
   'checks_status',
   'pr_closed',
   'operation_unknown',
+  'pr_review',
+  'merge_started',
+  'pr_merged',
 ] as const
 export type TaskEventType = (typeof TASK_EVENT_TYPES)[number]
 
@@ -119,6 +122,22 @@ export interface PullRequestChecks {
   checks: PullRequestCheck[]
 }
 
+export interface PullRequestReviewItem {
+  item: string
+  ok: boolean
+  note: string
+}
+
+export interface PullRequestReview {
+  id: string
+  head_sha: string
+  verdict: 'approve' | 'reject'
+  reasons: string
+  required_changes: string[]
+  checklist: PullRequestReviewItem[]
+  created_at: string
+}
+
 export interface Task {
   id: string
   title: string
@@ -139,6 +158,10 @@ export interface Task {
   head_sha: string | null
   failure_kind: FailureKind | null
   checks: PullRequestChecks | null
+  pr_review: PullRequestReview | null
+  merge_sha: string | null
+  merge_pending: boolean
+  integration_started: boolean
   changed_files: string[]
   fix_cycles: number
   usage: Usage
@@ -220,6 +243,8 @@ export interface ReleaseCandidate {
   approved_at: string | null
   is_published: boolean
   deploy: DeployResult | null
+  pr_review_id: string | null
+  e2e: CheckReport | null
 }
 
 export interface Slots {

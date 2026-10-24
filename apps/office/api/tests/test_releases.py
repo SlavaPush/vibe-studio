@@ -21,7 +21,9 @@ def setup(office):
 def test_participant_cannot_approve_or_rollback(office, setup):
     owner, _, _, task_id = setup
     pending = office.add_candidate(task_id)
-    published = office.add_candidate(task_id, status=ReleaseStatus.released, is_published=True)
+    published = office.add_candidate(
+        task_id, commit_sha="d" * 40, status=ReleaseStatus.released, is_published=True
+    )
     for release, decision in ((pending, "approve_release"), (published, "rollback")):
         response = decide(owner, release.id, decision, 1, f"{decision}-owner")
         assert response.status_code == 403
@@ -80,6 +82,13 @@ def test_rollback_creates_rollback_candidate(office, setup):
     assert duplicate.status_code == 409
     assert duplicate.json()["code"] == "decision_not_allowed"
 
+    with office.store.db.transaction() as conn:
+        conn.execute("UPDATE release_candidates SET status = 'failed' WHERE id = :id", {"id": rollback.id})
+    again = decide(admin, published.id, "rollback", 1, "rollback-key-3")
+    assert again.status_code == 200
+    rollbacks = [release for release in office.store.list_releases() if release.kind == ReleaseKind.rollback]
+    assert [release.commit_sha for release in rollbacks] == [previous.commit_sha] * 2
+
 
 def test_rollback_of_unpublished_candidate_is_not_allowed(office, setup):
     _, admin, _, task_id = setup
@@ -92,7 +101,7 @@ def test_rollback_of_unpublished_candidate_is_not_allowed(office, setup):
 def test_release_key_conflicts_across_objects(office, setup):
     _, admin, _, task_id = setup
     first = office.add_candidate(task_id)
-    second = office.add_candidate(task_id)
+    second = office.add_candidate(task_id, commit_sha="d" * 40)
     assert decide(admin, first.id, "approve_release", 1, "release-shared").status_code == 200
     response = decide(admin, second.id, "approve_release", 1, "release-shared")
     assert response.status_code == 409

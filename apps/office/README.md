@@ -52,8 +52,12 @@ docker build -t back-office-sandbox:p4 apps/office/docker/sandbox
 
 1. Повторно проверяет ветку и отправляет `office/<task_id>` в `OFFICE_GITHUB_REPO` (по умолчанию `SlavaPush/vibe-studio`) по HTTPS с токеном установки GitHub App.
 2. Ищет открытый PR ветки и, если его нет, открывает PR в `main`. Номер, адрес PR и отправленный SHA сохраняются в задаче (`pr_number`, `pr_url`, `head_sha`).
-3. Читает запуски GitHub Actions для head PR и сохраняет сводку обязательных проверок ruleset `main` в поле задачи `checks` (событие `checks_status`). Все проверки `success` — задача ждёт ревью PR (`P5.2`). Провал обязательной проверки закрывает PR, задача получает `failed` с `failure_kind = checks_failed`, повтор запрещён. Проверки не завершились за `OFFICE_CHECKS_TIMEOUT_MINUTES` — `needs_attention`.
-4. Отмена задачи закрывает её PR.
+3. Читает запуски GitHub Actions для head PR и сохраняет сводку обязательных проверок ruleset `main` в поле задачи `checks` (событие `checks_status`). Провал обязательной проверки закрывает PR, задача получает `failed` с `failure_kind = checks_failed`, повтор запрещён. Проверки не завершились за `OFFICE_CHECKS_TIMEOUT_MINUTES` — `needs_attention`.
+4. Все проверки `success` и повторная проверка ветки пройдена — вызывает агента ревью PR (роль `pr_reviewer`). Решение (`approve` или `reject`, обоснование, что изменить, чек-лист) сохраняется для head PR в таблице `pr_reviews` и в поле задачи `pr_review`. Невалидный ответ или ошибка модели — `needs_attention`, PR открыт. `reject` закрывает PR, задача получает `failed` с `failure_kind = pr_rejected`.
+5. `approve` — сливает PR в `main` (squash) запросом от GitHub App с `sha` проверенного head. Изменённый head — решение недействительно, `needs_attention`. Таймаут слияния — только сверка с GitHub, без повторного запроса. Итоговый commit сохраняется в `merge_sha`.
+6. Ждёт обязательных проверок `ci.yml` события `push` для `merge_sha` и выполняет в sandbox критический E2E на этом commit (`lint`, `test`, `build`, `e2e` со всеми тестами QA из `main`). Провал — `failed` (`checks_failed`).
+7. Создаёт кандидата выпуска с основанием — опубликованной версией сервиса (`OFFICE_SERVICE_URL`/`api/version`); задача переходит в `awaiting_release`. Очередь и деплой — `P5.3`.
+8. Отмена задачи до слияния закрывает её PR. После слияния и во время слияния отмена недоступна.
 
 Каждое изменяющее действие записывается в журнал операций до вызова и сверяется с GitHub после перезапуска или потерянного ответа (раздел «Журнал операций» `contracts/integrations.md`). Неустановленный исход переводит задачу в `needs_attention`; `retry` возвращает её в `awaiting_integration` и продолжает с места остановки.
 
@@ -66,8 +70,10 @@ docker build -t back-office-sandbox:p4 apps/office/docker/sandbox
 | `GITHUB_APP_PRIVATE_KEY_PATH` | Путь к файлу закрытого ключа App `*.pem` вне репозитория |
 | `OFFICE_GITHUB_REPO` | Репозиторий для push и PR; по умолчанию `SlavaPush/vibe-studio` |
 | `OFFICE_RELEASE_POLL_SECONDS` | Интервал опроса исполнителя, по умолчанию 20 |
-| `OFFICE_CHECKS_TIMEOUT_MINUTES` | Предел ожидания обязательных проверок PR, по умолчанию 30 |
+| `OFFICE_CHECKS_TIMEOUT_MINUTES` | Предел ожидания обязательных проверок PR и итогового commit, по умолчанию 30 |
 | `OFFICE_RECONCILE_TIMEOUT_MINUTES` | Предел сверки операции с неустановленным исходом, по умолчанию 30 |
+| `OFFICE_PR_REVIEW_CALLS` | Предел обращений агента ревью PR на задачу сверх бюджета графа, по умолчанию 2 |
+| `OFFICE_SERVICE_URL` | Адрес публичного сервиса `vibe-chat` для `GET /api/version` (основание выпуска); по умолчанию `https://elbrus-vibe-chat.onrender.com` |
 | `RENDER_API_KEY`, `RENDER_SERVICE_ID` | Доступ к Render для деплоя (`P5.3`) |
 
 Без любой из трёх переменных App исполнитель выпуска не запускается: при старте API пишет одно предупреждение, задачи остаются в `awaiting_integration`, остальные функции API работают. Токен установки хранится только в памяти API. Sandbox, роли и контейнеры проверок его не получают.

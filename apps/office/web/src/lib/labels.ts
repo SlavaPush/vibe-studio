@@ -4,6 +4,7 @@ import type {
   ModelProfile,
   ReleaseDecision,
   ReleaseStatus,
+  Task,
   TaskDecision,
   TaskEventType,
   TaskStatus,
@@ -48,6 +49,7 @@ export const AGENT_ROLE_LABELS: Record<AgentRole, string> = {
   developer: 'Разработчик',
   qa: 'QA',
   critic: 'Критик',
+  pr_reviewer: 'Агент ревью PR',
 }
 
 export const EVENT_TYPE_LABELS: Record<TaskEventType, string> = {
@@ -67,11 +69,37 @@ export const EVENT_TYPE_LABELS: Record<TaskEventType, string> = {
   checks_status: 'Проверки PR',
   pr_closed: 'PR закрыт',
   operation_unknown: 'Исход операции неизвестен',
+  pr_review: 'Решение агента ревью PR',
+  merge_started: 'Слияние PR начато',
+  pr_merged: 'PR слит',
 }
 
 export const FAILURE_KIND_LABELS: Record<FailureKind, string> = {
   checks_failed: 'Обязательные проверки PR не пройдены, PR закрыт.',
   pr_rejected: 'Агент ревью отклонил PR.',
+}
+
+export function failureLabel(task: Task): string | null {
+  if (task.failure_kind === null) return null
+  if (task.failure_kind === 'checks_failed' && task.merge_sha !== null) {
+    return 'Обязательные проверки или критический E2E итогового commit не пройдены.'
+  }
+  return FAILURE_KIND_LABELS[task.failure_kind]
+}
+
+export const REVIEW_VERDICT_LABELS: Record<'approve' | 'reject', string> = {
+  approve: 'Принят',
+  reject: 'Отклонён',
+}
+
+export const CHECKLIST_LABELS: Record<string, string> = {
+  paths: 'Изменённые пути',
+  network: 'Новые сетевые вызовы',
+  external_navigation: 'Навигация на внешние URL',
+  inputs: 'Новые поля ввода',
+  system_messages: 'Скрытие системных сообщений',
+  sent_text: 'Изменение отправляемого текста',
+  third_party_code: 'Скопированный сторонний код',
 }
 
 export const CHECK_STATUS_LABELS: Record<string, string> = {

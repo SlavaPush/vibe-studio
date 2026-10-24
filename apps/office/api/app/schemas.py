@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -63,6 +63,7 @@ class AgentRole(StrEnum):
     developer = "developer"
     qa = "qa"
     critic = "critic"
+    pr_reviewer = "pr_reviewer"
 
 
 class TaskEventType(StrEnum):
@@ -82,6 +83,9 @@ class TaskEventType(StrEnum):
     checks_status = "checks_status"
     pr_closed = "pr_closed"
     operation_unknown = "operation_unknown"
+    pr_review = "pr_review"
+    merge_started = "merge_started"
+    pr_merged = "pr_merged"
 
 
 class TaskDecision(StrEnum):
@@ -163,6 +167,22 @@ class PullRequestChecks(ContractModel):
     checks: list[PullRequestCheck]
 
 
+class PullRequestReviewItem(ContractModel):
+    item: str
+    ok: bool
+    note: str
+
+
+class PullRequestReview(ContractModel):
+    id: str
+    head_sha: str
+    verdict: Literal["approve", "reject"]
+    reasons: str
+    required_changes: list[str]
+    checklist: list[PullRequestReviewItem]
+    created_at: datetime
+
+
 class Task(ContractModel):
     id: str
     title: str = Field(max_length=80)
@@ -183,6 +203,10 @@ class Task(ContractModel):
     head_sha: str | None
     failure_kind: FailureKind | None
     checks: PullRequestChecks | None
+    pr_review: PullRequestReview | None
+    merge_sha: str | None
+    merge_pending: bool
+    integration_started: bool
     changed_files: list[str]
     fix_cycles: int = Field(ge=0, le=2)
     usage: Usage
@@ -264,6 +288,8 @@ class ReleaseCandidate(ContractModel):
     approved_at: datetime | None
     is_published: bool
     deploy: DeployResult | None
+    pr_review_id: str | None
+    e2e: CheckReport | None
 
 
 class Slots(ContractModel):

@@ -93,6 +93,75 @@ describe('TaskCard: PR задачи', () => {
     const dialog = await screen.findByRole('alertdialog', { name: 'Отменить задачу?' })
     expect(dialog).toHaveTextContent('офис закрывает PR задачи')
   })
+
+  const rejection = {
+    id: 'prv_1',
+    head_sha: integrating.head_sha as string,
+    verdict: 'reject' as const,
+    reasons: 'Добавлен запрос к внешнему API.',
+    required_changes: ['Убрать fetch к внешнему адресу.', 'Оставить отправляемый текст без изменений.'],
+    checklist: [
+      { item: 'paths', ok: true, note: 'Только apps/chat/web/src.' },
+      { item: 'network', ok: false, note: 'Новый fetch к https://example.com.' },
+    ],
+    created_at: '2026-10-24T10:00:00Z',
+  }
+
+  it('показывает отказ агента ревью отдельно от отказа фильтра приёма', () => {
+    fakeApi()
+    renderCard(maria, { ...integrating, status: 'failed', failure_kind: 'pr_rejected', pr_review: rejection })
+    expect(screen.getByText('Причина ошибки: Агент ревью отклонил PR.')).toBeInTheDocument()
+    const section = screen.getByRole('region', { name: /Решение агента ревью PR/ })
+    expect(within(section).getByText('Отклонён')).toBeInTheDocument()
+    expect(within(section).getByText('Добавлен запрос к внешнему API.')).toBeInTheDocument()
+    const changes = within(section).getByRole('list', { name: 'Что изменить' })
+    expect(within(changes).getAllByRole('listitem').map((item) => item.textContent)).toEqual(
+      rejection.required_changes,
+    )
+    const checklist = within(section).getByRole('list', { name: 'Чек-лист агента ревью' })
+    expect(within(checklist).getAllByRole('listitem').map((item) => item.textContent)).toEqual([
+      'В порядкеИзменённые путиТолько apps/chat/web/src.',
+      'ЗамечаниеНовые сетевые вызовыНовый fetch к https://example.com.',
+    ])
+    expect(screen.queryByText('Задача отклонена фильтром приёма')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Повторить' })).toBeDisabled()
+  })
+
+  it('после слияния показывает итоговый commit, проверки commit и запрещает отмену', () => {
+    fakeApi()
+    const merge = 'c3d4e5f6a7b8091a2b3c4d5e6f708192a3b4c5d6'
+    const merged: Task = {
+      ...integrating,
+      merge_sha: merge,
+      pr_review: { ...rejection, verdict: 'approve', required_changes: [] },
+      checks: { head_sha: merge, checks: [{ name: 'office-web', status: 'in_progress', conclusion: null, url: null }] },
+    }
+    renderCard(maria, merged)
+    expect(screen.getByRole('link', { name: 'Итоговый commit c3d4e5f' })).toHaveAttribute(
+      'href',
+      `https://github.com/SlavaPush/vibe-studio/commit/${merge}`,
+    )
+    expect(screen.getByRole('list', { name: 'Обязательные проверки итогового commit' })).toBeInTheDocument()
+    expect(screen.getByText('Принят')).toBeInTheDocument()
+    const cancel = screen.getByRole('button', { name: 'Отменить задачу' })
+    expect(cancel).toBeDisabled()
+    expect(cancel).toHaveAccessibleDescription('PR задачи уже слит в main: отмена недоступна.')
+  })
+
+  it('провал итогового commit не называет PR закрытым', () => {
+    fakeApi()
+    renderCard(maria, {
+      ...integrating,
+      status: 'failed',
+      failure_kind: 'checks_failed',
+      merge_sha: 'c3d4e5f6a7b8091a2b3c4d5e6f708192a3b4c5d6',
+    })
+    expect(
+      screen.getByText(
+        'Причина ошибки: Обязательные проверки или критический E2E итогового commit не пройдены.',
+      ),
+    ).toBeInTheDocument()
+  })
 })
 
 describe('TaskCard: действия', () => {

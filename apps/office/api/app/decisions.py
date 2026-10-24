@@ -123,7 +123,16 @@ def decide_task(
             return previous
         if task.version != request.expected_version:
             raise version_mismatch("Задача изменилась. Обновите карточку и примите решение заново.")
+        integration = task.status == TaskStatus.needs_attention and task.integration_started
         check_task_decision(task, request.decision)
+        if (
+            request.decision == TaskDecision.retry
+            and integration
+            and not task.merge_sha
+            and not store.has_review(conn, task_id, task.head_sha)
+            and store.pr_review_calls_used(conn, task_id) >= store.pr_review_calls
+        ):
+            raise not_allowed("Предел обращений агента ревью PR исчерпан. Повтор недоступен.")
         decision = insert_decision(
             conn,
             participant_id=participant.id,
@@ -145,11 +154,7 @@ def decide_task(
             },
         )
         target = TASK_TARGETS[request.decision]
-        if (
-            request.decision == TaskDecision.retry
-            and task.status == TaskStatus.needs_attention
-            and (task.head_sha or task.pr_number is not None or store.has_operations(conn, task_id))
-        ):
+        if request.decision == TaskDecision.retry and integration:
             target = TaskStatus.awaiting_integration
         store.transition(conn, task_id, target, expected_from=task.status)
         store.signal(conn, SIGNAL_DECISION_RECORDED, task_id)

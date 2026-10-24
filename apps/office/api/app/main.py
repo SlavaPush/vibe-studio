@@ -80,7 +80,7 @@ def create_app(
     db = Database(settings.database_url)
     db.init_schema()
     notifier = EventNotifier()
-    store = TaskStore(db, notifier.notify)
+    store = TaskStore(db, notifier.notify, settings.pr_review_calls)
     sessions = SessionStore(db, settings)
     models = gateway or ModelsGateway(settings)
     intake = IntakeFilter(models, settings)
@@ -92,7 +92,7 @@ def create_app(
     if runner and office_workspace is not None and sandbox is not None:
         office_runner = Runner(settings, store, office_workspace, sandbox, models, Checkpoints(settings.database_url))
     office_release = None
-    if office_runner is not None and office_workspace is not None:
+    if office_runner is not None and office_workspace is not None and sandbox is not None:
         if settings.github_app_configured:
             github = github_client(
                 settings.github_app_id,
@@ -102,7 +102,8 @@ def create_app(
                 base_url=settings.github_api_url,
             )
             office_release = ReleaseWorker(
-                settings, store, office_workspace, github, load_required_checks(settings.checkout_root)
+                settings, store, office_workspace, github, load_required_checks(settings.checkout_root),
+                gateway=models, suite=sandbox,
             )
         else:
             logger.warning(

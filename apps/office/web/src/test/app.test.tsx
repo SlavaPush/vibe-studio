@@ -468,6 +468,33 @@ describe('постановка и решения в панели', () => {
     await waitFor(() => expect(api.count('GET /api/tasks/tsk_101')).toBe(before + 1))
   })
 
+  it('событие начала слияния обновляет открытую карточку и блокирует отмену', async () => {
+    const integrating: Task = {
+      ...developing,
+      status: 'awaiting_integration',
+      pr_number: 7,
+      pr_url: 'https://github.com/SlavaPush/vibe-studio/pull/7',
+      head_sha: 'b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f80',
+      integration_started: true,
+    }
+    const api = backend()
+    api.on('GET /api/tasks', tasks.map((task) => (task.id === developing.id ? integrating : task)))
+    api.on('GET /api/tasks/tsk_101', integrating)
+    render(<App />)
+    await ready()
+    const source = openStream()
+    fireEvent.click(within(stack()).getByRole('button', { name: new RegExp(developing.title) }))
+    expect(await screen.findByRole('button', { name: 'Отменить задачу' })).toBeEnabled()
+    api.on('GET /api/tasks/tsk_101', { ...integrating, merge_pending: true, version: integrating.version + 1 })
+    act(() =>
+      source.emit(taskEvent('tsk_101', 'merge_started', { pr_number: 7, head_sha: integrating.head_sha })),
+    )
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Отменить задачу' })).toBeDisabled())
+    expect(screen.getByRole('button', { name: 'Отменить задачу' })).toHaveAccessibleDescription(
+      'Выполняется слияние PR задачи: отмена недоступна.',
+    )
+  })
+
   it('участник не видит активных действий по чужой задаче и по выпуску', async () => {
     backend()
     render(<App />)

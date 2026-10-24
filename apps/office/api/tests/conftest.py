@@ -183,6 +183,23 @@ def developer_answer(content: str, path: str = "apps/chat/web/src/App.tsx", done
     }
 
 
+CHECKLIST_ITEMS = (
+    "paths", "network", "external_navigation", "inputs", "system_messages", "sent_text", "third_party_code"
+)
+
+
+def pr_review_answer(verdict: str = "approve", changes: list[str] | None = None) -> dict[str, Any]:
+    return {
+        "verdict": verdict,
+        "checklist": [
+            {"item": item, "ok": verdict == "approve" or item != "network", "note": "проверено"}
+            for item in CHECKLIST_ITEMS
+        ],
+        "reasons": "Изменение выполняет критерии приёмки." if verdict == "approve" else "Добавлен внешний запрос.",
+        "required_changes": changes if changes is not None else ([] if verdict == "approve" else ["Убрать fetch."]),
+    }
+
+
 def qa_answer(call: ModelCall, criteria: list[int] | None = None, findings: list | None = None) -> dict[str, Any]:
     path = QA_FILE.search(call.user).group(0)
     return {
@@ -206,6 +223,7 @@ class ScriptedGateway(ModelsGateway):
             "developer": self.next_version,
             "qa": qa_answer,
             "critic": lambda call: {"verdict": "pass", "findings": []},
+            "pr_reviewer": lambda call: pr_review_answer(),
         }
 
     def next_version(self, call: ModelCall) -> dict[str, Any]:
@@ -466,6 +484,9 @@ class FakeGitHub:
         self.requests: list[httpx.Request] = []
         self.down = False
         self.lose_create = False
+        self.lose_merge = False
+        self.hang_merge = False
+        self.garble_merge = False
         self.status: dict[tuple[str, str], int] = {}
         self.jwts: list[str] = []
         self.lock = threading.Lock()
@@ -473,8 +494,22 @@ class FakeGitHub:
     def mutations(self) -> list[tuple[str, str]]:
         return [
             (request.method, request.url.path) for request in self.requests
-            if request.method in ("POST", "PATCH") and request.url.path.startswith(REPO_PATH)
+            if request.method in ("POST", "PATCH", "PUT") and request.url.path.startswith(REPO_PATH)
         ]
+
+    def merges(self) -> int:
+        return sum(1 for method, path in self.mutations() if method == "PUT" and path.endswith("/merge"))
+
+    def git(self, *args: str) -> str:
+        return git(self.bare, *args)
+
+    def squash(self, pr: dict[str, Any], sha: str) -> str:
+        tree = self.git("rev-parse", f"{sha}^{{tree}}")
+        parent = self.ref("main")
+        merged = self.git("commit-tree", tree, "-p", parent, "-m", f"{pr['title']} (#{pr['number']})")
+        self.git("update-ref", "refs/heads/main", merged, parent)
+        pr.update(state="closed", merged=True, merge_commit_sha=merged)
+        return merged
 
     def ref(self, branch: str) -> str | None:
         result = subprocess.run(
@@ -520,11 +555,44 @@ class FakeGitHub:
                 "base": {"ref": body["base"]},
                 "title": body["title"],
                 "body": body["body"],
+                "merged": False,
+                "merge_commit_sha": None,
             }
             self.prs[number] = pr
             if self.lose_create:
                 raise httpx.ReadTimeout("timed out", request=request)
             return httpx.Response(201, json=self.pr(number))
+        match = re.fullmatch(r"/pulls/(\d+)/merge", rel)
+        if match and method == "PUT":
+            number = int(match.group(1))
+            pr = self.pr(number)
+            if pr["state"] != "open":
+                return httpx.Response(405, json={"message": "Pull Request is not mergeable"})
+            if pr["head"]["sha"] != body["sha"]:
+                return httpx.Response(409, json={"message": "Head branch was modified"})
+            pr["merge_title"] = body["commit_title"]
+            pr["merge_method"] = body["merge_method"]
+            if self.hang_merge:
+                raise httpx.ReadTimeout("timed out", request=request)
+            if self.garble_merge:
+                return httpx.Response(200, content=b"<html>proxy error</html>")
+            merged = self.squash(pr, body["sha"])
+            if self.lose_merge:
+                raise httpx.ReadTimeout("timed out", request=request)
+            return httpx.Response(200, json={"sha": merged, "merged": True, "message": "Pull Request successfully merged"})
+        match = re.fullmatch(r"/commits/([0-9a-f]+)", rel)
+        if match:
+            try:
+                return httpx.Response(200, json={"sha": self.git("rev-parse", "--verify", f"{match.group(1)}^{{commit}}")})
+            except subprocess.CalledProcessError:
+                return httpx.Response(404, json={"message": "Not Found"})
+        match = re.fullmatch(r"/compare/([0-9a-f]+)\.\.\.(\w+)", rel)
+        if match:
+            base, head = self.git("rev-parse", match.group(1)), self.git("rev-parse", match.group(2))
+            ahead = int(self.git("rev-list", "--count", f"{base}..{head}"))
+            behind = int(self.git("rev-list", "--count", f"{head}..{base}"))
+            status = "identical" if base == head else "ahead" if not behind else "behind" if not ahead else "diverged"
+            return httpx.Response(200, json={"status": status, "ahead_by": ahead, "behind_by": behind})
         match = re.fullmatch(r"/pulls/(\d+)", rel)
         if match:
             number = int(match.group(1))
@@ -562,6 +630,7 @@ class FakeGitHub:
         run_number: int = 1,
         run_attempt: int = 1,
         app_id: int = 15368,
+        head_branch: str | None = None,
     ) -> int:
         run_id = 1000 + len(self.runs)
         self.runs.append(
@@ -570,6 +639,7 @@ class FakeGitHub:
                 "path": f".github/workflows/{workflow}",
                 "event": event,
                 "head_sha": sha,
+                "head_branch": head_branch,
                 "run_number": run_number,
                 "run_attempt": run_attempt,
                 "status": "completed" if all(jobs.values()) else "in_progress",
@@ -597,6 +667,10 @@ class FakeGitHub:
             "office-paths.yml", "pull_request_target", sha, [number],
             {"office-paths": overrides.get("office_paths", conclusion)},
         )
+
+    def add_push_runs(self, sha: str, conclusion: str | None = "success", **overrides: str | None) -> int:
+        jobs = {name: overrides.get(name.replace("-", "_"), conclusion) for name in CI_JOBS}
+        return self.add_run("ci.yml", "push", sha, [], jobs, head_branch="main")
 
 
 @pytest.fixture(scope="session")

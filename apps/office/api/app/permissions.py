@@ -54,7 +54,11 @@ def not_allowed(message: str) -> OfficeError:
     return OfficeError(409, ErrorCode.decision_not_allowed, message)
 
 
+MERGED = "PR задачи уже слит в main или слияние выполняется: отмена недоступна."
+
+
 def check_task_decision(task: Task, decision: TaskDecision) -> None:
+    integration = task.status == TaskStatus.needs_attention and task.integration_started
     if task.status not in TASK_DECISION_STATUSES[decision]:
         if decision == TaskDecision.retry:
             raise not_allowed(
@@ -63,9 +67,11 @@ def check_task_decision(task: Task, decision: TaskDecision) -> None:
         raise not_allowed("Решение недопустимо в текущем статусе задачи.")
     if decision == TaskDecision.approve_spec and task.spec is None:
         raise not_allowed("Требования ещё не подготовлены.")
+    if decision == TaskDecision.cancel and (task.merge_sha or task.merge_pending):
+        raise not_allowed(MERGED)
     if decision == TaskDecision.retry and task.status == TaskStatus.failed and task.failure_kind in FINAL_FAILURES:
         raise not_allowed(FINAL_FAILURES[task.failure_kind])
-    if decision == TaskDecision.retry and task.usage.model_calls >= task.usage.model_calls_limit:
+    if decision == TaskDecision.retry and not integration and task.usage.model_calls >= task.usage.model_calls_limit:
         raise not_allowed("Бюджет обращений к моделям исчерпан. Повтор недоступен.")
 
 

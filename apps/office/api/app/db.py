@@ -18,6 +18,10 @@ ADDED_COLUMNS = (
     ("tasks", "head_sha", "TEXT"),
     ("tasks", "failure_kind", "TEXT"),
     ("tasks", "checks", "TEXT"),
+    ("tasks", "merge_sha", "TEXT"),
+    ("tasks", "pr_review_calls", "INTEGER NOT NULL DEFAULT 0"),
+    ("release_candidates", "pr_review_id", "TEXT"),
+    ("release_candidates", "e2e", "TEXT"),
 )
 
 logger = logging.getLogger("office.db")

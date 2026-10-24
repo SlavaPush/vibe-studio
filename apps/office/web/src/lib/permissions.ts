@@ -6,7 +6,7 @@ import type {
   TaskDecision,
   TaskStatus,
 } from '@/api/types'
-import { FAILURE_KIND_LABELS, STATUS_LABELS } from '@/lib/labels'
+import { STATUS_LABELS, failureLabel } from '@/lib/labels'
 
 export type Permission = { allowed: true } | { allowed: false; reason: string }
 
@@ -46,13 +46,24 @@ export function canAct(
     if (action === 'approve_spec' && target.spec === null) {
       return { allowed: false, reason: 'Требования ещё не подготовлены.' }
     }
+    if (action === 'cancel' && target.merge_sha !== null) {
+      return { allowed: false, reason: 'PR задачи уже слит в main: отмена недоступна.' }
+    }
+    if (action === 'cancel' && target.merge_pending) {
+      return { allowed: false, reason: 'Выполняется слияние PR задачи: отмена недоступна.' }
+    }
     if (action === 'retry' && target.status === 'failed' && target.failure_kind !== null) {
       return {
         allowed: false,
-        reason: `${FAILURE_KIND_LABELS[target.failure_kind]} Повтор недоступен: поставьте новую задачу.`,
+        reason: `${failureLabel(target)} Повтор недоступен: поставьте новую задачу.`,
       }
     }
-    if (action === 'retry' && target.usage.model_calls >= target.usage.model_calls_limit) {
+    const integration = target.status === 'needs_attention' && target.integration_started
+    if (
+      action === 'retry' &&
+      !integration &&
+      target.usage.model_calls >= target.usage.model_calls_limit
+    ) {
       return { allowed: false, reason: 'Бюджет обращений к моделям исчерпан. Повтор недоступен.' }
     }
     return ALLOWED

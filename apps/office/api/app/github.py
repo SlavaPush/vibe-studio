@@ -117,6 +117,16 @@ class GitHubClient:
     def close_pr(self, number: int) -> dict[str, Any]:
         return self._call("PATCH", f"/pulls/{number}", body={"state": "closed"})
 
+    def merge_pr(self, number: int, sha: str, title: str) -> dict[str, Any]:
+        body = {"sha": sha, "merge_method": "squash", "commit_title": title}
+        return self._call("PUT", f"/pulls/{number}/merge", body=body)
+
+    def commit(self, ref: str) -> dict[str, Any]:
+        return self._call("GET", f"/commits/{ref}")
+
+    def compare(self, base: str, head: str) -> dict[str, Any]:
+        return self._call("GET", f"/compare/{base}...{head}")
+
     def branch_sha(self, branch: str) -> str | None:
         try:
             data = self._call("GET", f"/git/ref/heads/{branch}")

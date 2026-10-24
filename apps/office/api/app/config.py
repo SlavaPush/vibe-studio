@@ -61,6 +61,8 @@ class Settings:
     release_poll_seconds: float = 20.0
     checks_timeout_minutes: float = 30.0
     reconcile_timeout_minutes: float = 30.0
+    pr_review_calls: int = 2
+    service_url: str = "https://elbrus-vibe-chat.onrender.com"
     render_api_key: str | None = None
     render_service_id: str = ""
 
@@ -109,6 +111,8 @@ class Settings:
             reconcile_timeout_minutes=float(
                 env.get("OFFICE_RECONCILE_TIMEOUT_MINUTES") or cls.reconcile_timeout_minutes
             ),
+            pr_review_calls=int(env.get("OFFICE_PR_REVIEW_CALLS") or cls.pr_review_calls),
+            service_url=env.get("OFFICE_SERVICE_URL") or cls.service_url,
             render_api_key=env.get("RENDER_API_KEY") or None,
             render_service_id=env.get("RENDER_SERVICE_ID", ""),
         )
