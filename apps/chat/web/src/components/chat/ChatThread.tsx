@@ -38,6 +38,8 @@ const SYSTEM_TITLES: Record<SystemMessageKind, string> = {
 
 const THINKING_DOT_DELAYS = ['[animation-delay:0ms]', '[animation-delay:200ms]', '[animation-delay:400ms]']
 
+const COMPOSER_HINT_ID = 'composer-hint'
+
 export type LoadAssetUrl = (id: string) => Promise<AssetUrl>
 
 interface ChatThreadProps {
@@ -87,6 +89,7 @@ export function ChatThread({ store, actions, loadAssetUrl, queue }: ChatThreadPr
   const models = useChatState(store, (state) => state.models)
   const sendBlocked = useChatState(store, isSendBlocked)
   const running = useChatState(store, (state) => activeRunId(state) !== null)
+  const hasConversation = useChatState(store, (state) => state.activeConversationId !== null)
   const enqueueComposer = () => {
     const composer = runtimeRef.current?.thread.composer
     const text = composer?.getState().text.trim()
@@ -124,9 +127,12 @@ export function ChatThread({ store, actions, loadAssetUrl, queue }: ChatThreadPr
           </ThreadPrimitive.Messages>
         </ThreadPrimitive.Viewport>
         {queue}
-        <ComposerPrimitive.Root className="flex items-end gap-2 border-t p-4">
+        <ComposerPrimitive.Root
+          className={cn('flex items-end gap-2 border-t p-4', hasConversation && 'pb-1')}
+        >
           <ComposerPrimitive.Input
             aria-label="Сообщение"
+            aria-describedby={hasConversation ? COMPOSER_HINT_ID : undefined}
             placeholder="Напишите сообщение"
             rows={1}
             onKeyDown={(event) => {
@@ -148,6 +154,11 @@ export function ChatThread({ store, actions, loadAssetUrl, queue }: ChatThreadPr
             </ComposerPrimitive.Cancel>
           </AuiIf>
         </ComposerPrimitive.Root>
+        {hasConversation && (
+          <p id={COMPOSER_HINT_ID} className="pointer-events-none px-4 pb-3 text-xs text-muted-foreground">
+            Enter — отправить, Shift+Enter — новая строка
+          </p>
+        )}
       </ThreadPrimitive.Root>
     </AssistantRuntimeProvider>
   )
