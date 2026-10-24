@@ -57,6 +57,10 @@ function touchesReleases(event: TaskEvent): boolean {
   )
 }
 
+function narrow(): boolean {
+  return typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 1023.98px)').matches
+}
+
 function App() {
   const [participant, setParticipant] = useState<Participant | null>(null)
   const [checking, setChecking] = useState(true)
@@ -65,6 +69,7 @@ function App() {
   const [dark, setDark] = useState(false)
   const [leaving, setLeaving] = useState(false)
   const [logoutError, setLogoutError] = useState<string | null>(null)
+  const [headingFocus, setHeadingFocus] = useState(0)
   const generation = useRef(0)
   const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>())
   const slotsSeq = useRef(0)
@@ -73,6 +78,10 @@ function App() {
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark)
   }, [dark])
+
+  useEffect(() => {
+    if (headingFocus > 0) document.getElementById('task-heading')?.focus()
+  }, [headingFocus])
 
   useEffect(() => {
     let active = true
@@ -286,14 +295,17 @@ function App() {
           )}
         </div>
       </header>
-      <main className="mx-auto grid max-w-7xl gap-6 px-4 py-6">
+      <main className="mx-auto grid max-w-7xl grid-cols-1 gap-6 px-4 py-6">
         <TaskForm run={run} onCreated={created} />
-        <div className="grid gap-6 lg:grid-cols-[minmax(0,22rem)_minmax(0,1fr)]">
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,22rem)_minmax(0,1fr)]">
           <TaskStack
             tasks={state.tasks}
             slots={state.slots}
             selectedId={state.selectedId}
-            onSelect={(id) => dispatch({ type: 'select', id })}
+            onSelect={(id) => {
+              dispatch({ type: 'select', id })
+              if (narrow()) setHeadingFocus((count) => count + 1)
+            }}
           />
           {task && (
             <TaskCard

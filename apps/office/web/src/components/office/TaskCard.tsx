@@ -131,7 +131,7 @@ export function TaskCard({ task, participant, run, onRefresh }: TaskCardProps) {
     <Card>
       <CardHeader>
         <CardTitle>
-          <h2 id="task-heading" className="text-lg">
+          <h2 id="task-heading" tabIndex={-1} className="text-lg">
             {task.title}
           </h2>
         </CardTitle>
@@ -144,7 +144,7 @@ export function TaskCard({ task, participant, run, onRefresh }: TaskCardProps) {
           <span>Версия: {task.version}</span>
         </CardDescription>
       </CardHeader>
-      <CardContent className="grid gap-4">
+      <CardContent className="grid grid-cols-1 gap-4">
         {task.status === 'failed' && task.failure_kind && (
           <p className="text-sm text-destructive">Причина ошибки: {failureLabel(task)}</p>
         )}
@@ -258,7 +258,7 @@ export function TaskCard({ task, participant, run, onRefresh }: TaskCardProps) {
           </TabsContent>
 
           <TabsContent value="usage" className={panelClass}>
-            <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
+            <dl className="grid grid-cols-1 gap-x-3 gap-y-1 text-sm sm:grid-cols-[auto_minmax(0,1fr)]">
               <dt className="text-muted-foreground">Обращения к моделям</dt>
               <dd>
                 {task.usage.model_calls} из {task.usage.model_calls_limit}
@@ -306,7 +306,7 @@ function PullRequestPanel({ task }: { task: Task }) {
           href={task.pr_url}
           target="_blank"
           rel="noopener noreferrer"
-          className="w-fit underline underline-offset-4"
+          className="tap-target w-fit underline underline-offset-4"
         >
           PR #{task.pr_number}
         </a>
@@ -322,7 +322,7 @@ function PullRequestPanel({ task }: { task: Task }) {
               target="_blank"
               rel="noopener noreferrer"
               aria-label={`Итоговый commit ${task.merge_sha.slice(0, 7)}`}
-              className="font-mono underline underline-offset-4"
+              className="tap-target font-mono underline underline-offset-4"
             >
               {task.merge_sha.slice(0, 7)}
             </a>
@@ -347,7 +347,7 @@ function PullRequestPanel({ task }: { task: Task }) {
                     target="_blank"
                     rel="noopener noreferrer"
                     aria-label={`Журнал проверки ${check.name}`}
-                    className="underline underline-offset-4"
+                    className="tap-target underline underline-offset-4"
                   >
                     Журнал
                   </a>
@@ -441,7 +441,7 @@ function ReportView({ report }: { report: Loadable<CheckReport> }) {
   }
   return (
     <>
-      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
+      <dl className="grid grid-cols-1 gap-x-3 gap-y-1 text-sm sm:grid-cols-[auto_minmax(0,1fr)]">
         <dt className="text-muted-foreground">Commit</dt>
         <dd className="font-mono break-all">{value.commit_sha ?? MISSING}</dd>
         <dt className="text-muted-foreground">Хеш требований</dt>
@@ -477,7 +477,7 @@ function ReportView({ report }: { report: Loadable<CheckReport> }) {
                         href={url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="underline underline-offset-4"
+                        className="tap-target underline underline-offset-4"
                       >
                         {url.split('/').pop()}
                       </a>
@@ -535,7 +535,7 @@ function SpecPanel({ task }: { task: Task }) {
                   href={source.url}
                   target="_blank"
                   rel="noreferrer"
-                  className="underline underline-offset-4"
+                  className="tap-target underline underline-offset-4"
                 >
                   {source.title}
                 </a>

@@ -1,6 +1,7 @@
 @import "tailwindcss";
 
 @custom-variant dark (&:is(.dark *));
+@custom-variant desk (@media (width >= 48rem) and (pointer: fine));
 
 @theme {
   --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -87,11 +88,20 @@
 
   body {
     @apply bg-background font-sans text-foreground antialiased;
+    overflow-wrap: anywhere;
   }
 
   :focus-visible {
     outline: 2px solid var(--ring);
     outline-offset: 2px;
+  }
+}
+
+@utility tap-target {
+  @media not all and (width >= 48rem) and (pointer: fine) {
+    display: inline-flex;
+    align-items: center;
+    min-height: 2.75rem;
   }
 }
 
