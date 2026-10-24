@@ -65,6 +65,14 @@ describe('App', () => {
     expect(within(aside).getByText('Версия: v-test')).toBeInTheDocument()
   })
 
+  it('в шапке после входа есть кнопка «О приложении», открывающая раздел', async () => {
+    const store = createChatStore(testState())
+    render(<App store={store} controller={fakeController()} />)
+    const header = screen.getByRole('heading', { level: 1 }).closest('header')!
+    fireEvent.click(within(header).getByRole('button', { name: 'О приложении' }))
+    expect(await screen.findByRole('dialog', { name: 'О приложении' })).toBeInTheDocument()
+  })
+
   it('ссылка быстрого перехода переводит фокус на поле «Сообщение»', () => {
     const store = createChatStore(testState())
     render(<App store={store} controller={fakeController()} />)
