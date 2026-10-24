@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import psycopg
+import pytest
 from conftest import (
     DEMO_CODE,
     HANG,
@@ -22,9 +23,11 @@ from conftest import (
     sql,
 )
 
+from app.auth import access_code_hash
 from app.config import Limits
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "access_codes.py"
+VECTORS = Path(__file__).resolve().parent / "data" / "access_code_vectors.json"
 CODE_A = "aaaa-bbbb-cccc"
 CODE_B = "dddd-eeee-ffff"
 
@@ -72,6 +75,39 @@ def test_code_is_single_use_and_first_session_keeps_working(db):
         ("b", False),
     ]
     assert sql(db, "SELECT count(*) FROM users") == [(1,)]
+
+
+def test_access_code_hash_matches_shared_vectors():
+    vectors = json.loads(VECTORS.read_text(encoding="utf-8"))
+    assert len(vectors) >= 8
+    for vector in vectors:
+        assert access_code_hash(vector["code"]) == vector["hash"], vector["code"]
+
+
+def test_chat_login_ignores_office_columns(db):
+    add_code(db, "a", CODE_A)
+    add_code(db, "b", CODE_B)
+    sql(db, "UPDATE access_codes SET office_role = 'admin', office_used_at = '2026-10-24 09:00+00' WHERE label = 'a'")
+    before = sql(db, "SELECT office_used_at FROM access_codes WHERE label = 'a'")
+    with client_for(make_app(db)) as client:
+        assert login(client, CODE_A).get("/api/me").status_code == 200
+        assert client.post("/api/demo-session", json={"code": CODE_A}).status_code == 401
+        assert login(client, CODE_B).get("/api/me").status_code == 200
+    assert sql(db, "SELECT office_used_at FROM access_codes WHERE label = 'a'") == before
+    assert sql(db, "SELECT label, office_role, office_used_at FROM access_codes WHERE label = 'b'") == [("b", None, None)]
+
+
+def test_schema_office_columns_are_idempotent_and_check_role(db):
+    add_code(db, "a", CODE_A)
+    sql(db, "UPDATE access_codes SET office_role = 'participant', office_used_at = now() WHERE label = 'a'")
+    before = sql(db, "SELECT label, office_role, office_used_at, used_at FROM access_codes WHERE label = 'a'")
+    with psycopg.connect(db, autocommit=True) as conn:
+        for _ in range(2):
+            conn.execute(SCHEMA.read_text(encoding="utf-8"))
+    assert sql(db, "SELECT label, office_role, office_used_at, used_at FROM access_codes WHERE label = 'a'") == before
+    with pytest.raises(psycopg.errors.CheckViolation):
+        sql(db, "UPDATE access_codes SET office_role = 'owner' WHERE label = 'a'")
+    assert sql(db, "SELECT office_role FROM access_codes WHERE label = 'a'") == [("participant",)]
 
 
 def test_parallel_logins_with_one_code_create_one_session(db):
@@ -336,3 +372,29 @@ def test_management_script_adds_lists_and_revokes_codes(db):
         assert manage(db, "revoke", "alice")[0] == 0
         assert manage(db, "revoke", "nobody")[0] == 1
         assert other.get("/api/me").status_code == 200
+
+
+def test_management_script_sets_office_role(db):
+    code, lines, _ = manage(db, "add", "admin", "--office-role", "admin")
+    assert code == 0 and lines[0]["office_role"] == "admin"
+    code, lines, _ = manage(db, "add", "bob")
+    assert code == 0 and lines[0]["office_role"] is None
+    assert manage(db, "add", "carol", "--office-role", "owner")[0] == 2
+    assert sql(db, "SELECT label, office_role FROM access_codes WHERE label IN ('admin', 'bob', 'carol') ORDER BY label") == [
+        ("admin", "admin"),
+        ("bob", None),
+    ]
+
+    code, lines, _ = manage(db, "office-role", "bob", "participant")
+    assert code == 0 and lines[0] == {"ok": True, "label": "bob", "office_role": "participant"}
+    sql(db, "UPDATE access_codes SET office_used_at = now() WHERE label = 'bob'")
+    listed = {line["label"]: line for line in manage(db, "list")[1]}
+    assert listed["bob"]["office_role"] == "participant"
+    assert listed["bob"]["office_used_at"] is not None
+    assert listed["admin"]["office_role"] == "admin"
+    assert listed["admin"]["office_used_at"] is None
+
+    assert manage(db, "office-role", "bob", "none")[0] == 0
+    assert sql(db, "SELECT office_role FROM access_codes WHERE label = 'bob'") == [(None,)]
+    assert manage(db, "office-role", "nobody", "admin")[0] == 1
+    assert manage(db, "office-role", "bob", "owner")[0] == 2

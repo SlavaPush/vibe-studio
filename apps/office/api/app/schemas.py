@@ -116,12 +116,11 @@ class ContractModel(BaseModel):
 
 class OfficeSessionRequest(ContractModel):
     access_code: str = Field(min_length=1)
-    display_name: str = Field(min_length=1, max_length=40)
 
 
 class Participant(ContractModel):
     id: str
-    display_name: str = Field(min_length=1, max_length=40)
+    display_name: str = Field(min_length=1)
     role: Role
     expires_at: datetime
 

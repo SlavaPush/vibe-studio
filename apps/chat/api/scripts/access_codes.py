@@ -1,9 +1,12 @@
-"""Управление индивидуальными кодами доступа участников: создать, показать список, отозвать.
+"""Управление индивидуальными кодами доступа участников: создать, показать список, задать роль в офисе, отозвать.
 
 Запуск из каталога api:
-  uv run python scripts/access_codes.py add <метка>
+  uv run python scripts/access_codes.py add <метка> [--office-role participant|admin]
   uv run python scripts/access_codes.py list
+  uv run python scripts/access_codes.py office-role <метка> participant|admin|none
   uv run python scripts/access_codes.py revoke <метка>
+Один код даёт один вход в чат (used_at) и один вход в офис (office_used_at). Без роли офиса (office_role) вход в офис
+запрещён; office-role задаёт или снимает роль у существующего кода. Отзыв закрывает оба интерфейса.
 Строка подключения читается из переменной DATABASE_URL (окружение, затем ../.env). Параметр --database-url-env ИМЯ
 задаёт другую переменную, например DATABASE_URL_SUPABASE. Значение строки подключения не печатается.
 Перед работой применяется schema.sql, как при старте сервера. Код печатается один раз, при создании; в БД хранится его хеш.
@@ -32,7 +35,7 @@ ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
 CODE_LENGTH = 12
 
 LIST_SQL = """
-SELECT c.label, c.created_at, c.used_at, c.revoked_at,
+SELECT c.label, c.created_at, c.used_at, c.revoked_at, c.office_role, c.office_used_at,
     (SELECT count(*) FROM users u WHERE u.access_code_id = c.id) AS users,
     (SELECT count(*) FROM sessions s JOIN users u ON u.id = s.user_id
         WHERE u.access_code_id = c.id AND s.expires_at > now() AND c.revoked_at IS NULL) AS active_sessions,
@@ -57,17 +60,29 @@ def new_code() -> str:
     return "-".join(raw[index:index + 4] for index in range(0, CODE_LENGTH, 4))
 
 
-async def add(conn, label: str) -> int:
+async def add(conn, label: str, office_role: str | None) -> int:
     code = new_code()
     try:
         await conn.execute(
-            "INSERT INTO access_codes (id, label, code_hash) VALUES (%s, %s, %s)",
-            (str(uuid.uuid4()), label, access_code_hash(code)),
+            "INSERT INTO access_codes (id, label, code_hash, office_role) VALUES (%s, %s, %s, %s)",
+            (str(uuid.uuid4()), label, access_code_hash(code), office_role),
         )
     except psycopg.errors.UniqueViolation:
         report(ok=False, error="метка уже существует", label=label)
         return 1
-    report(ok=True, label=label, code=code, note="код показывается только сейчас")
+    report(ok=True, label=label, code=code, office_role=office_role, note="код показывается только сейчас")
+    return 0
+
+
+async def set_office_role(conn, label: str, role: str) -> int:
+    office_role = None if role == "none" else role
+    row = await fetch_one(
+        conn, "UPDATE access_codes SET office_role = %s WHERE label = %s RETURNING label", (office_role, label)
+    )
+    if row is None:
+        report(ok=False, error="метка не найдена", label=label)
+        return 1
+    report(ok=True, label=label, office_role=office_role)
     return 0
 
 
@@ -103,9 +118,11 @@ async def run(args, database_url: str) -> int:
         await apply_schema(pool)
         async with pool.connection() as conn:
             if args.command == "add":
-                return await add(conn, args.label)
+                return await add(conn, args.label, args.office_role)
             if args.command == "list":
                 return await list_codes(conn)
+            if args.command == "office-role":
+                return await set_office_role(conn, args.label, args.role)
             return await revoke(conn, args.label)
     finally:
         await pool.close()
@@ -115,11 +132,16 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--database-url-env", default="DATABASE_URL")
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("add").add_argument("label")
+    add_command = commands.add_parser("add")
+    add_command.add_argument("label")
+    add_command.add_argument("--office-role", choices=("participant", "admin"))
     commands.add_parser("list")
+    role_command = commands.add_parser("office-role")
+    role_command.add_argument("label")
+    role_command.add_argument("role", choices=("participant", "admin", "none"))
     commands.add_parser("revoke").add_argument("label")
     args = parser.parse_args()
-    if args.command in ("add", "revoke") and not args.label.strip():
+    if args.command in ("add", "office-role", "revoke") and not args.label.strip():
         report(ok=False, error="метка не может быть пустой")
         return 1
     name = args.database_url_env

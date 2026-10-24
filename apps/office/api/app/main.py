@@ -9,11 +9,12 @@ from fastapi.responses import FileResponse, StreamingResponse
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from app.access_codes import AccessCodes
 from app.artifacts import artifact_response
 from app.config import Settings
 from app.db import Database
 from app.decisions import decide_release, decide_task
-from app.errors import ErrorCode, error_response, install_error_handlers, not_found
+from app.errors import ErrorCode, OfficeError, error_response, install_error_handlers, not_found
 from app.events import EventNotifier, parse_last_event_id, stream_events
 from app.github import github_client
 from app.intake import UNAVAILABLE, IntakeFilter
@@ -81,7 +82,7 @@ def create_app(
     db.init_schema()
     notifier = EventNotifier()
     store = TaskStore(db, notifier.notify)
-    sessions = SessionStore(db, settings)
+    sessions = SessionStore(db, settings, AccessCodes(settings))
     models = gateway or ModelsGateway(settings)
     intake = IntakeFilter(models, settings)
     store.clear_reservations()
@@ -125,6 +126,7 @@ def create_app(
             office_runner.shutdown()
         if office_workspace is not None:
             office_workspace.shutdown()
+        sessions.codes.close()
         db.close()
 
     app = FastAPI(title="back-office API", lifespan=lifespan)
@@ -149,7 +151,14 @@ def create_app(
 
     def session_check(request: Request) -> Callable[[], bool]:
         token = request.cookies.get(COOKIE_NAME)
-        return lambda: sessions.participant(token) is not None
+
+        def active() -> bool:
+            try:
+                return sessions.participant(token) is not None
+            except OfficeError:
+                return False
+
+        return active
 
     @app.get("/api/health")
     def health() -> dict[str, str]:

@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { NETWORK_MESSAGE } from '@/api/client'
 import type { Participant, Task } from '@/api/types'
 import App from '@/App'
-import { COOKIE_MISSING } from '@/components/office/AccessGate'
+import { CHECK_AGAIN, COOKIE_MISSING } from '@/components/office/AccessGate'
 import { participants, releases, tasks } from '@/mocks/data'
 import {
   FakeEventSource,
@@ -38,11 +38,23 @@ async function ready() {
   await within(await screen.findByRole('region', { name: 'Задачи' })).findByText(developing.title)
 }
 
-async function login(code = 'OFFICE-2026', name = 'Мария') {
-  fireEvent.change(await screen.findByLabelText('Код доступа'), { target: { value: code } })
-  fireEvent.change(screen.getByLabelText('Отображаемое имя'), { target: { value: name } })
+async function login(code = 'OFFICE-2026') {
+  fireEvent.change(await screen.findByLabelText('Личный код участника'), { target: { value: code } })
   fireEvent.click(screen.getByRole('button', { name: 'Войти' }))
 }
+
+async function confirmLogout() {
+  fireEvent.click(screen.getByRole('button', { name: 'Выйти' }))
+  fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Выйти' }))
+}
+
+const CODES_UNAVAILABLE = 'Проверка кодов доступа временно недоступна. Повторите позже.'
+const codesUnavailable = () => json(503, {
+  code: 'codes_unavailable',
+  message: CODES_UNAVAILABLE,
+  retryable: true,
+  operation_id: 'op_test',
+})
 
 function openStream() {
   const source = FakeEventSource.last(STREAM)
@@ -72,9 +84,8 @@ describe('вход', () => {
     await ready()
     const paths = api.calls.map((call) => `${call.method} ${call.path}`)
     expect(paths.slice(0, 3)).toEqual(['GET /api/me', 'POST /api/office-session', 'GET /api/me'])
-    expect(api.bodies('POST /api/office-session')).toEqual([
-      { access_code: 'OFFICE-2026', display_name: 'Мария' },
-    ])
+    expect(api.bodies('POST /api/office-session')).toEqual([{ access_code: 'OFFICE-2026' }])
+    expect(screen.queryByLabelText('Отображаемое имя')).not.toBeInTheDocument()
     expect(screen.getByText('Мария (участник)')).toBeInTheDocument()
     expect(await within(stack()).findByText('Занято слотов: 2 из 3')).toBeInTheDocument()
     expect(screen.getByText(releases[0].id)).toBeInTheDocument()
@@ -98,17 +109,115 @@ describe('вход', () => {
     await login()
     expect(await screen.findByRole('alert')).toHaveTextContent(COOKIE_MISSING)
     expect(api.count('GET /api/tasks')).toBe(0)
+    expect(screen.getByRole('button', { name: 'Войти' })).toBeEnabled()
+  })
+
+  it('503 от GET /api/me при загрузке показывает повтор проверки сеанса вместо формы входа', async () => {
+    const api = backend()
+    let failing = true
+    api.on('GET /api/me', () => (failing ? codesUnavailable() : json(200, maria)))
+    render(<App />)
+    expect(await screen.findByRole('alert')).toHaveTextContent(CODES_UNAVAILABLE)
+    expect(screen.queryByRole('heading', { name: 'Вход в панель офиса' })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Личный код участника')).not.toBeInTheDocument()
+    failing = false
+    fireEvent.click(screen.getByRole('button', { name: CHECK_AGAIN }))
+    await ready()
+    expect(screen.getByText('Мария (участник)')).toBeInTheDocument()
+    expect(api.count('GET /api/me')).toBe(2)
+    expect(api.count('POST /api/office-session')).toBe(0)
+  })
+
+  it('сетевая ошибка GET /api/me при загрузке не показывает форму входа', async () => {
+    const api = backend()
+    api.on('GET /api/me', () => Promise.reject(new TypeError('Failed to fetch')))
+    render(<App />)
+    expect(await screen.findByRole('alert')).toHaveTextContent(NETWORK_MESSAGE)
+    expect(screen.queryByLabelText('Личный код участника')).not.toBeInTheDocument()
+    api.on('GET /api/me', unauthorized)
+    fireEvent.click(screen.getByRole('button', { name: CHECK_AGAIN }))
+    expect(await screen.findByRole('heading', { name: 'Вход в панель офиса' })).toBeInTheDocument()
+  })
+
+  it('503 от GET /api/me после входа: код повторно не отправляется, повтор проверяет только сеанс', async () => {
+    const api = backend(null)
+    let state: 'none' | 'failing' | 'ok' = 'none'
+    api.on('GET /api/me', () => {
+      if (state === 'failing') return codesUnavailable()
+      return state === 'ok' ? json(200, maria) : unauthorized()
+    })
+    api.on('POST /api/office-session', () => {
+      state = 'failing'
+      return json(200, maria)
+    })
+    render(<App />)
+    await login()
+    expect(await screen.findByRole('alert')).toHaveTextContent(CODES_UNAVAILABLE)
+    expect(screen.getByLabelText('Личный код участника')).toBeDisabled()
+    expect(screen.queryByRole('button', { name: 'Войти' })).not.toBeInTheDocument()
+    state = 'ok'
+    fireEvent.click(screen.getByRole('button', { name: CHECK_AGAIN }))
+    await ready()
+    expect(api.count('POST /api/office-session')).toBe(1)
+    expect(api.count('GET /api/me')).toBe(3)
+  })
+
+  it('ошибка чтения ответа входа: сеанс проверяется через GET /api/me без повторной отправки кода', async () => {
+    const api = backend(null)
+    let session = false
+    api.on('GET /api/me', () => (session ? json(200, maria) : unauthorized()))
+    api.on('POST /api/office-session', () => {
+      session = true
+      return new Response('not json', { status: 200 })
+    })
+    render(<App />)
+    await login()
+    await ready()
+    expect(api.count('POST /api/office-session')).toBe(1)
+    expect(api.count('GET /api/me')).toBe(2)
+  })
+
+  it('сетевая ошибка входа без сеанса оставляет форму входа', async () => {
+    const api = backend(null)
+    api.on('POST /api/office-session', () => Promise.reject(new TypeError('Failed to fetch')))
+    render(<App />)
+    await login()
+    expect(await screen.findByRole('alert')).toHaveTextContent(NETWORK_MESSAGE)
+    expect(api.count('GET /api/me')).toBe(2)
+    expect(screen.getByRole('button', { name: 'Войти' })).toBeEnabled()
+  })
+
+  it('сетевая ошибка входа и 503 проверки сеанса предлагают только повтор проверки', async () => {
+    const api = backend(null)
+    let state: 'none' | 'failing' | 'ok' = 'none'
+    api.on('GET /api/me', () => {
+      if (state === 'failing') return codesUnavailable()
+      return state === 'ok' ? json(200, maria) : unauthorized()
+    })
+    api.on('POST /api/office-session', () => {
+      state = 'failing'
+      return Promise.reject(new TypeError('Failed to fetch'))
+    })
+    render(<App />)
+    await login()
+    expect(await screen.findByRole('alert')).toHaveTextContent(CODES_UNAVAILABLE)
+    expect(screen.queryByRole('button', { name: 'Войти' })).not.toBeInTheDocument()
+    state = 'ok'
+    fireEvent.click(screen.getByRole('button', { name: CHECK_AGAIN }))
+    await ready()
+    expect(api.count('POST /api/office-session')).toBe(1)
   })
 
   it.each([
     [apiError(401, 'invalid_access_code', 'Неверный код доступа офиса.'), 'Неверный код доступа офиса.'],
+    [codesUnavailable(), CODES_UNAVAILABLE],
     [
       apiError(429, 'rate_limited', 'Слишком много попыток входа. Повторите через минуту.', {
         'Retry-After': '42',
       }),
       'Слишком много попыток входа. Повторите через минуту. Повторить можно через 42 с.',
     ],
-    [apiError(422, 'validation_error', 'Укажите отображаемое имя.'), 'Укажите отображаемое имя.'],
+    [apiError(422, 'validation_error', 'Тело запроса не соответствует схеме.'), 'Тело запроса не соответствует схеме.'],
   ])('ошибка входа показывается понятным текстом (%#)', async (response, text) => {
     const api = backend(null)
     api.on('POST /api/office-session', () => response.clone())
@@ -176,6 +285,12 @@ describe('выход', () => {
     button.focus()
     expect(button).toHaveFocus()
     fireEvent.click(button)
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent('войти снова по этому коду невозможно')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Остаться' }))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument())
+    expect(api.count('DELETE /api/office-session')).toBe(0)
+    await confirmLogout()
     expect(await screen.findByRole('heading', { name: 'Вход в панель офиса' })).toBeInTheDocument()
     expect(api.count('DELETE /api/office-session')).toBe(1)
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
@@ -186,12 +301,10 @@ describe('выход', () => {
       return json(200, admin)
     })
     api.on('GET /api/tasks/tsk_101', developing)
-    await login('ADMIN-2026', admin.display_name)
+    await login('ADMIN-2026')
     await ready()
     expect(screen.getByText(`${admin.display_name} (администратор)`)).toBeInTheDocument()
-    expect(api.bodies('POST /api/office-session')).toEqual([
-      { access_code: 'ADMIN-2026', display_name: admin.display_name },
-    ])
+    expect(api.bodies('POST /api/office-session')).toEqual([{ access_code: 'ADMIN-2026' }])
     expect(screen.queryByRole('heading', { name: developing.title })).not.toBeInTheDocument()
     late.resolve(json(200, { ...developing, title: 'Ответ прежнего сеанса', version: 99 }))
     await act(async () => {
@@ -206,7 +319,7 @@ describe('выход', () => {
     render(<App />)
     await ready()
     const source = openStream()
-    fireEvent.click(screen.getByRole('button', { name: 'Выйти' }))
+    await confirmLogout()
     expect(await screen.findByRole('alert')).toHaveTextContent(NETWORK_MESSAGE)
     expect(screen.getByRole('button', { name: 'Выйти' })).toBeEnabled()
     expect(source.closed).toBe(false)
@@ -214,7 +327,7 @@ describe('выход', () => {
     expect(screen.getByText('Мария (участник)')).toBeInTheDocument()
 
     api.on('DELETE /api/office-session', noContent)
-    fireEvent.click(screen.getByRole('button', { name: 'Выйти' }))
+    await confirmLogout()
     expect(await screen.findByRole('heading', { name: 'Вход в панель офиса' })).toBeInTheDocument()
     expect(source.closed).toBe(true)
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()

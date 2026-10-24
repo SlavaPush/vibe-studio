@@ -72,7 +72,6 @@ export type ReleaseStatus = (typeof RELEASE_STATUSES)[number]
 
 export interface OfficeSessionRequest {
   access_code: string
-  display_name: string
 }
 
 export interface Participant {

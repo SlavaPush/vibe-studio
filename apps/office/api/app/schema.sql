@@ -7,7 +7,8 @@ CREATE TABLE IF NOT EXISTS participants (
     id TEXT PRIMARY KEY,
     display_name TEXT NOT NULL,
     role TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    access_code_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
