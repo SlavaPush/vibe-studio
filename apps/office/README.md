@@ -317,6 +317,20 @@ docker run -d --rm --name office-pg-test -e POSTGRES_USER=office -e POSTGRES_PAS
 (cd apps/office/api && OFFICE_TEST_POSTGRES_URL=postgresql://office:office@127.0.0.1:55432/office uv run pytest)
 ```
 
+Сквозной тест `api/tests/test_end_to_end.py` ведёт задачу через весь конвейер офиса реальными компонентами: API, фильтр приёма, подтверждение требований автором, `Runner` с графом ролей, рабочая область с git, исполнитель выпуска, очередь выпуска и БД. Внешние сервисы заменены подделками из `tests/conftest.py`: модели, GitHub (`MockTransport`, слияние PR создаёт squash-commit в локальном bare-репозитории), Render, сервис `vibe-chat` и песочница. Граф работает в фоновом потоке, исполнитель выпуска и очередь тест выполняет явными шагами. Сценарии:
+
+1. Задача интерфейса доходит до `released`; опубликована версия commit слияния.
+2. Агент ревью PR отклоняет PR: PR закрыт, задача `failed` (`pr_rejected`), автор видит обоснование и требуемые изменения.
+3. Обязательная проверка PR не проходит: PR закрыт, задача `failed` (`checks_failed`).
+4. Проверка после деплоя не проходит: откат Render, блокировка выпуска, revert-PR, его слияние и публикация, снятие блокировки; задача `failed` (`verify_failed`), доработка отключена (`rework_limit=0`).
+5. Серверная задача ждёт одобрения владельца на GitHub и после `APPROVED` для текущего head доходит до `released`.
+
+```bash
+(cd apps/office/api && uv run pytest tests/test_end_to_end.py -q --durations=10)
+```
+
+Тест не заменяет ручной прогон на реальных сервисах.
+
 Тесты рабочей области используют локальный bare-репозиторий с раскладкой монорепозитория и не обращаются к сети. Тесты с реальным Docker помечены `docker` и запускаются отдельно. Они требуют собранный образ `back-office-sandbox:p4` и клонируют монорепозиторий из `OFFICE_TEST_TARGET_REPO` (по умолчанию `https://github.com/SlavaPush/vibe-studio.git`). Источник должен содержать ветку `main`: клон офиса берёт `origin/main`. Подходит путь к локальной копии `vibe-studio`, тогда проверяется `apps/chat` её ветки `main`. В CI job `office-sandbox` создаёт `main` на проверяемом commit (`git update-ref refs/heads/main HEAD`) и передаёт путь checkout:
 
 ```bash
