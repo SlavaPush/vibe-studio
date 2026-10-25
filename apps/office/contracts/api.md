@@ -32,8 +32,10 @@
 | `TaskStatus` | `rejected`, `queued`, `awaiting_spec_approval`, `developing`, `reviewing`, `awaiting_integration`, `awaiting_release`, `deploying`, `released`, `failed`, `cancelled`, `needs_attention` |
 | `ModelProfile` | `local`, `cloud`, `hybrid` |
 | `AgentRole` | `supervisor`, `researcher`, `developer`, `qa`, `critic`, `pr_reviewer` |
-| `TaskEventType` | `task_created`, `task_rejected`, `status_changed`, `role_started`, `role_finished`, `tool_called`, `artifact_ready`, `decision_required`, `decision_recorded`, `check_result`, `release_candidate`, `deploy_status`, `pr_opened`, `checks_status`, `pr_closed`, `operation_unknown`, `pr_review`, `merge_started`, `pr_merged`, `rollback_status`, `release_blocked`, `release_unblocked`, `external_publish`, `rework_started` |
-| `FailureKind` | `checks_failed`, `pr_rejected`, `deploy_failed`, `verify_failed`, `rolled_back` |
+| `TaskEventType` | `task_created`, `task_rejected`, `status_changed`, `role_started`, `role_finished`, `tool_called`, `artifact_ready`, `decision_required`, `decision_recorded`, `check_result`, `release_candidate`, `deploy_status`, `pr_opened`, `checks_status`, `pr_closed`, `operation_unknown`, `pr_review`, `merge_started`, `pr_merged`, `rollback_status`, `release_blocked`, `release_unblocked`, `external_publish`, `rework_started`, `owner_review_requested`, `owner_review` |
+| `FailureKind` | `checks_failed`, `pr_rejected`, `deploy_failed`, `verify_failed`, `rolled_back`, `owner_rejected` |
+| `ChangeClass` | `frontend_ui`, `backend_api` |
+| `Contour` | `ui`, `server` |
 | `TaskDecision` | `approve_spec`, `cancel`, `retry` |
 | `ReleaseDecision` | `rollback`, `resume_releases` |
 | `ReleaseKind` | `release`, `rollback` |
@@ -88,7 +90,9 @@
   "release_blocked",
   "release_unblocked",
   "external_publish",
-  "rework_started"
+  "rework_started",
+  "owner_review_requested",
+  "owner_review"
 ]
 ```
 
@@ -101,7 +105,7 @@
 | `awaiting_spec_approval` | Задача заняла слот. Пока `spec = null`, Supervisor готовит требования; после этого требования ждут решения владельца `approve_spec` | да |
 | `developing` | Разработчик изменяет код в worktree задачи | да |
 | `reviewing` | QA и критик проверяют зафиксированную версию | да |
-| `awaiting_integration` | Ветка проверена. Офис отправляет её в `vibe-studio`, открывает PR от GitHub App и ждёт обязательных проверок PR; сводка проверок — в поле `checks`. После успешных проверок агент ревью PR принимает решение (поле `pr_review`); при `approve` офис сливает PR (squash) и проверяет итоговый commit `merge_sha`: обязательные проверки `push` и критический E2E | нет |
+| `awaiting_integration` | Ветка проверена. Офис отправляет её в `vibe-studio`, открывает PR от GitHub App и ждёт обязательных проверок PR; сводка проверок — в поле `checks`. После успешных проверок агент ревью PR принимает решение (поле `pr_review`); при `approve` офис сливает PR (squash) и проверяет итоговый commit `merge_sha`: обязательные проверки `push` и критический E2E. PR серверного контура (`contour = server`) офис сливает только после одобрения владельца на GitHub (`owner_review`); ожидание не ограничено временем | нет |
 | `awaiting_release` | PR слит, итоговый commit прошёл проверки и критический E2E; кандидат выпуска ждёт очереди выпуска. Подтверждения администратора нет | нет |
 | `deploying` | Выполняется деплой кандидата, проверка после деплоя или автоматический откат | нет |
 | `released` | Выпуск опубликован и прошёл проверку после деплоя; или изменение опубликовано в составе более нового выпуска | нет |
@@ -218,7 +222,7 @@
 | `pr_url` | string или `null` | Адрес PR в `vibe-studio` |
 | `pr_number` | integer или `null` | Номер PR в `vibe-studio` |
 | `head_sha` | string или `null` | Commit ветки `office/<task_id>`, отправленный в `vibe-studio` |
-| `failure_kind` | `FailureKind` или `null` | Причина `failed` на этапе выпуска: `checks_failed` — обязательные проверки PR или итогового commit (в том числе критический E2E) не пройдены, `pr_rejected` — PR отклонён агентом ревью, `deploy_failed` — деплой Render завершился ошибкой или Render отклонил запрос (отката нет), `verify_failed` — проверка после деплоя не пройдена, выполнен откат (в том числе для выпуска, в составе которого было изменение задачи), `rolled_back` — выпуск с изменением задачи откатан администратором; `null` для остальных причин |
+| `failure_kind` | `FailureKind` или `null` | Причина `failed` на этапе выпуска: `checks_failed` — обязательные проверки PR или итогового commit (в том числе критический E2E) не пройдены, `pr_rejected` — PR отклонён агентом ревью, `deploy_failed` — деплой Render завершился ошибкой или Render отклонил запрос (отката нет), `verify_failed` — проверка после деплоя не пройдена, выполнен откат (в том числе для выпуска, в составе которого было изменение задачи), `rolled_back` — выпуск с изменением задачи откатан администратором, `owner_rejected` — владелец отклонил PR серверного контура отзывом «Request changes» (PR закрыт, комментарий владельца — в `owner_review.comment` и в `role_finished`); `null` для остальных причин |
 | `checks` | `PullRequestChecks` или `null` | Последняя сводка обязательных проверок: до слияния — проверки PR для `head_sha`, после слияния — проверки события `push` итогового commit `merge_sha` (поле `checks.head_sha` указывает проверенный commit); `null`, пока PR не проверялся и сразу после слияния |
 | `pr_review` | `PullRequestReview` или `null` | Последнее решение агента ревью PR; `null`, пока агент не вызывался. Решение действительно только для своего `head_sha` |
 | `merge_sha` | string или `null` | Итоговый commit squash-слияния PR в `main`; `null`, пока PR не слит |
@@ -230,12 +234,17 @@
 | `rework_count` | integer | Номер доработки после отката: 0 — первый проход, 1 — первая доработка |
 | `rework_limit` | integer | Лимит доработок `OFFICE_REWORK_LIMIT`, по умолчанию 1 |
 | `rework_reason` | string или `null` | Причина отката или непрошедших проверок итогового commit (с комментарием администратора при ручном откате); при исчерпанном лимите — с пометкой «Лимит доработки исчерпан» |
+| `change_class` | `ChangeClass` | Класс задачи из фильтра приёма: `frontend_ui` — интерфейс, `backend_api` — сервер (API, контракт, схема БД, зависимости, выбор моделей, маршрутизация, уровни усилий, лимиты). Определяет права записи разработчика и QA. Для задач до появления поля — `frontend_ui` |
+| `contour` | `Contour` или `null` | Контур по путям diff `base_sha..head`: `server`, если изменён хотя бы один файл серверной зоны, иначе `ui`; `null` до первого commit. Пересчитывается при каждом commit и перед решением о слиянии |
+| `owner_review` | `OwnerReview` или `null` | Одобрение владельца для PR серверного контура; `null`, пока не запрошено |
+
+`OwnerReview`: `state` (`requested` — сводка записана в описание PR, офис ждёт отзыв владельца; `approved` — отзыв `APPROVED` владельца для `head_sha`; `changes_requested` — отзыв `CHANGES_REQUESTED`, PR закрыт), `head_sha` (string — head PR, к которому относится состояние), `login` (string или `null` — логин владельца `OFFICE_OWNER_LOGIN`), `comment` (string или `null` — текст отзыва владельца). Учитывается последний отзыв владельца с `commit_id = head_sha`; отзывы других пользователей, `COMMENTED`, `DISMISSED` и отзывы на другой head не учитываются.
 
 `Spec`: `version` (integer), `spec_hash` (string), `summary` (string), `acceptance_criteria` (string[]), `sources` (массив `{title, url}`).
 
 `Usage`: `model_calls` (integer), `model_calls_limit` (integer, 30), `input_tokens` (integer), `output_tokens` (integer).
 
-`PullRequestReview`: `id` (string), `head_sha` (string — head PR, для которого принято решение), `verdict` (`approve` или `reject`), `reasons` (string — обоснование), `required_changes` (string[] — что изменить; при `reject` не пуст), `checklist` (массив `{item, ok, note}`: `item` — пункт чек-листа `paths`, `network`, `external_navigation`, `inputs`, `system_messages`, `sent_text`, `third_party_code`; `ok` — boolean; `note` — string), `created_at` (дата-время).
+`PullRequestReview`: `id` (string), `head_sha` (string — head PR, для которого принято решение), `verdict` (`approve` или `reject`), `reasons` (string — обоснование), `required_changes` (string[] — что изменить; при `reject` не пуст), `checklist` (массив `{item, ok, note}`: `item` — пункт чек-листа `paths`, `network`, `external_navigation`, `inputs`, `system_messages`, `sent_text`, `third_party_code`, `models`; `ok` — boolean; `note` — string), `created_at` (дата-время), `owner_summary` (string или `null` — сводка для владельца: зависимости, схема БД, промпты и проверки входа, маршрутизация и выбор моделей, квоты и авторизация, внешние API, рекомендация агента и факты офиса — изменённые манифесты и lock-файлы, изменение `schema.sql` с предупреждением об откате; для контура `ui` — `null`).
 
 `PullRequestChecks`: `head_sha` (string — проверенный commit), `checks` (массив `PullRequestCheck`). `PullRequestCheck`: `name` (string — имя обязательной проверки из ruleset `main`), `status` (string: `missing` — засчитанного запуска нет, `queued`, `in_progress`, `completed` и другие статусы job GitHub Actions), `conclusion` (string или `null` — итог job для `completed`: `success`, `failure`, `cancelled`, `timed_out`, `action_required`, `skipped` и другие), `url` (string или `null` — страница job). Проверка пройдена только при `conclusion = success`.
 
@@ -255,7 +264,7 @@
 
 | `type` | `payload` |
 | --- | --- |
-| `task_created` | `title`, `profile` |
+| `task_created` | `title`, `profile`, `change_class` (в событиях до появления поля отсутствует) |
 | `task_rejected` | `reason` |
 | `status_changed` | `from`, `to` — статусы задачи |
 | `role_started` | `step` — шаг роли |
@@ -279,10 +288,12 @@
 | `release_unblocked` | `release_id`, `fixed_by` — опубликован кандидат `fixed_by`, содержащий revert-commit всех попыток набора отмены (или `fix_sha`), блокировка снята |
 | `external_publish` | `published_sha` — опубликована версия без кандидата офиса (деплой вне офиса); пишется в задачи ожидающих кандидатов |
 | `rework_started` | `reason`, `attempt` (номер доработки), `limit`, `source` (`verify_failed`, `rolled_back`, `checks_failed`), `release_id` (выпуск, слияние которого отменено), `materials` — источники материалов разработчику (`reason`, `deploy_events`, `render_logs`, `actions_log`, `source_diff`) |
+| `owner_review_requested` | `pr_number`, `head_sha`, `pr_url`, `login` — агент ревью PR одобрил PR серверного контура, офис записал сводку в описание PR (один раз для head) и ждёт отзыв владельца `login` на GitHub |
+| `owner_review` | `pr_number`, `head_sha`, `state` (`approved`, `changes_requested`), `login` — офис прочитал отзыв владельца для текущего head; при `approved` следует слияние, при `changes_requested` PR закрывается и задача получает `failed` с `failure_kind = owner_rejected` |
 
 При исчерпанном лимите доработки вместо `rework_started` пишется `role_finished` с `step = rework`, `outcome = error` и `summary`, начинающимся с «Лимит доработки исчерпан».
 
-События revert-PR (`tool_called` с `tool = git_revert` и `git_push`, `pr_opened`, `checks_status`, `pr_review`, `merge_started`, `pr_merged`, `pr_closed`, `role_finished`) пишутся в задачу откатанного выпуска с дополнительным полем `revert_of` — идентификатором откатанного кандидата. Статус задачи при этом не меняется.
+События revert-PR (`tool_called` с `tool = git_revert` и `git_push`, `pr_opened`, `checks_status`, `pr_review`, `owner_review_requested`, `owner_review`, `merge_started`, `pr_merged`, `pr_closed`, `role_finished`) пишутся в задачу откатанного выпуска с дополнительным полем `revert_of` — идентификатором откатанного кандидата. Статус задачи при этом не меняется.
 
 Панель перечитывает выпуски и состояние очереди после событий `release_candidate`, `deploy_status`, `rollback_status`, `release_blocked`, `release_unblocked`, `external_publish`, решений по выпуску (`decision_recorded` с `rollback` или `resume_releases`) и любого события с полем `release_id` или `revert_of`.
 
@@ -350,7 +361,9 @@
 
 `RollbackResult`: `target_sha` (string — прежняя версия), `target_deploy_id` (string — деплой Render, к которому выполняется откат), `render_deploy_id` (string или `null` — деплой отката), `render_status` (string или `null`), `started_at`, `finished_at` (дата-время или `null`), `verify` (`VerifyResult` или `null` — проверка после отката), `error` (string или `null`).
 
-`RevertResult`: `status` (`pending` — ждёт начала, `active` — revert-PR или проверки `fix_sha` выполняются, `needs_attention` — остановлено, `merged` — кандидат исправления создан), `source` (`auto` — revert-PR офиса, `resume` — `fix_sha` администратора), `base_sha` (string или `null` — `main`, от которого создана ветка `office/revert-<release_id>`), `head_sha` (string или `null`), `pr_number`, `pr_url` (revert-PR или `null`), `checks` (`PullRequestChecks` или `null`), `fix_sha` (string или `null` — итоговый commit revert-PR или `fix_sha`), `decision_id` (string или `null`), `candidate_id` (string или `null` — кандидат исправления), `reason` (string или `null` — причина остановки), `attempt` (integer ≥ 1 — номер попытки revert-PR; растёт при повторе решением `resume_releases` без `fix_sha`, сохраняется при `resume_releases` с `fix_sha`; в записях до появления поля — 1), `tree` (string или `null` — имя worktree и ветки `office/<tree>` попытки; `null` — `revert-<release_id>`), `targets` (массив `RevertTarget` — набор отмены; пуст в записях до появления поля, тогда набор — сам кандидат).
+`RevertResult`: `status` (`pending` — ждёт начала, `active` — revert-PR или проверки `fix_sha` выполняются, `needs_attention` — остановлено, `merged` — кандидат исправления создан), `source` (`auto` — revert-PR офиса, `resume` — `fix_sha` администратора), `base_sha` (string или `null` — `main`, от которого создана ветка `office/revert-<release_id>`), `head_sha` (string или `null`), `pr_number`, `pr_url` (revert-PR или `null`), `checks` (`PullRequestChecks` или `null`), `fix_sha` (string или `null` — итоговый commit revert-PR или `fix_sha`), `decision_id` (string или `null`), `candidate_id` (string или `null` — кандидат исправления), `reason` (string или `null` — причина остановки), `attempt` (integer ≥ 1 — номер попытки revert-PR; растёт при повторе решением `resume_releases` без `fix_sha`, сохраняется при `resume_releases` с `fix_sha`; в записях до появления поля — 1), `tree` (string или `null` — имя worktree и ветки `office/<tree>` попытки; `null` — `revert-<release_id>`), `targets` (массив `RevertTarget` — набор отмены; пуст в записях до появления поля, тогда набор — сам кандидат), `contour` (`Contour` или `null` — контур diff revert-PR; `server` — слияние только после одобрения владельца), `owner_review` (`OwnerReview` или `null` — одобрение владельца для revert-PR серверного контура).
+
+Revert изменения со схемой БД: после `git revert` офис возвращает `apps/chat/api/app/schema.sql` к состоянию текущего `main` (добавленные таблицы и колонки остаются в схеме и в общей БД). Если после этого ветка не отличается от `main`, revert-PR не создаётся, блокировка сохраняется, `revert.status = needs_attention` с причиной «изменение затрагивает только схему БД; проверьте текущий main и снимите блокировку решением resume_releases с fix_sha».
 
 `RevertTarget`: `release_id` (string — выпуск, слияния которого отменяются), `source` (`verify_failed` — автоматический откат, `rolled_back` — ручной откат, `checks_failed` — непрошедшие проверки итогового commit), `base_sha`, `head_sha` (string — диапазон первой линии `main`), `merges` (string[] или `null` — найденные слияния PR офиса в диапазоне; `null`, пока revert не создан), `attempt` (integer или `null` — попытка `revert.attempt`, которая включила цель), `fixed_by` (string или `null` — итоговый commit слитого revert-PR этой попытки или принятый `fix_sha` администратора), `resumed` (boolean — цель исправлена `fix_sha` администратора: доработки по ней нет).
 
@@ -512,7 +525,10 @@
     },
     "rework_count": 0,
     "rework_limit": 1,
-    "rework_reason": null
+    "rework_reason": null,
+    "change_class": "frontend_ui",
+    "contour": null,
+    "owner_review": null
   },
   {
     "id": "tsk_101",
@@ -566,7 +582,10 @@
     },
     "rework_count": 0,
     "rework_limit": 1,
-    "rework_reason": null
+    "rework_reason": null,
+    "change_class": "frontend_ui",
+    "contour": "ui",
+    "owner_review": null
   },
   {
     "id": "tsk_102",
@@ -621,9 +640,11 @@
         {"item": "inputs", "ok": true, "note": "Добавлен переключатель темы, данные не отправляются."},
         {"item": "system_messages", "ok": true, "note": "Системные сообщения не скрываются."},
         {"item": "sent_text", "ok": true, "note": "Отправляемый текст не меняется."},
-        {"item": "third_party_code", "ok": true, "note": "Стороннего кода нет."}
+        {"item": "third_party_code", "ok": true, "note": "Стороннего кода нет."},
+        {"item": "models", "ok": true, "note": "Выбор моделей и лимиты не меняются."}
       ],
-      "created_at": "2026-10-23T10:44:00Z"
+      "created_at": "2026-10-23T10:44:00Z",
+      "owner_summary": null
     },
     "merge_sha": "c3d4e5f6a7b8091a2b3c4d5e6f708192a3b4c5d6",
     "merge_pending": false,
@@ -641,10 +662,15 @@
     },
     "rework_count": 0,
     "rework_limit": 1,
-    "rework_reason": null
+    "rework_reason": null,
+    "change_class": "frontend_ui",
+    "contour": "ui",
+    "owner_review": null
   }
 ]
 ```
+
+Задача серверного контура ждёт одобрения владельца (фрагмент `GET /api/tasks/{id}`): `"status": "awaiting_integration"`, `"change_class": "backend_api"`, `"contour": "server"`, `"pr_review": {"verdict": "approve", "owner_summary": "Добавлено поле message_count в ответ GET /api/conversations; схема БД не меняется, зависимостей нет. Рекомендация: одобрить.", ...}`, `"owner_review": {"state": "requested", "head_sha": "5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f", "login": null, "comment": null}`. После отзыва владельца «Request changes»: `"status": "failed"`, `"failure_kind": "owner_rejected"`, `"owner_review": {"state": "changes_requested", "head_sha": "5e6f…", "login": "SlavaPush", "comment": "Нужна пагинация"}`.
 
 Задача на доработке после ручного отката (фрагмент `GET /api/tasks/{id}`): `"status": "developing"`, `"branch": "office/tsk_104-r1"`, `"rework_count": 1`, `"rework_limit": 1`, `"rework_reason": "Ручной откат администратора: После выпуска кнопка «Выйти» не завершает сеанс. Опубликована прежняя версия 8beae56 вместо 389e553."`, `"usage": {"model_calls": 14, "model_calls_limit": 60, ...}`.
 
@@ -1055,6 +1081,47 @@ data: {"event_id":211,"task_id":"tsk_101","seq":11,"type":"check_result", ...}
     "tool": null,
     "artifact": null,
     "payload": {"reason": "Задача меняет backend и схему БД. Офис принимает только изменения интерфейса vibe-chat."}
+  }
+]
+```
+
+Журнал задачи `tsk_105` серверного контура (ожидание и отзыв владельца):
+
+<!-- example: TaskEvent[] -->
+```json
+[
+  {
+    "event_id": 300,
+    "task_id": "tsk_105",
+    "seq": 1,
+    "type": "task_created",
+    "timestamp": "2026-10-25T10:00:00Z",
+    "role": null,
+    "tool": null,
+    "artifact": null,
+    "payload": {"title": "Добавить в ответ списка диалогов число сообщений", "profile": "cloud", "change_class": "backend_api"}
+  },
+  {
+    "event_id": 340,
+    "task_id": "tsk_105",
+    "seq": 41,
+    "type": "owner_review_requested",
+    "timestamp": "2026-10-25T10:40:00Z",
+    "role": null,
+    "tool": null,
+    "artifact": null,
+    "payload": {"pr_number": 21, "head_sha": "5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f", "pr_url": "https://github.com/SlavaPush/vibe-studio/pull/21", "login": "SlavaPush"}
+  },
+  {
+    "event_id": 352,
+    "task_id": "tsk_105",
+    "seq": 42,
+    "type": "owner_review",
+    "timestamp": "2026-10-25T11:05:00Z",
+    "role": null,
+    "tool": null,
+    "artifact": null,
+    "payload": {"pr_number": 21, "head_sha": "5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f", "state": "approved", "login": "SlavaPush"}
   }
 ]
 ```

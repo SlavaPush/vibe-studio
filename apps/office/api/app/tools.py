@@ -28,6 +28,7 @@ class WorkspaceTools:
         self.task_id = task_id
         self.role = role
         self.policy = workspace.paths
+        self.change_class = store.get_task(task_id).change_class
 
     def _root(self) -> Path:
         root = self.workspace.worktree_path(self.task_id)
@@ -100,7 +101,9 @@ class WorkspaceTools:
         def action() -> str:
             if data is None or b"\0" in data:
                 raise PathDenied("Содержимое должно быть текстом UTF-8.")
-            target = resolve_inside(self._root(), self.policy.check_write(self.role, path, len(data)))
+            target = resolve_inside(
+                self._root(), self.policy.check_write(self.role, path, len(data), self.change_class)
+            )
             if os.path.lexists(target) and not stat.S_ISREG(os.lstat(target).st_mode):
                 raise PathDenied("Записывать можно только в обычный файл.")
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -121,7 +124,7 @@ class WorkspaceTools:
 
     def delete_file(self, path: str) -> ToolOutcome:
         def action() -> str:
-            target = resolve_inside(self._root(), self.policy.check_write(self.role, path))
+            target = resolve_inside(self._root(), self.policy.check_write(self.role, path, None, self.change_class))
             try:
                 info = os.lstat(target)
             except FileNotFoundError as error:

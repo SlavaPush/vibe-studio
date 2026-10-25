@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import subprocess
@@ -8,8 +9,9 @@ import pytest
 import yaml
 from conftest import Office, git
 
+from app.python_sandbox import PythonSandbox
 from app.sandbox import Sandbox
-from app.schemas import AgentRole, TaskStatus
+from app.schemas import AgentRole, ChangeClass, TaskStatus
 from app.tools import WorkspaceTools
 
 TARGET = os.environ.get("OFFICE_TEST_TARGET_REPO", "https://github.com/SlavaPush/vibe-studio.git")
@@ -168,3 +170,64 @@ def test_mock_api_module_in_real_sandbox(real):
         assert not [url for url in report.checks[-1].artifact_urls if url.endswith("unmocked-api.txt")]
     log = client.get(after.checks[-1].artifact_urls[0]).text
     assert f"{task_id}.pw.ts" in log and PASSED.search(log) and not FAILED.search(log)
+
+
+QA_PYTEST = """import importlib.util
+
+
+def test_probe_module_exists():
+    assert importlib.util.find_spec("app.office_probe") is not None
+"""
+
+
+@pytest.mark.skipif(not os.environ.get("OFFICE_TEST_PYTHON_SANDBOX"), reason="OFFICE_TEST_PYTHON_SANDBOX не задан")
+def test_real_pytest_qa_fails_on_base_and_passes_on_task(real):
+    office, app, sandbox, client, me, prefix = real
+    sandbox.python = PythonSandbox(sandbox, volume_prefix=f"office-py-test-{uuid.uuid4().hex[:8]}-")
+    [task_id] = office.start_tasks(app, me["id"])
+    office.set_task(task_id, change_class="backend_api")
+    store = app.state.store
+    workspace = app.state.workspace
+    base = store.get_task(task_id).base_sha
+    developer = WorkspaceTools(store, workspace, task_id, AgentRole.developer)
+    assert developer.write_file("apps/chat/api/app/office_probe.py", "VALUE = 1\n").result == "ok"
+    qa = WorkspaceTools(store, workspace, task_id, AgentRole.qa)
+    test_file = f"apps/chat/api/tests/office/test_{task_id}.py"
+    assert qa.write_file(test_file, QA_PYTEST).result == "ok"
+    commit = workspace.commit(task_id, "Модуль проверки")
+    try:
+        before = sandbox.run_suite(task_id, base, commit, require_e2e=True, change_class=ChangeClass.backend_api)
+        after = sandbox.run_suite(task_id, commit, commit, require_e2e=True, change_class=ChangeClass.backend_api)
+    finally:
+        sandbox.python.remove_stale()
+        listed = subprocess.run(
+            ["docker", "volume", "ls", "-q", "--filter", f"name={sandbox.python.volume_prefix}"],
+            capture_output=True, text=True, check=True,
+        )
+        for volume in listed.stdout.split():
+            subprocess.run(["docker", "volume", "rm", "-f", volume], capture_output=True, check=False)
+    failed = sandbox.e2e_result(task_id, before, test_file)
+    assert failed.status == "failed" and "AssertionError" in failed.message, logs(client, task_id, before)
+    assert failed.line == 5
+    passed = sandbox.e2e_result(task_id, after, test_file)
+    assert passed.status == "passed", logs(client, task_id, after)
+    assert any(url.endswith("junit.xml") for url in after.checks[-1].artifact_urls)
+    assert all(check.exit_code == 0 for check in after.checks), logs(client, task_id, after)
+
+
+def test_real_lock_step_updates_package_lock(real, tmp_path):
+    office, app, sandbox, client, me, prefix = real
+    [task_id] = office.start_tasks(app, me["id"])
+    root = app.state.workspace.worktree_path(task_id)
+    web = root / "apps/chat/web"
+    manifest = json.loads((web / "package.json").read_text(encoding="utf-8"))
+    manifest["dependencies"]["left-pad"] = "1.3.0"
+    (web / "package.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    before = (web / "package-lock.json").read_text(encoding="utf-8")
+    result = sandbox.lock_node(task_id, root)
+    assert result.exit_code == 0, client.get(result.artifact_urls[0]).text
+    after = json.loads((web / "package-lock.json").read_text(encoding="utf-8"))
+    assert after != json.loads(before)
+    assert after["packages"][""]["dependencies"]["left-pad"] == "1.3.0"
+    assert after["packages"]["node_modules/left-pad"]["version"] == "1.3.0"
+    assert not (web / "node_modules" / "left-pad").exists()

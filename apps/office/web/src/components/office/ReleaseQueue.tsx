@@ -271,6 +271,9 @@ function BlockedNotice({ blocked, queue, participant, run, onRefresh }: BlockedP
             </>
           )}
           {`, состояние: ${REVERT_LABELS[revert.status]}`}
+          {revert.owner_review?.state === 'requested' && revert.owner_review.head_sha === revert.head_sha && (
+            <span>. Серверный контур: ждёт одобрения владельца на GitHub</span>
+          )}
           {revert.reason && <span className="text-destructive">. {revert.reason}</span>}
         </p>
       )}

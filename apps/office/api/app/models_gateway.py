@@ -30,7 +30,7 @@ CLASSIFICATION_SCHEMA: dict[str, Any] = {
         "related_to_vibe_chat": {"type": "boolean"},
         "change_class": {
             "type": "string",
-            "enum": ["frontend_ui", "out_of_scope", "internal_probe", "other"],
+            "enum": ["frontend_ui", "backend_api", "out_of_scope", "internal_probe", "other"],
         },
         "reason": {"type": "string"},
     },
@@ -43,7 +43,7 @@ class Classification(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     related_to_vibe_chat: bool
-    change_class: Literal["frontend_ui", "out_of_scope", "internal_probe", "other"]
+    change_class: Literal["frontend_ui", "backend_api", "out_of_scope", "internal_probe", "other"]
     reason: str = Field(max_length=300)
 
 

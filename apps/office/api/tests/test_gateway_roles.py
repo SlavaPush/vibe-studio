@@ -426,6 +426,8 @@ def test_long_descriptive_text_is_clipped_and_strict_fields_stay_strict(setup):
 def test_action_step_is_enum_of_role_steps(reply_type, role):
     policy = CommandsPolicy(Settings().commands_policy)
     allowed = [name for name, step in policy.steps.items() if role in step.roles]
+    if role == AgentRole.developer:
+        allowed.append("api-test")
     step = provider_schema(reply_type)["properties"]["actions"]["items"]["properties"]["step"]
     assert step == {"anyOf": [{"enum": allowed, "type": "string"}, {"type": "null"}]}
     assert "const" not in json.dumps(provider_schema(reply_type))

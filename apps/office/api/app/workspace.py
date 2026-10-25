@@ -17,6 +17,7 @@ from pathlib import Path
 
 from app.branch_check import (
     GIT_TIMEOUT,
+    SCHEMA_SQL,
     RawChange,
     WorkspaceError,
     check_change,
@@ -29,7 +30,7 @@ from app.config import APP_DIR, Settings
 from app.errors import ErrorCode, OfficeError, not_found
 from app.operations import Operation, OperationLog, OpStatus
 from app.paths import PathDenied, PathPolicy
-from app.schemas import SLOT_STATUSES, WORKTREE_STATUSES, AgentRole, Task, TaskEventType, TaskStatus
+from app.schemas import SLOT_STATUSES, WORKTREE_STATUSES, AgentRole, ChangeClass, Task, TaskEventType, TaskStatus
 from app.tasks import CLOSED_STATUSES, SIGNAL_SLOT_ACQUIRED, SIGNAL_TASK_CLOSED, TaskStore, rework_tree
 
 logger = logging.getLogger("office.workspace")
@@ -40,6 +41,7 @@ REWORK_PREPARE = "rework_prepare"
 DIFF_LIMIT = 1024 * 1024
 CLONE_NAME = "vibe-studio"
 QA_DIR = f"{APP_DIR}/web/e2e/office"
+QA_API_DIR = f"{APP_DIR}/api/tests/office"
 COMMIT_ENV = {
     "GIT_AUTHOR_NAME": "back-office",
     "GIT_AUTHOR_EMAIL": "office@localhost",
@@ -433,11 +435,11 @@ class Workspace:
             shutil.copyfile(real, copy)
         return real, copy
 
-    def _check_change(self, path: Path, change: RawChange, env: dict[str, str]) -> None:
+    def _check_change(self, path: Path, change: RawChange, env: dict[str, str], change_class: ChangeClass) -> None:
         size = None
         if change.new_mode == "100644":
             size = int(self.git("cat-file", "-s", change.new_sha, cwd=path, env=env))
-        check_change(self.paths, change.path, change.new_mode, size)
+        check_change(self.paths, change.path, change.new_mode, size, change_class)
 
     def commit(self, task_id: str, message: str, role: AgentRole | None = None) -> str | None:
         task = self.store.get_task(task_id)
@@ -454,7 +456,7 @@ class Workspace:
                 return None
             for change in changes:
                 try:
-                    self._check_change(path, change, env)
+                    self._check_change(path, change, env, task.change_class)
                 except PathDenied as error:
                     self.store.add_event(
                         task_id,
@@ -470,16 +472,42 @@ class Workspace:
             sha = self.git("rev-parse", "HEAD", cwd=path)
             names = run_git("diff", "--name-only", "-z", task.base_sha, sha, cwd=path)
         changed = [name for name in names.decode("utf-8").split("\0") if name]
-        self.store.record_commit(task_id, sha, changed, role)
+        self.store.record_commit(task_id, sha, changed, role, self.paths.contour(changed))
         return sha
 
-    def verify_branch(self, task_id: str, base_sha: str | None = None) -> list[str]:
-        base = base_sha or self.store.get_task(task_id).base_sha
-        if not base:
+    def verify_branch(
+        self, task_id: str, base_sha: str | None = None, change_class: ChangeClass | None = None
+    ) -> list[str]:
+        if base_sha is None:
+            task = self.store.get_task(task_id)
+            base_sha, change_class = task.base_sha, task.change_class
+        if not base_sha:
             raise WorkspaceError("base_sha задачи не записан.")
         with self.lock:
             path = self.task_worktree(task_id)
-            return check_range(self.paths, path, base, "HEAD")
+            return check_range(self.paths, path, base_sha, "HEAD", change_class)
+
+    def changed_between(self, base: str, head: str) -> list[str]:
+        with self.lock:
+            output = run_git("diff", "--name-only", "-z", "--no-renames", base, head, cwd=self.clone)
+        return [name for name in output.decode("utf-8").split("\0") if name]
+
+    def file_at(self, sha: str, rel: str) -> bytes | None:
+        try:
+            return run_git("cat-file", "blob", f"{sha}:{rel}", cwd=self.clone)
+        except WorkspaceError:
+            return None
+
+    def last_commit_by(self, task_id: str, base: str, role: str) -> str | None:
+        path = self.task_worktree(task_id)
+        output = self.git(
+            "log", "--format=%H %(trailers:key=Office-Role,valueonly,separator=%x2C)", f"{base}..HEAD", cwd=path
+        )
+        for line in output.splitlines():
+            sha, _, found = line.partition(" ")
+            if found == role:
+                return sha
+        return None
 
     def first_parent(self, base: str, head: str) -> list[str]:
         with self.lock:
@@ -526,6 +554,13 @@ class Workspace:
                     with suppress(WorkspaceError):
                         self.git("revert", "--abort", cwd=path, env=COMMIT_ENV)
                     raise WorkspaceError(f"git revert {sha[:7]} не выполнен: конфликт с более поздними изменениями main.") from error
+            if self.git("diff", "--name-only", base, "HEAD", "--", SCHEMA_SQL, cwd=path):
+                self.git("checkout", base, "--", SCHEMA_SQL, cwd=path)
+                self.git(
+                    "commit", "--quiet", "--no-verify", "--no-gpg-sign", "-m",
+                    "Схема БД остаётся в состоянии main: откат Render не возвращает состояние общей БД",
+                    cwd=path, env=COMMIT_ENV,
+                )
             return base, self.git("rev-parse", "HEAD", cwd=path)
 
     def changed_names(self, tree: str, base: str, head: str) -> list[str]:
@@ -624,15 +659,15 @@ class Workspace:
                     shutil.rmtree(holder, ignore_errors=True)
                     self.git("worktree", "prune")
 
-    def qa_files(self, sha: str) -> list[str]:
-        listed = run_git("ls-tree", "-r", "--name-only", "-z", sha, "--", QA_DIR, cwd=self.clone)
+    def qa_files(self, sha: str, directory: str = QA_DIR) -> list[str]:
+        listed = run_git("ls-tree", "-r", "--name-only", "-z", sha, "--", directory, cwd=self.clone)
         return [name for name in listed.decode("utf-8").split("\0") if name]
 
-    def export_qa(self, sha: str, destination: Path) -> list[str]:
-        files = self.qa_files(sha)
+    def export_qa(self, sha: str, destination: Path, directory: str = QA_DIR) -> list[str]:
+        files = self.qa_files(sha, directory)
         if not files:
             return []
-        archive = run_git("archive", "--format=tar", sha, "--", QA_DIR, cwd=self.clone)
+        archive = run_git("archive", "--format=tar", sha, "--", directory, cwd=self.clone)
         with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
             tar.extractall(destination, filter="data")
         return files

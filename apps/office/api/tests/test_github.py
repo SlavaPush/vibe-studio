@@ -100,7 +100,9 @@ def test_factory_sets_timeout_and_base_url(app_key):
 
 def test_required_checks_come_from_ruleset_and_workflows():
     checks = {check.name: check for check in load_required_checks(CHECKOUT_ROOT)}
-    assert set(checks) == {"chat-web", "chat-containers", "office-paths"}
+    assert set(checks) == {"chat-api", "chat-web", "chat-containers", "office-paths"}
+    assert checks["chat-api"].workflow == ".github/workflows/ci.yml"
+    assert (checks["chat-api"].pr_event, checks["chat-api"].push_event) == ("pull_request", "push")
     assert checks["chat-web"].workflow == ".github/workflows/ci.yml"
     assert (checks["chat-web"].pr_event, checks["chat-web"].push_event) == ("pull_request", "push")
     assert checks["office-paths"].workflow == ".github/workflows/office-paths.yml"

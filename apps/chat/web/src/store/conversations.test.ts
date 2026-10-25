@@ -6,6 +6,7 @@ import {
   applyMessageList,
   applyRunEvent,
   createChatStore,
+  initialChatState,
   isIncomplete,
   pendingMessageId,
 } from './conversations'
@@ -21,6 +22,13 @@ function apiError(code: ApiError['code'], retryable = false): ApiError {
 function assistant(runId: string, text: string): Message {
   return { ...testRun(runId).userMessage, id: `${runId}-assistant`, role: 'assistant', text }
 }
+
+describe('начальное состояние', () => {
+  it('по умолчанию выбрана модель «Авто»', () => {
+    expect(initialChatState().selectedModel).toBe('auto')
+    expect(createChatStore().getState().selectedModel).toBe('auto')
+  })
+})
 
 describe('applyRunEvent', () => {
   it('отбрасывает повтор события по паре run_id и seq, но обрабатывает тот же seq другого задания', () => {

@@ -12,22 +12,36 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Literal
+from xml.etree import ElementTree
 
 import yaml
 
 from app.artifacts import check_name
 from app.config import APP_DIR, SANDBOX_DIR, Settings
 from app.errors import OfficeError
-from app.schemas import AgentRole, CheckReport, CheckResult, TaskEventType
+from app.schemas import AgentRole, ChangeClass, CheckReport, CheckResult, TaskEventType
 from app.tasks import TaskStore
-from app.workspace import QA_DIR, Workspace
+from app.workspace import QA_API_DIR, QA_DIR, Workspace
 
 logger = logging.getLogger("office.sandbox")
 
 INSTALL = "install"
+LOCK = "lock"
 SUITE = ("lint", "test", "build", "e2e")
+API_TEST = "api-test"
+API_COMPAT = "api-compat"
+API_PREFIXES = (f"{APP_DIR}/api/", f"{APP_DIR}/contracts/")
+SCHEMA_PATH = f"{APP_DIR}/api/app/schema.sql"
+JUNIT_SUFFIX = "junit.xml"
+API_TEST_COMMAND = "python -m pytest -p no:cacheprovider"
+COMPAT_COMMANDS = (
+    "api-compat: pytest базовой версии",
+    "api-compat: схема версии задачи поверх данных базовой версии",
+    "api-compat: pytest базовой версии на новой схеме",
+)
+PYTHON_STEP = SANDBOX_DIR.parent / "sandbox-python" / "step.sh"
 TIMEOUT_EXIT = 124
 BUILD_EXIT = 90
 LABEL = "back-office.workspace"
@@ -45,7 +59,9 @@ TEST_ERROR_LIMIT = 1500
 SANDBOX_USER = "10001:10001"
 MARKER = "/deps/.office-complete"
 UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
-BASE_TEST = re.compile(rf"(^|/)[^/]+\.(test|spec)\.[^/]+$|^{re.escape(APP_DIR)}/web/src/test/")
+BASE_TEST = re.compile(
+    rf"(^|/)[^/]+\.(test|spec)\.[^/]+$|^{re.escape(APP_DIR)}/web/src/test/|^{re.escape(APP_DIR)}/api/tests/"
+)
 UNAVAILABLE = "Sandbox недоступен: образ не найден или Docker не запущен. Соберите образ командой из README."
 
 MAX_CONTAINERS = 2
@@ -226,6 +242,65 @@ def parse_playwright(report: Any, test_file: str) -> E2EResult:
     )
 
 
+def suite_steps(changed: list[str], change_class: ChangeClass | None, playwright: bool) -> list[str]:
+    steps = [*SUITE[:3], *(["e2e"] if playwright else [])]
+    if change_class == ChangeClass.backend_api or any(path.startswith(API_PREFIXES) for path in changed):
+        steps.append(API_TEST)
+    if SCHEMA_PATH in changed:
+        steps.append(API_COMPAT)
+    return steps
+
+
+def suite_commands(policy: "CommandsPolicy", steps: list[str]) -> list[str]:
+    commands = []
+    for name in steps:
+        if name == API_TEST:
+            commands.append(API_TEST_COMMAND)
+        elif name == API_COMPAT:
+            commands.extend(COMPAT_COMMANDS)
+        else:
+            commands.append(policy.steps[name].command)
+    return commands
+
+
+def junit_case(case: ElementTree.Element, module: str) -> bool:
+    return module in (case.get("classname") or "").split(".") or (case.get("name") or "").endswith(module)
+
+
+def parse_junit(data: bytes | None, test_file: str) -> E2EResult:
+    if data is None:
+        return E2EResult("no_evidence", "Нет отчёта pytest.")
+    try:
+        root = ElementTree.fromstring(data)
+    except ElementTree.ParseError:
+        return E2EResult("no_evidence", "Отчёт pytest повреждён.")
+    name = PurePosixPath(test_file).name
+    module = PurePosixPath(test_file).stem
+    cases = [case for case in root.iter("testcase") if junit_case(case, module)]
+    if not cases:
+        return E2EResult("no_evidence", "Отчёт pytest не содержит тестов QA.")
+    failure: tuple[str, int | None] | None = None
+    for case in cases:
+        if case.find("skipped") is not None:
+            return E2EResult("no_evidence", "Тест QA пропущен.")
+        for kind in ("error", "failure"):
+            found = case.find(kind)
+            if found is None:
+                continue
+            text = f"{found.get('message') or ''}\n{found.text or ''}".strip()
+            lines = re.findall(rf"{re.escape(name)}:(\d+):", text)
+            line = int(lines[-1]) if lines else None
+            if kind == "error" or "AssertionError" not in text:
+                return E2EResult(
+                    "test_error", "Тест QA завершился ошибкой до проверки утверждения.", line=line,
+                    message=text[:TEST_ERROR_LIMIT],
+                )
+            failure = failure or (text[:MESSAGE_LIMIT], line)
+    if failure is None:
+        return E2EResult("passed")
+    return E2EResult("failed", line=failure[1], message=failure[0])
+
+
 @dataclass(frozen=True)
 class Step:
     name: str
@@ -292,6 +367,7 @@ class Sandbox:
             SANDBOX_DIR / "office-e2e" / "playwright.config.ts",
             SANDBOX_DIR / "office-e2e" / "serve.mjs",
             SANDBOX_DIR / "step.sh",
+            PYTHON_STEP,
         )
         self.image = settings.sandbox_image
         self.artifacts_dir = settings.artifacts_dir
@@ -307,6 +383,9 @@ class Sandbox:
         self._cancelled: set[str] = set()
         digest = hashlib.sha256(str(workspace.root).encode("utf-8")).hexdigest()[:16]
         self.label = f"{LABEL}={digest}"
+        from app.python_sandbox import PythonSandbox
+
+        self.python = PythonSandbox(self)
 
     def remove_stale(self) -> None:
         output = io.BytesIO()
@@ -470,6 +549,8 @@ class Sandbox:
         qa: Path | None = None,
         role: AgentRole | None = None,
         context: dict[str, str] | None = None,
+        build: Callable[[str, Path], list[str]] | None = None,
+        keep: Callable[[Path], None] | None = None,
     ) -> CheckResult:
         task_dir = self.artifacts_dir / task_id
         number = self._next_number(task_dir, step.name)
@@ -478,9 +559,12 @@ class Sandbox:
         out = Path(tempfile.mkdtemp(dir=self.workspace.root, prefix=".out-"))
         try:
             out.chmod(0o777)
-            args = self.step_args(
-                name, step, src=src, volume=volume, out=None if step.name == INSTALL else out, qa=qa
-            )
+            if build is not None:
+                args = build(name, out)
+            else:
+                args = self.step_args(
+                    name, step, src=src, volume=volume, out=None if step.name == INSTALL else out, qa=qa
+                )
             started = time.monotonic()
             with open(task_dir / log_name, "wb") as file:
                 log = CappedLog(file, self.policy.log_bytes)
@@ -488,7 +572,12 @@ class Sandbox:
                 if log.truncated:
                     file.write("\n[журнал обрезан]\n".encode())
             duration_ms = int((time.monotonic() - started) * 1000)
-            names = [log_name, *self._collect(out, task_dir, f"{step.name}-{number}")]
+            if keep is not None:
+                if exit_code == 0:
+                    keep(out)
+                names = [log_name]
+            else:
+                names = [log_name, *self._collect(out, task_dir, f"{step.name}-{number}")]
         finally:
             shutil.rmtree(out, ignore_errors=True)
         result = CheckResult(
@@ -537,9 +626,45 @@ class Sandbox:
         )
         return StepDenied(reason)
 
+    def lock_node(self, task_id: str, root: Path) -> CheckResult:
+        self.check_cancelled(task_id)
+        self.require_image()
+        web = root / APP_DIR / "web"
+        step = self.policy.steps[LOCK]
+        with tempfile.TemporaryDirectory(dir=self.workspace.root) as tmp:
+            src = Path(tmp) / "src"
+            (src / "web").mkdir(parents=True)
+            for name in ("package.json", "package-lock.json"):
+                if (web / name).is_symlink() or not (web / name).is_file():
+                    raise SandboxError(f"В рабочей копии нет обычного файла {APP_DIR}/web/{name}.")
+                shutil.copyfile(web / name, src / "web" / name)
+            self._open_tree(src)
+
+            def build(name: str, out: Path) -> list[str]:
+                args = self.base_args(name, network=True)
+                args += mount("bind", src, "/src", readonly=True)
+                args += mount("bind", out, "/out", readonly=False)
+                return args + [self.image, "sandbox-step", step.name, step.command]
+
+            def keep(out: Path) -> None:
+                result = out / "package-lock.json"
+                if result.is_symlink() or not result.is_file():
+                    raise SandboxError("Шаг lock не вернул package-lock.json.")
+                if result.stat().st_size > self.workspace.paths.max_lock_bytes:
+                    raise SandboxError("package-lock.json больше допустимого размера lock-файла.")
+                shutil.copyfile(result, web / "package-lock.json")
+
+            return self._run(task_id, step, src=src, volume="", build=build, keep=keep)
+
     def run_step(self, task_id: str, step_name: str, role: AgentRole | None) -> CheckResult:
+        if step_name == API_TEST:
+            task = self.store.get_task(task_id)
+            if role is not None and (role != AgentRole.developer or task.change_class != ChangeClass.backend_api):
+                raise self.deny(task_id, step_name, role, "Шаг доступен только разработчику задачи backend_api.")
+            self.check_cancelled(task_id)
+            return self.python.run_api_tests(task_id, self.workspace.task_worktree(task_id) / APP_DIR)[-1]
         step = self.policy.steps.get(step_name)
-        if step is None or step.name == INSTALL:
+        if step is None or step.name in (INSTALL, LOCK):
             raise self.deny(task_id, step_name, role, "Шага нет в политике команд.")
         if role is not None and role not in step.roles:
             raise self.deny(task_id, step_name, role, "Шаг недоступен этой роли.")
@@ -577,7 +702,7 @@ class Sandbox:
             for name in names:
                 os.chmod(Path(directory) / name, 0o644)
 
-    def suite_hash(self, app: Path, qa: Path | None) -> str:
+    def suite_hash(self, app: Path, qa: Path | None, extra: list[str] | None = None) -> str:
         items: list[tuple[str, str, bytes]] = []
         for rel in self.workspace.tracked_files(app):
             path = app / rel
@@ -586,6 +711,8 @@ class Sandbox:
         if qa is not None:
             for path in regular_files(qa):
                 items.append(("qa", path.relative_to(qa).as_posix(), path.read_bytes()))
+        for rel in extra or []:
+            items.append(("qa", rel, (app / rel).read_bytes()))
         for path in self.policy_files:
             items.append(("policy", path.name, path.read_bytes()))
         digest = hashlib.sha256()
@@ -594,11 +721,15 @@ class Sandbox:
             digest.update(data)
         return f"sha256:{digest.hexdigest()}"
 
-    def run_suite(self, task_id: str, app_sha: str, qa_sha: str, *, require_e2e: bool = False) -> CheckReport:
+    def run_suite(
+        self, task_id: str, app_sha: str, qa_sha: str, *, require_e2e: bool = False, diff_base: str | None = None,
+        change_class: ChangeClass | None = None,
+    ) -> CheckReport:
         self.check_cancelled(task_id)
         self.require_image()
         task = self.store.get_task(task_id)
         checks: list[CheckResult] = []
+        pytest_qa = require_e2e and change_class == ChangeClass.backend_api
         with (
             self.workspace.checkout(app_sha) as (app, app_full),
             tempfile.TemporaryDirectory(dir=self.workspace.root) as tmp,
@@ -608,16 +739,19 @@ class Sandbox:
             qa.mkdir()
             qa_files = self.workspace.export_qa(qa_full, qa) if require_e2e else []
             self._open_tree(qa)
-            if require_e2e and not qa_files:
+            api_qa = self.workspace.export_qa(qa_full, app, QA_API_DIR) if pytest_qa else []
+            if (require_e2e and not pytest_qa and not qa_files) or (pytest_qa and not api_qa):
                 raise SandboxError("Набор тестов QA пуст.")
-            suite_hash = self.suite_hash(app, qa if qa_files else None)
+            base = self.workspace.resolve(diff_base or task.base_sha or app_full)
+            steps = suite_steps(self.workspace.changed_between(base, app_full), change_class, bool(qa_files))
+            suite_hash = self.suite_hash(app, qa if qa_files else None, api_qa)
             context = {"commit_sha": app_full, "qa_sha": qa_full}
             volume, install = self.ensure_deps(task_id, app / APP_DIR, context)
             if install is not None:
                 checks.append(install)
             if install is None or install.exit_code == 0:
                 for name in SUITE:
-                    if name == "e2e" and not qa_files:
+                    if name not in steps:
                         continue
                     self.check_cancelled(task_id)
                     checks.append(
@@ -630,6 +764,11 @@ class Sandbox:
                             context=context,
                         )
                     )
+            if API_TEST in steps:
+                checks += self.python.run_api_tests(task_id, app / APP_DIR, context, junit=pytest_qa)
+            if API_COMPAT in steps:
+                with self.workspace.checkout(base) as (previous, _):
+                    checks += self.python.api_compat(task_id, previous / APP_DIR, app / APP_DIR, context)
         report = CheckReport(
             task_id=task_id,
             commit_sha=app_full,
@@ -641,6 +780,8 @@ class Sandbox:
         return report
 
     def e2e_result(self, task_id: str, report: CheckReport, test_file: str) -> E2EResult:
+        if test_file.endswith(".py"):
+            return self.pytest_result(task_id, report, test_file)
         command = self.policy.steps["e2e"].command
         checks = [check for check in report.checks if check.command == command]
         if not checks:
@@ -663,3 +804,18 @@ class Sandbox:
                     data = None
                 break
         return parse_playwright(data, test_file)
+
+    def pytest_result(self, task_id: str, report: CheckReport, test_file: str) -> E2EResult:
+        checks = [check for check in report.checks if check.command == API_TEST_COMMAND]
+        if not checks:
+            return E2EResult("no_evidence", "Шаг api-test не выполнялся.")
+        if checks[-1].exit_code == TIMEOUT_EXIT:
+            return E2EResult("no_evidence", "Превышено время шага api-test.")
+        for url in checks[-1].artifact_urls:
+            name = url.rsplit("/", 1)[-1]
+            if name.endswith(JUNIT_SUFFIX):
+                try:
+                    return parse_junit((self.artifacts_dir / task_id / name).read_bytes(), test_file)
+                except OSError:
+                    break
+        return parse_junit(None, test_file)

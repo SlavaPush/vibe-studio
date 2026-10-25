@@ -29,6 +29,7 @@ import {
   AGENT_ROLE_LABELS,
   CHECKLIST_LABELS,
   CHECK_STATUS_LABELS,
+  CONTOUR_LABELS,
   DECISION_LABELS,
   EVENT_TYPE_LABELS,
   PROFILE_LABELS,
@@ -139,6 +140,7 @@ export function TaskCard({ task, participant, run, onRefresh }: TaskCardProps) {
           <Badge variant={task.status === 'rejected' ? 'destructive' : 'secondary'}>
             {STATUS_LABELS[task.status]}
           </Badge>
+          {task.contour && <Badge variant="outline">Контур: {CONTOUR_LABELS[task.contour]}</Badge>}
           <span>Владелец: {task.owner_name}</span>
           <span>Профиль: {PROFILE_LABELS[task.profile]}</span>
           <span>Версия: {task.version}</span>
@@ -151,6 +153,7 @@ export function TaskCard({ task, participant, run, onRefresh }: TaskCardProps) {
         {(task.rework_count > 0 || task.rework_reason) && <ReworkPanel task={task} />}
         {(task.pr_url || task.checks || task.merge_sha) && <PullRequestPanel task={task} />}
         {task.pr_review && <ReviewPanel review={task.pr_review} />}
+        {task.owner_review && <OwnerReviewPanel task={task} />}
         {actions.length > 0 && (
           <div className="grid gap-2">
             <div className="flex flex-wrap gap-2">
@@ -389,6 +392,12 @@ function ReviewPanel({ review }: { review: PullRequestReview }) {
         <time dateTime={review.created_at}>{formatDateTime(review.created_at)}</time>
       </p>
       <p>{review.reasons}</p>
+      {review.owner_summary && (
+        <div className="grid gap-1">
+          <h4 className="font-medium">Сводка для владельца</h4>
+          <p className="whitespace-pre-wrap">{review.owner_summary}</p>
+        </div>
+      )}
       {review.required_changes.length > 0 && (
         <div className="grid gap-1">
           <h4 className="font-medium">Что изменить</h4>
@@ -411,6 +420,42 @@ function ReviewPanel({ review }: { review: PullRequestReview }) {
           ))}
         </ul>
       </div>
+    </section>
+  )
+}
+
+function OwnerReviewPanel({ task }: { task: Task }) {
+  const owner = task.owner_review
+  if (!owner || owner.head_sha !== task.head_sha) return null
+  const link = task.pr_url && (
+    <a href={task.pr_url} target="_blank" rel="noreferrer" className="underline">
+      PR #{task.pr_number}
+    </a>
+  )
+  return (
+    <section aria-labelledby="task-owner-heading" className="grid gap-1 text-sm">
+      <h3 id="task-owner-heading" className="font-medium">
+        Одобрение владельца
+      </h3>
+      {owner.state === 'requested' && (
+        <p role="status">
+          Ждёт одобрения владельца на GitHub: {link}. PR серверного контура сливается только после одобрения.
+        </p>
+      )}
+      {owner.state === 'approved' && (
+        <p>
+          Владелец {owner.login} одобрил {link} для head{' '}
+          <code className="font-mono">{owner.head_sha.slice(0, 7)}</code>.
+        </p>
+      )}
+      {owner.state === 'changes_requested' && (
+        <>
+          <p className="text-destructive">
+            Владелец {owner.login} отклонил {link}, PR закрыт.
+          </p>
+          <p>Комментарий владельца: {owner.comment || 'не указан'}</p>
+        </>
+      )}
     </section>
   )
 }

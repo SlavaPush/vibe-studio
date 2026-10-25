@@ -12,6 +12,11 @@ steps:
     network: true
     timeout_seconds: 600
     roles: []
+  lock:
+    command: npm install --package-lock-only --ignore-scripts --no-audit --no-fund && cp package-lock.json /out/package-lock.json
+    network: true
+    timeout_seconds: 600
+    roles: []
   lint:
     command: npm run lint
     network: false

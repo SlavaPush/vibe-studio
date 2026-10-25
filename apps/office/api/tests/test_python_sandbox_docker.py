@@ -1,6 +1,7 @@
 import io
 import os
 import re
+import shutil
 import subprocess
 import tarfile
 import uuid
@@ -10,7 +11,7 @@ import pytest
 from conftest import Office, Origin
 
 from app.python_sandbox import PythonSandbox
-from app.sandbox import Sandbox
+from app.sandbox import COMPAT_COMMANDS, Sandbox
 
 REPO = Path(__file__).resolve().parents[4]
 PROBE = """
@@ -97,3 +98,44 @@ def test_chat_api_tests_pass_without_network(real):
 
     assert docker_lines("ps", "-aq", "--filter", f"label={sandbox.label}") == []
     assert docker_lines("network", "ls", "-q", "--filter", f"label={sandbox.label}") == []
+
+
+def task_copy(src: Path, target: Path, tail: str) -> Path:
+    shutil.copytree(src, target)
+    schema = target / "api" / "app" / "schema.sql"
+    schema.write_text(schema.read_text(encoding="utf-8") + tail, encoding="utf-8")
+    return target
+
+
+def test_api_compat_accepts_additive_schema(real, tmp_path):
+    app, sandbox, python, task_id, src = real
+    task_src = task_copy(src, tmp_path / "task-chat", "\nALTER TABLE users ADD COLUMN IF NOT EXISTS nickname text;\n")
+    checks = python.api_compat(task_id, src, task_src)
+    task_dir = app.state.settings.artifacts_dir / task_id
+    logs = "\n".join((task_dir / check.artifact_urls[0].rsplit("/", 1)[1]).read_text(errors="replace")[-3000:] for check in checks)
+    assert [check.command for check in checks][-3:] == list(COMPAT_COMMANDS), logs
+    assert all(check.exit_code == 0 for check in checks), logs
+    assert docker_lines("network", "ls", "-q", "--filter", f"label={sandbox.label}") == []
+
+
+def test_api_compat_rejects_schema_that_breaks_base_version(real, tmp_path):
+    app, sandbox, python, task_id, src = real
+    breaking = "\nALTER TABLE users ADD COLUMN IF NOT EXISTS must text DEFAULT 'x';\nALTER TABLE users ALTER COLUMN must DROP DEFAULT;\nALTER TABLE users ALTER COLUMN must SET NOT NULL;\n"
+    checks = python.api_compat(task_id, src, task_copy(src, tmp_path / "task-chat", breaking))
+    assert [check.command for check in checks][-3:] == list(COMPAT_COMMANDS)
+    assert [check.exit_code for check in checks][-3:-1] == [0, 0]
+    assert checks[-1].exit_code != 0
+
+
+def test_real_uv_lock_adds_dependency(real):
+    app, sandbox, python, task_id, src = real
+    pyproject = src / "api" / "pyproject.toml"
+    pyproject.write_text(
+        pyproject.read_text(encoding="utf-8").replace('"httpx>=0.28.1",', '"httpx>=0.28.1",\n    "idna>=3.0",'),
+        encoding="utf-8",
+    )
+    result = python.lock(task_id, src)
+    log = (app.state.settings.artifacts_dir / task_id / result.artifact_urls[0].rsplit("/", 1)[1]).read_text(errors="replace")
+    assert result.exit_code == 0, log
+    assert 'name = "idna"' in (src / "api" / "uv.lock").read_text(encoding="utf-8")
+    assert '{ name = "idna", specifier = ">=3.0" }' in (src / "api" / "uv.lock").read_text(encoding="utf-8")

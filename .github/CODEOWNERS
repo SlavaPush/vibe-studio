@@ -13,6 +13,7 @@
 
 /apps/chat/web/src/api/ @SlavaPush
 /apps/chat/web/src/mocks/ @SlavaPush
+/apps/chat/web/src/components/chat/ModelSelector.tsx @SlavaPush
 
 /apps/chat/web/*.config.* @SlavaPush
 /apps/chat/web/tsconfig*.json @SlavaPush

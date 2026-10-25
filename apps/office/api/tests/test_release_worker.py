@@ -201,7 +201,7 @@ def test_task_reaches_open_pr_and_passed_checks(setup):
     assert drive(worker, setup.task_id) == 0
     task = setup.task()
     assert task.status == TaskStatus.needs_attention
-    assert [(check.status, check.conclusion) for check in task.checks.checks] == [("completed", "success")] * 3
+    assert [(check.status, check.conclusion) for check in task.checks.checks] == [("completed", "success")] * 4
     assert len(setup.events(TaskEventType.checks_status)) == 2
     assert setup.fake.mutations() == [("POST", "/repos/SlavaPush/vibe-studio/pulls")]
     assert len(setup.pushes) == 1
@@ -247,7 +247,9 @@ def test_runs_of_other_pr_head_attempt_or_app_are_not_counted(setup):
     setup.fake.add_run("office-paths.yml", "pull_request_target", head, [1], {"office-paths": None},
                        run_number=4, run_attempt=2)
     summary = {check.name: check.status for check in worker.summary(setup.task()).checks}
-    assert summary == {"chat-web": "missing", "chat-containers": "missing", "office-paths": "in_progress"}
+    assert summary == {
+        "chat-api": "missing", "chat-web": "missing", "chat-containers": "missing", "office-paths": "in_progress"
+    }
     setup.fake.add_run("ci.yml", "pull_request", head, [1], {"chat-web": "success"}, run_number=2)
     checks = {check.name: (check.status, check.conclusion) for check in worker.summary(setup.task()).checks}
     assert checks["chat-web"] == ("completed", "success")

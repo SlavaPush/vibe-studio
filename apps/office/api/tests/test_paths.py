@@ -2,7 +2,7 @@ import pytest
 
 from app.config import POLICIES_DIR
 from app.paths import PathDenied, PathPolicy, glob_regex, normalize, resolve_inside
-from app.schemas import AgentRole
+from app.schemas import AgentRole, ChangeClass, Contour
 
 POLICY = PathPolicy(POLICIES_DIR / "paths.yaml")
 
@@ -80,16 +80,18 @@ def test_monorepo_paths_allowed(role, path):
         "apps/office/web/src/App.tsx",
         ".github/workflows/ci.yml",
         ".github/workflows/office-paths.yml",
-        "apps/chat/web/src/api/client.ts",
-        "apps/chat/web/src/mocks/contract-examples.ts",
         "apps/chat/web/src/test/setup.ts",
         "apps/chat/web/src/App.test.tsx",
-        "apps/chat/api/app/main.py",
-        "apps/chat/contracts/api.md",
+        "apps/chat/api/tests/test_runs.py",
+        "apps/chat/api/tests/conftest.py",
+        "apps/chat/api/tests/office/conftest.py",
+        "apps/chat/api/scripts/access_codes.py",
+        "apps/chat/api/main.py",
+        "apps/chat/api/Dockerfile",
+        "apps/chat/api/.env",
         "apps/chat/infra/Dockerfile",
-        "apps/chat/web/package.json",
-        "apps/chat/web/package-lock.json",
         "apps/chat/web/vite.config.ts",
+        "apps/chat/web/yarn.lock",
         "apps/chat/web/e2e/office/a.ts",
         "apps/chat/web/e2e/office/support/mock-api.ts",
         "apps/chat/web/e2e/office/support/mock-api.test.ts",
@@ -102,11 +104,74 @@ def test_monorepo_paths_allowed(role, path):
     ],
 )
 def test_monorepo_paths_denied(path):
-    for role in (AgentRole.developer, AgentRole.qa):
-        with pytest.raises(PathDenied):
-            POLICY.check_write(role, path, 10)
+    for change_class in ChangeClass:
+        for role in (AgentRole.developer, AgentRole.qa, None):
+            with pytest.raises(PathDenied):
+                POLICY.check_write(role, path, 10, change_class)
     with pytest.raises(PathDenied):
         POLICY.check_any_writer(path, 10)
+
+
+SERVER_PATHS = [
+    "apps/chat/api/app/main.py",
+    "apps/chat/api/app/routing.py",
+    "apps/chat/api/app/schema.sql",
+    "apps/chat/api/pyproject.toml",
+    "apps/chat/contracts/api.md",
+    "apps/chat/web/src/api/client.ts",
+    "apps/chat/web/src/mocks/contract-examples.ts",
+    "apps/chat/web/package.json",
+    "apps/chat/web/src/components/chat/ModelSelector.tsx",
+]
+
+
+@pytest.mark.parametrize("path", SERVER_PATHS)
+def test_server_zone_is_written_only_by_backend_developer(path):
+    assert POLICY.check_write(AgentRole.developer, path, 10, ChangeClass.backend_api) == path
+    assert POLICY.check_any_writer(path, 10) == path
+    assert POLICY.check_any_writer(path, 10, ChangeClass.backend_api) == path
+    with pytest.raises(PathDenied, match="серверной зоны"):
+        POLICY.check_write(AgentRole.developer, path, 10, ChangeClass.frontend_ui)
+    with pytest.raises(PathDenied):
+        POLICY.check_any_writer(path, 10, ChangeClass.frontend_ui)
+    with pytest.raises(PathDenied):
+        POLICY.check_write(AgentRole.qa, path, 10, ChangeClass.backend_api)
+    assert POLICY.contour([path]) == Contour.server
+    assert POLICY.contour(["apps/chat/web/src/App.tsx", path]) == Contour.server
+
+
+def test_interface_paths_have_ui_contour():
+    assert POLICY.contour(["apps/chat/web/src/App.tsx", "apps/chat/web/e2e/office/a.pw.ts"]) == Contour.ui
+    assert POLICY.contour([]) == Contour.ui
+    assert POLICY.check_write(AgentRole.developer, "apps/chat/web/src/App.tsx", 10, ChangeClass.backend_api)
+
+
+@pytest.mark.parametrize("path", ["apps/chat/web/package-lock.json", "apps/chat/api/uv.lock"])
+def test_lock_files_are_written_only_by_office(path):
+    size = POLICY.max_file_bytes + 1
+    assert POLICY.check_write(None, path, size, ChangeClass.backend_api) == path
+    assert POLICY.check_any_writer(path, POLICY.max_lock_bytes) == path
+    with pytest.raises(PathDenied):
+        POLICY.check_write(None, path, POLICY.max_lock_bytes + 1, ChangeClass.backend_api)
+    with pytest.raises(PathDenied):
+        POLICY.check_any_writer(path, 10, ChangeClass.frontend_ui)
+    for role in (AgentRole.developer, AgentRole.qa):
+        with pytest.raises(PathDenied):
+            POLICY.check_write(role, path, 10, ChangeClass.backend_api)
+    with pytest.raises(PathDenied):
+        POLICY.check_write(None, "apps/chat/api/app/main.py", 10, ChangeClass.backend_api)
+
+
+def test_backend_qa_writes_only_office_pytest():
+    path = "apps/chat/api/tests/office/test_tsk_1.py"
+    assert POLICY.check_write(AgentRole.qa, path, 10, ChangeClass.backend_api) == path
+    for denied in ("apps/chat/api/tests/office/helper.py", "apps/chat/web/e2e/office/a.pw.ts"):
+        with pytest.raises(PathDenied):
+            POLICY.check_write(AgentRole.qa, denied, 10, ChangeClass.backend_api)
+    with pytest.raises(PathDenied):
+        POLICY.check_write(AgentRole.qa, path, 10, ChangeClass.frontend_ui)
+    with pytest.raises(PathDenied):
+        POLICY.check_write(AgentRole.developer, path, 10, ChangeClass.backend_api)
 
 
 def test_role_rules():

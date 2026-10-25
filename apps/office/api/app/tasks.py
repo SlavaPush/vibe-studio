@@ -18,7 +18,9 @@ from app.schemas import (
     SLOTS_TOTAL,
     WORKTREE_STATUSES,
     AgentRole,
+    ChangeClass,
     CheckReport,
+    Contour,
     FailureKind,
     ModelProfile,
     PullRequestReview,
@@ -64,7 +66,7 @@ TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
 TASK_SELECT = (
     "SELECT t.*, p.display_name AS owner_name, r.id AS review_id, r.head_sha AS review_head_sha, "
     "r.verdict AS review_verdict, r.reasons AS review_reasons, r.required_changes AS review_required_changes, "
-    "r.checklist AS review_checklist, r.created_at AS review_created_at, "
+    "r.checklist AS review_checklist, r.created_at AS review_created_at, r.owner_summary AS review_owner_summary, "
     "EXISTS (SELECT 1 FROM operations o WHERE o.task_id = t.id AND o.kind = 'merge_pr' AND o.release_id IS NULL "
     "AND o.status IN ('started', 'unknown')) AS merge_pending, "
     "EXISTS (SELECT 1 FROM operations o WHERE o.task_id = t.id AND (t.rework_count = 0 "
@@ -80,7 +82,8 @@ REWORK_MATERIALS = ("reason", "deploy_events", "render_logs", "actions_log", "so
 LIMIT_REACHED = "Лимит доработки исчерпан: повторной доработки не будет."
 REWORK_RESET = (
     "rework_priority = :no, branch = NULL, base_sha = NULL, head_sha = NULL, pr_number = NULL, pr_url = NULL, "
-    "merge_sha = NULL, checks = NULL, failure_kind = NULL, changed_files = '[]', fix_cycles = 0, pr_review_calls = 0"
+    "merge_sha = NULL, checks = NULL, failure_kind = NULL, changed_files = '[]', fix_cycles = 0, pr_review_calls = 0, "
+    "contour = NULL, owner_review = NULL"
 )
 
 SignalHandler = Callable[[str, str], None]
@@ -101,6 +104,7 @@ class IntakeOutcome:
     model_calls: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    change_class: ChangeClass = ChangeClass.frontend_ui
 
 
 def new_id(prefix: str) -> str:
@@ -158,6 +162,9 @@ def task_from_row(row: dict[str, Any], rework_limit: int = REWORK_LIMIT) -> Task
         rework_count=row["rework_count"],
         rework_limit=rework_limit,
         rework_reason=row["rework_reason"],
+        change_class=row["change_class"],
+        contour=row["contour"],
+        owner_review=json.loads(row["owner_review"]) if row["owner_review"] else None,
     )
 
 
@@ -170,6 +177,7 @@ def review_from_row(row: dict[str, Any]) -> PullRequestReview:
         required_changes=json.loads(row["review_required_changes"]),
         checklist=json.loads(row["review_checklist"]),
         created_at=from_text(row["review_created_at"]),
+        owner_summary=row["review_owner_summary"],
     )
 
 
@@ -376,12 +384,14 @@ class TaskStore:
             return True
 
     def record_commit(
-        self, task_id: str, sha: str, changed_files: list[str], role: AgentRole | None = None
+        self, task_id: str, sha: str, changed_files: list[str], role: AgentRole | None = None,
+        contour: Contour = Contour.ui,
     ) -> Task:
         with self.db.locked_transaction() as conn:
             conn.execute(
-                "UPDATE tasks SET changed_files = :files, version = version + 1, updated_at = :now WHERE id = :id",
-                {"files": _json(changed_files), "now": to_text(utcnow()), "id": task_id},
+                "UPDATE tasks SET changed_files = :files, contour = :contour, version = version + 1, updated_at = :now "
+                "WHERE id = :id",
+                {"files": _json(changed_files), "contour": contour.value, "now": to_text(utcnow()), "id": task_id},
             )
             self.record_event(
                 conn,
@@ -432,7 +442,8 @@ class TaskStore:
         row = conn.fetchone(
             "SELECT id AS review_id, head_sha AS review_head_sha, verdict AS review_verdict, "
             "reasons AS review_reasons, required_changes AS review_required_changes, checklist AS review_checklist, "
-            "created_at AS review_created_at FROM pr_reviews WHERE task_id = :id AND head_sha = :head",
+            "created_at AS review_created_at, owner_summary AS review_owner_summary FROM pr_reviews "
+            "WHERE task_id = :id AND head_sha = :head",
             {"id": task_id, "head": head_sha},
         )
         return None if row is None else review_from_row(row)
@@ -779,9 +790,9 @@ class TaskStore:
             conn.execute(
                 "INSERT INTO tasks (id, owner_id, title, text, status, profile, version, created_at, updated_at, "
                 "rejection_reason, spec, branch, base_sha, pr_url, changed_files, fix_cycles, model_calls, "
-                "model_calls_limit, input_tokens, output_tokens, event_seq) VALUES (:id, :owner, :title, :text, "
-                ":status, :profile, :version, :now, :now, :reason, NULL, NULL, NULL, NULL, :files, 0, :calls, "
-                ":limit, :input_tokens, :output_tokens, 0)",
+                "model_calls_limit, input_tokens, output_tokens, event_seq, change_class) VALUES (:id, :owner, :title, "
+                ":text, :status, :profile, :version, :now, :now, :reason, NULL, NULL, NULL, NULL, :files, 0, :calls, "
+                ":limit, :input_tokens, :output_tokens, 0, :change_class)",
                 {
                     "id": task_id,
                     "owner": owner_id,
@@ -797,10 +808,12 @@ class TaskStore:
                     "limit": MODEL_CALLS_LIMIT,
                     "input_tokens": outcome.input_tokens,
                     "output_tokens": outcome.output_tokens,
+                    "change_class": outcome.change_class.value,
                 },
             )
             self.record_event(
-                conn, task_id, TaskEventType.task_created, {"title": title, "profile": profile.value}
+                conn, task_id, TaskEventType.task_created,
+                {"title": title, "profile": profile.value, "change_class": outcome.change_class.value},
             )
             if not outcome.accepted:
                 self.record_event(conn, task_id, TaskEventType.task_rejected, {"reason": outcome.reason})

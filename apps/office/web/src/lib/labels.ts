@@ -1,5 +1,6 @@
 import type {
   AgentRole,
+  Contour,
   FailureKind,
   ModelProfile,
   ReleaseDecision,
@@ -87,6 +88,8 @@ export const EVENT_TYPE_LABELS: Record<TaskEventType, string> = {
   release_unblocked: 'Блокировка снята',
   external_publish: 'Публикация вне офиса',
   rework_started: 'Доработка после отката',
+  owner_review_requested: 'Ждёт одобрения владельца',
+  owner_review: 'Отзыв владельца',
 }
 
 export const FAILURE_KIND_LABELS: Record<FailureKind, string> = {
@@ -95,6 +98,12 @@ export const FAILURE_KIND_LABELS: Record<FailureKind, string> = {
   deploy_failed: 'Деплой выпуска на Render не выполнен.',
   verify_failed: 'Проверка после деплоя не пройдена, выпуск откатан.',
   rolled_back: 'Выпуск откатан администратором.',
+  owner_rejected: 'Владелец отклонил PR, PR закрыт.',
+}
+
+export const CONTOUR_LABELS: Record<Contour, string> = {
+  ui: 'Интерфейс',
+  server: 'Сервер',
 }
 
 export function failureLabel(task: Task): string | null {
@@ -118,6 +127,7 @@ export const CHECKLIST_LABELS: Record<string, string> = {
   system_messages: 'Скрытие системных сообщений',
   sent_text: 'Изменение отправляемого текста',
   third_party_code: 'Скопированный сторонний код',
+  models: 'Выбор моделей, маршрутизация, уровни усилий, лимиты',
 }
 
 export const CHECK_STATUS_LABELS: Record<string, string> = {

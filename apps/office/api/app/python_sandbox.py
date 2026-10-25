@@ -7,10 +7,22 @@ import shutil
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
-from app.sandbox import MARKER, CappedLog, Sandbox, SandboxError, mount
+from app.sandbox import (
+    API_COMPAT,
+    API_TEST,
+    API_TEST_COMMAND,
+    COMPAT_COMMANDS,
+    JUNIT_SUFFIX,
+    MARKER,
+    CappedLog,
+    Sandbox,
+    SandboxError,
+    mount,
+)
 from app.schemas import CheckResult, TaskEventType
 
 logger = logging.getLogger("office.python_sandbox")
@@ -18,9 +30,9 @@ logger = logging.getLogger("office.python_sandbox")
 PYTHON_SANDBOX_IMAGE = "office-python-sandbox:p5"
 POSTGRES_IMAGE = "postgres:16-alpine"
 INSTALL_STEP = "api-install"
-TEST_STEP = "api-test"
+TEST_STEP = API_TEST
 INSTALL_COMMAND = "uv sync --locked --no-install-project"
-TEST_COMMAND = "python -m pytest -p no:cacheprovider"
+TEST_COMMAND = API_TEST_COMMAND
 TEST_ARGS = ("sandbox-python-step", "test")
 INSTALL_TIMEOUT = 600
 TEST_TIMEOUT = 900
@@ -32,6 +44,17 @@ PG_CPUS = "1"
 PG_PIDS = 256
 TEST_DATABASE_URL = "postgresql://vibe:vibe@postgres:5432/vibe_test"
 LOCK_FILES = ("pyproject.toml", "uv.lock")
+JUNIT_NAME = JUNIT_SUFFIX
+COMPAT_STEP = API_COMPAT
+COMPAT_BASE, COMPAT_SCHEMA, COMPAT_RETEST = COMPAT_COMMANDS
+APPLY_SCHEMA = (
+    "import os, sys, psycopg\n"
+    "with psycopg.connect(os.environ['TEST_DATABASE_URL'], autocommit=True) as conn:\n"
+    "    conn.execute(open(sys.argv[1], encoding='utf-8').read())\n"
+)
+LOCK_STEP = "lock-python"
+LOCK_COMMAND = "uv lock"
+LOCK_TIMEOUT = 600
 
 
 def env_files(root: Path) -> list[str]:
@@ -90,8 +113,10 @@ class PythonSandbox:
             for item in output.getvalue().decode("utf-8", "replace").split():
                 self.sandbox._docker(*removal, item, timeout=30)
 
-    def run_api_tests(self, task_id: str, src: Path, context: dict[str, str] | None = None) -> list[CheckResult]:
-        return self._run_api_tests(task_id, src, context)
+    def run_api_tests(
+        self, task_id: str, src: Path, context: dict[str, str] | None = None, *, junit: bool = False
+    ) -> list[CheckResult]:
+        return self._run_api_tests(task_id, src, context, junit=junit)
 
     def _run_api_tests(
         self,
@@ -99,6 +124,8 @@ class PythonSandbox:
         src: Path,
         context: dict[str, str] | None = None,
         command: list[str] | None = None,
+        *,
+        junit: bool = False,
     ) -> list[CheckResult]:
         self.sandbox.check_cancelled(task_id)
         self.require_images()
@@ -108,7 +135,7 @@ class PythonSandbox:
         if install is not None and install.exit_code != 0:
             return checks
         self.sandbox.check_cancelled(task_id)
-        checks.append(self._tests(task_id, src, volume, context, command))
+        checks.append(self._tests(task_id, src, volume, context, command, junit))
         return checks
 
     def volume_ready(self, task_id: str, volume: str) -> bool:
@@ -144,7 +171,7 @@ class PythonSandbox:
                     shutil.copyfile(src / "api" / name, files / name)
                     (files / name).chmod(0o644)
 
-                def install_args(name: str) -> list[str]:
+                def install_args(name: str, out: Path) -> list[str]:
                     args = self.sandbox.base_args(name, network=True)
                     args += mount("bind", files, "/src", readonly=True)
                     args += mount("volume", volume, "/deps", readonly=False)
@@ -195,14 +222,8 @@ class PythonSandbox:
                 raise SandboxError(f"PostgreSQL для тестов API не запустился за {int(PG_WAIT_SECONDS)} с.")
             time.sleep(PG_POLL_SECONDS)
 
-    def _tests(
-        self,
-        task_id: str,
-        src: Path,
-        volume: str,
-        context: dict[str, str] | None,
-        command: list[str] | None,
-    ) -> CheckResult:
+    @contextmanager
+    def _database(self, task_id: str) -> Iterator[str]:
         suffix = os.urandom(4).hex()
         network = f"office-pynet-{task_id}-{suffix}"
         postgres = f"office-{task_id}-pg-{suffix}"
@@ -214,52 +235,143 @@ class PythonSandbox:
             if self.sandbox._docker("start", postgres) != 0:
                 raise SandboxError("Не удалось запустить контейнер PostgreSQL для тестов API.")
             self.wait_postgres(task_id, postgres)
-
-            def test_args(name: str) -> list[str]:
-                args = self.sandbox.base_args(name, network=True)
-                args += ["--network", network]
-                args += ["--env", f"TEST_DATABASE_URL={TEST_DATABASE_URL}", "--env", "PYTHONDONTWRITEBYTECODE=1"]
-                args += mount("bind", src, "/src", readonly=True)
-                args += mount("volume", volume, "/deps", readonly=True)
-                return args + [self.image, *(command or TEST_ARGS)]
-
-            shown = TEST_COMMAND if command is None else shlex.join(command)
-            return self._run(task_id, TEST_STEP, shown, test_args, TEST_TIMEOUT, context)
+            yield network
         finally:
             if self.sandbox._docker("rm", "-f", postgres, timeout=30) != 0:
                 logger.warning("docker rm %s failed", postgres)
             if self.sandbox._docker("network", "rm", network, timeout=30) != 0:
                 logger.warning("docker network rm %s failed", network)
 
+    def _client_args(
+        self, name: str, network: str, src: Path, volume: str, command: list[str], out: Path | None = None
+    ) -> list[str]:
+        args = self.sandbox.base_args(name, network=True)
+        args += ["--network", network]
+        args += ["--env", f"TEST_DATABASE_URL={TEST_DATABASE_URL}", "--env", "PYTHONDONTWRITEBYTECODE=1"]
+        args += mount("bind", src, "/src", readonly=True)
+        args += mount("volume", volume, "/deps", readonly=True)
+        if out is not None:
+            args += mount("bind", out, "/out", readonly=False)
+        return args + [self.image, *command]
+
+    def _tests(
+        self,
+        task_id: str,
+        src: Path,
+        volume: str,
+        context: dict[str, str] | None,
+        command: list[str] | None,
+        junit: bool = False,
+    ) -> CheckResult:
+        with self._database(task_id) as network:
+            shown = TEST_COMMAND if command is None else shlex.join(command)
+            argv = [*(command or TEST_ARGS), *([f"--junitxml=/out/{JUNIT_NAME}"] if junit else [])]
+            return self._run(
+                task_id, TEST_STEP, shown,
+                lambda name, out: self._client_args(name, network, src, volume, argv, out if junit else None),
+                TEST_TIMEOUT, context,
+            )
+
+    def api_compat(
+        self, task_id: str, base_src: Path, task_src: Path, context: dict[str, str] | None = None
+    ) -> list[CheckResult]:
+        self.sandbox.check_cancelled(task_id)
+        self.require_images()
+        self.check_source(base_src)
+        self.check_source(task_src)
+        volume, install = self.ensure_deps(task_id, base_src, context)
+        checks = [] if install is None else [install]
+        if install is not None and install.exit_code != 0:
+            return checks
+        steps = (
+            (COMPAT_BASE, base_src, list(TEST_ARGS)),
+            (COMPAT_SCHEMA, task_src, ["/deps/venv/bin/python", "-c", APPLY_SCHEMA, "/src/api/app/schema.sql"]),
+            (COMPAT_RETEST, base_src, list(TEST_ARGS)),
+        )
+        with self._database(task_id) as network:
+            for shown, src, argv in steps:
+                self.sandbox.check_cancelled(task_id)
+                result = self._run(
+                    task_id, COMPAT_STEP, shown,
+                    lambda name, out, src=src, argv=argv: self._client_args(name, network, src, volume, argv),
+                    TEST_TIMEOUT, context,
+                )
+                checks.append(result)
+                if result.exit_code != 0:
+                    break
+        return checks
+
+    def lock(self, task_id: str, root: Path) -> CheckResult:
+        self.sandbox.check_cancelled(task_id)
+        self.require_images()
+        api = root / "api"
+        files = Path(tempfile.mkdtemp(dir=self.sandbox.workspace.root, prefix=".pylock-"))
+        try:
+            files.chmod(0o755)
+            for name in LOCK_FILES:
+                shutil.copyfile(api / name, files / name)
+                (files / name).chmod(0o644)
+
+            def lock_args(name: str, out: Path) -> list[str]:
+                args = self.sandbox.base_args(name, network=True)
+                args += mount("bind", files, "/src", readonly=True)
+                args += mount("bind", out, "/out", readonly=False)
+                return args + [self.image, "sandbox-python-step", "lock"]
+
+            def keep(out: Path) -> None:
+                result = out / "uv.lock"
+                if result.is_symlink() or not result.is_file():
+                    raise SandboxError("Шаг lock не вернул uv.lock.")
+                if result.stat().st_size > self.sandbox.workspace.paths.max_lock_bytes:
+                    raise SandboxError("uv.lock больше допустимого размера lock-файла.")
+                shutil.copyfile(result, api / "uv.lock")
+
+            return self._run(task_id, LOCK_STEP, LOCK_COMMAND, lock_args, LOCK_TIMEOUT, None, keep)
+        finally:
+            shutil.rmtree(files, ignore_errors=True)
+
     def _run(
         self,
         task_id: str,
         step: str,
         command: str,
-        build_args: Callable[[str], list[str]],
+        build_args: Callable[[str, Path], list[str]],
         timeout: float,
         context: dict[str, str] | None,
+        keep: Callable[[Path], None] | None = None,
     ) -> CheckResult:
         task_dir = self.sandbox.artifacts_dir / task_id
         number = self.sandbox._next_number(task_dir, step)
         name = f"office-{task_id}-{step}-{number}"
         log_name = f"{step}-{number}.log"
-        args = build_args(name)
-        started = time.monotonic()
+        names = [log_name]
+        out = Path(tempfile.mkdtemp(dir=self.sandbox.workspace.root, prefix=".pyout-"))
         try:
-            with open(task_dir / log_name, "wb") as file:
-                log = CappedLog(file, self.sandbox.policy.log_bytes)
-                exit_code = self.sandbox._container(task_id, name, args, timeout, log)
-                if log.truncated:
-                    file.write("\n[журнал обрезан]\n".encode())
+            out.chmod(0o777)
+            args = build_args(name, out)
+            started = time.monotonic()
+            try:
+                with open(task_dir / log_name, "wb") as file:
+                    log = CappedLog(file, self.sandbox.policy.log_bytes)
+                    exit_code = self.sandbox._container(task_id, name, args, timeout, log)
+                    if log.truncated:
+                        file.write("\n[журнал обрезан]\n".encode())
+            finally:
+                self.sandbox._docker("rm", "-f", name, timeout=30)
+            duration_ms = int((time.monotonic() - started) * 1000)
+            junit = out / JUNIT_NAME
+            if junit.is_file() and not junit.is_symlink() and junit.stat().st_size <= self.sandbox.policy.artifact_bytes:
+                names.append(f"{step}-{number}-{JUNIT_NAME}")
+                shutil.copyfile(junit, task_dir / names[-1])
+            if exit_code == 0 and keep is not None:
+                keep(out)
         finally:
-            self.sandbox._docker("rm", "-f", name, timeout=30)
-        duration_ms = int((time.monotonic() - started) * 1000)
+            shutil.rmtree(out, ignore_errors=True)
         result = CheckResult(
             command=command,
             exit_code=exit_code,
             duration_ms=duration_ms,
-            artifact_urls=[f"/api/tasks/{task_id}/artifacts/{log_name}"],
+            artifact_urls=[f"/api/tasks/{task_id}/artifacts/{item}" for item in names],
         )
         payload = {"command": command, "exit_code": exit_code, "duration_ms": duration_ms, "step": step}
         self.sandbox.store.add_event(

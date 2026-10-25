@@ -19,8 +19,21 @@ export type TaskStatus = (typeof TASK_STATUSES)[number]
 
 export const SLOT_STATUSES: readonly TaskStatus[] = ['awaiting_spec_approval', 'developing', 'reviewing']
 
-export const FAILURE_KINDS = ['checks_failed', 'pr_rejected', 'deploy_failed', 'verify_failed', 'rolled_back'] as const
+export const FAILURE_KINDS = [
+  'checks_failed',
+  'pr_rejected',
+  'deploy_failed',
+  'verify_failed',
+  'rolled_back',
+  'owner_rejected',
+] as const
 export type FailureKind = (typeof FAILURE_KINDS)[number]
+
+export const CHANGE_CLASSES = ['frontend_ui', 'backend_api'] as const
+export type ChangeClass = (typeof CHANGE_CLASSES)[number]
+
+export const CONTOURS = ['ui', 'server'] as const
+export type Contour = (typeof CONTOURS)[number]
 
 export const SLOTS_TOTAL = 3
 
@@ -55,6 +68,8 @@ export const TASK_EVENT_TYPES = [
   'release_unblocked',
   'external_publish',
   'rework_started',
+  'owner_review_requested',
+  'owner_review',
 ] as const
 export type TaskEventType = (typeof TASK_EVENT_TYPES)[number]
 
@@ -145,6 +160,14 @@ export interface PullRequestReview {
   required_changes: string[]
   checklist: PullRequestReviewItem[]
   created_at: string
+  owner_summary: string | null
+}
+
+export interface OwnerReview {
+  state: 'requested' | 'approved' | 'changes_requested'
+  head_sha: string
+  login: string | null
+  comment: string | null
 }
 
 export interface Task {
@@ -177,6 +200,9 @@ export interface Task {
   rework_count: number
   rework_limit: number
   rework_reason: string | null
+  change_class: ChangeClass
+  contour: Contour | null
+  owner_review: OwnerReview | null
 }
 
 export interface TaskEvent {
@@ -278,6 +304,8 @@ export interface RevertResult {
   attempt: number
   tree: string | null
   targets?: RevertTarget[]
+  contour?: Contour | null
+  owner_review?: OwnerReview | null
 }
 
 export interface RevertTarget {

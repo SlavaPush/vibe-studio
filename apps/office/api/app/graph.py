@@ -12,15 +12,22 @@ from langgraph.types import interrupt
 from app.branch_check import WorkspaceError
 from app.config import APP_DIR
 from app.db import utcnow
+from app.branch_check import PACKAGE_JSON, PYPROJECT
 from app.roles import (
     CRITIC,
+    CRITIC_API,
     DEVELOPER,
+    DEVELOPER_API,
     QA,
+    QA_API,
     QA_API_FILES,
+    QA_PYTEST_DIR,
+    QA_PYTEST_FILES,
     QA_TEST_DIR,
     RESEARCH_NOTES,
     RESEARCH_PLAN,
     SUPERVISOR,
+    SUPERVISOR_API,
     Action,
     CriticReview,
     Entry,
@@ -34,7 +41,7 @@ from app.roles import (
 )
 from app.research import FetchError, fetch_public
 from app.sandbox import SandboxError, StepDenied, unmocked_reason, unmocked_requests
-from app.schemas import AgentRole, Task, TaskEventType, TaskStatus
+from app.schemas import AgentRole, ChangeClass, CheckResult, Task, TaskEventType, TaskStatus
 from app.tools import ToolOutcome, WorkspaceTools
 
 if TYPE_CHECKING:
@@ -59,6 +66,15 @@ TEST_ERROR_HINT = (
     "имени ({ exact: true }) или через getByLabel с точным текстом; не обращайтесь к элементам, которых нет в подмене; "
     "ждите видимого состояния через expect. На исходной версии тест должен падать утверждением expect, а не ошибкой локатора."
 )
+PASSED_ON_BASE_API = "Тест прошёл на исходной версии сервера. Он должен проверять новое поведение и не проходить без изменений разработчика."
+PYTEST_ERROR_HINT = (
+    "Исправьте тест: используйте фикстуры и подделки провайдеров из tests/conftest.py, не обращайтесь к сети и "
+    "проверяйте поведение через assert. На исходной версии тест должен падать утверждением assert, а не ошибкой "
+    "импорта, фикстуры или кода теста."
+)
+SERVER_DIRS = (f"{APP_DIR}/api/app/", f"{APP_DIR}/contracts/")
+LOCK_COMMIT = "Обновление lock-файлов зависимостей"
+LOCK_FILES = {PACKAGE_JSON: f"{APP_DIR}/web/package-lock.json", PYPROJECT: f"{APP_DIR}/api/uv.lock"}
 
 
 class Stopped(Exception):
@@ -82,6 +98,7 @@ class State(TypedDict, total=False):
     qa_findings: list[dict[str, Any]]
     critic_findings: list[dict[str, Any]]
     fix: bool
+    lock_check: dict[str, Any] | None
 
 
 def spec_hash(body: dict[str, Any]) -> str:
@@ -98,8 +115,12 @@ def at_line(line: int | None) -> str:
     return f" (строка {line})" if line else ""
 
 
-def error_feedback(message: str, line: int | None, version: str) -> str:
-    return f"Тест QA завершился ошибкой до проверки утверждения на {version}{at_line(line)}:\n{message}\n\n{TEST_ERROR_HINT}"
+def error_feedback(message: str, line: int | None, version: str, hint: str = TEST_ERROR_HINT) -> str:
+    return f"Тест QA завершился ошибкой до проверки утверждения на {version}{at_line(line)}:\n{message}\n\n{hint}"
+
+
+def backend(task: Task) -> bool:
+    return task.change_class == ChangeClass.backend_api
 
 
 def recheck_feedback(message: str, line: int | None) -> str:
@@ -210,16 +231,22 @@ class TaskGraph:
             artifact=name,
         )
 
-    def listing(self) -> str:
+    def listing(self, prefixes: tuple[str, ...] = (f"{APP_DIR}/web/src/",)) -> str:
         path = self.workspace.task_worktree(self.task_id)
         files = [
             name for name in self.workspace.tracked_files(path)
-            if name.startswith(f"{APP_DIR}/web/src/") and self.workspace.paths.readable(name)
+            if name.startswith(prefixes) and self.workspace.paths.readable(name)
         ]
         lines = files[:LISTING_LIMIT]
         if len(files) > LISTING_LIMIT:
             lines.append(f"... ещё {len(files) - LISTING_LIMIT} файлов")
         return "\n".join(lines)
+
+    def file_entries(self, task: Task) -> list[Entry]:
+        entries = [Entry("Файлы apps/chat/web/src", self.listing())]
+        if backend(task):
+            entries.append(Entry("Файлы apps/chat/api/app и apps/chat/contracts", self.listing(SERVER_DIRS)))
+        return entries
 
     def spec_entries(self, task: Task) -> list[Entry]:
         assert task.spec is not None
@@ -357,13 +384,9 @@ class TaskGraph:
         if task.status != S.awaiting_spec_approval:
             raise Stopped("developing without spec")
         self.started(AgentRole.supervisor, "spec")
-        fixed = [
-            Entry("Текст задачи участника", task.text, required=True),
-            Entry("Файлы apps/chat/web/src", self.listing()),
-        ]
-        draft = self.ask(
-            AgentRole.supervisor, "spec", SUPERVISOR, fixed, [], SpecDraft, S.awaiting_spec_approval
-        )
+        fixed = [Entry("Текст задачи участника", task.text, required=True), *self.file_entries(task)]
+        system = SUPERVISOR_API if backend(task) else SUPERVISOR
+        draft = self.ask(AgentRole.supervisor, "spec", system, fixed, [], SpecDraft, S.awaiting_spec_approval)
         self.finished(
             AgentRole.supervisor, "spec", "ok", f"Требования: {len(draft.acceptance_criteria)} критериев приёмки."
         )
@@ -377,6 +400,7 @@ class TaskGraph:
         base = [
             Entry("Текст задачи участника", task.text, required=True),
             Entry("Вопросы исследования", questions, required=True),
+            *(self.file_entries(task)[1:] if backend(task) else []),
         ]
         plan = self.ask(
             AgentRole.researcher, "research_plan", RESEARCH_PLAN, base, [], ResearchPlan, S.awaiting_spec_approval
@@ -454,16 +478,57 @@ class TaskGraph:
             "round_base_sha": self.workspace.head(self.task_id),
         }
 
+    def manifests_hash(self, sha: str) -> str:
+        digest = hashlib.sha256()
+        for rel in (PACKAGE_JSON, PYPROJECT):
+            data = self.workspace.file_at(sha, rel) or b""
+            digest.update(f"{rel}\0{len(data)}\0".encode())
+            digest.update(data)
+        return digest.hexdigest()
+
+    def lock_files(self, task: Task, marker: str) -> State:
+        head = self.workspace.head(self.task_id)
+        done: State = {"dev_sha": head, "check_feedback": "", "lock_check": None}
+        reference = self.workspace.last_commit_by(self.task_id, task.base_sha, "office") or task.base_sha
+        stale = [
+            rel for rel in (PACKAGE_JSON, PYPROJECT)
+            if self.workspace.file_at(head, rel) != self.workspace.file_at(reference, rel)
+        ]
+        if not stale:
+            return done
+        root = self.workspace.task_worktree(self.task_id)
+        self.guard(S.developing)
+        touched: list[str] = []
+        for rel in stale:
+            if self.workspace.file_at(head, rel) == self.workspace.file_at(task.base_sha, rel):
+                self.workspace.git("checkout", task.base_sha, "--", LOCK_FILES[rel], cwd=root)
+                touched.append(LOCK_FILES[rel])
+                continue
+            if rel == PACKAGE_JSON:
+                result = self.sandbox.lock_node(self.task_id, root)
+            else:
+                result = self.sandbox.python.lock(self.task_id, root / APP_DIR)
+            if result.exit_code != 0:
+                if touched:
+                    self.workspace.git("checkout", "HEAD", "--", *touched, cwd=root)
+                return done | {"lock_check": result.model_dump()}
+            touched.append(LOCK_FILES[rel])
+        self.guard(S.developing)
+        digest = self.manifests_hash(head)
+        message = f"{LOCK_COMMIT}\n\nOffice-Role: office\nOffice-Round: {marker}\nOffice-Manifests: {digest}"
+        sha = self.workspace.commit(self.task_id, message)
+        return done | {"dev_sha": sha or head}
+
     def develop(self, state: State) -> State:
         task = self.guard(S.developing)
         marker = f"{self.attempt}-{state['dev_round']}"
         head = self.workspace.head(self.task_id)
         if (
             head != state["round_base_sha"]
-            and self.workspace.trailer(self.task_id, head, "Office-Role") == "developer"
+            and self.workspace.trailer(self.task_id, head, "Office-Role") in ("developer", "office")
             and self.workspace.trailer(self.task_id, head, "Office-Round") == marker
         ):
-            return {"dev_sha": head, "check_feedback": ""}
+            return self.lock_files(task, marker)
         self.started(AgentRole.developer, "implement")
         fixed = self.spec_entries(task) + self.rework_entries(task)
         findings = state.get("findings") or []
@@ -471,8 +536,9 @@ class TaskGraph:
             fixed.append(Entry("Замечания QA и критика", json.dumps(findings, ensure_ascii=False, indent=1), required=True))
         if state.get("check_feedback"):
             fixed.append(Entry("Результат проверок прошлой версии", state["check_feedback"]))
-        fixed.append(Entry("Файлы apps/chat/web/src", self.listing()))
-        reply = self.turns(AgentRole.developer, "implement", DEVELOPER, fixed, Turn, DEV_TURNS, S.developing)
+        fixed += self.file_entries(task)
+        system = DEVELOPER_API if backend(task) else DEVELOPER
+        reply = self.turns(AgentRole.developer, "implement", system, fixed, Turn, DEV_TURNS, S.developing)
         self.guard(S.developing)
         sha = self.workspace.commit(
             self.task_id, commit_message(reply.summary, AgentRole.developer, marker), AgentRole.developer
@@ -482,16 +548,21 @@ class TaskGraph:
             if sha == task.base_sha:
                 self.halt(AgentRole.developer, "implement", "Разработчик не изменил файлы.")
             self.finished(AgentRole.developer, "implement", "ok", "Новых изменений нет, проверяется текущая версия ветки.")
-            return {"dev_sha": sha, "check_feedback": ""}
+            return self.lock_files(task, marker)
         self.finished(AgentRole.developer, "implement", "ok", reply.summary or "Изменения зафиксированы.")
-        return {"dev_sha": sha, "check_feedback": ""}
+        return self.lock_files(task, marker)
 
     def verify(self, state: State) -> State:
+        task = self.guard(S.developing)
+        if state.get("lock_check"):
+            checks = [CheckResult.model_validate(state["lock_check"])]
+        else:
+            checks = self.sandbox.run_suite(
+                self.task_id, state["dev_sha"], state["dev_sha"], change_class=task.change_class
+            ).checks
         self.guard(S.developing)
-        report = self.sandbox.run_suite(self.task_id, state["dev_sha"], state["dev_sha"])
-        self.guard(S.developing)
-        summary = "\n".join(f"{check.command}: код выхода {check.exit_code}" for check in report.checks)
-        failed = [check for check in report.checks if check.exit_code != 0]
+        summary = "\n".join(f"{check.command}: код выхода {check.exit_code}" for check in checks)
+        failed = [check for check in checks if check.exit_code != 0]
         if not failed:
             return {"verified": True, "check_summary": summary}
         failures = state.get("verify_failures", 0) + 1
@@ -515,8 +586,10 @@ class TaskGraph:
     def evidence(self, app_sha: str, qa_sha: str, test_file: str) -> Any:
         result = None
         for _ in range(1 + INFRA_RETRIES):
-            self.guard(S.reviewing)
-            report = self.sandbox.run_suite(self.task_id, app_sha, qa_sha, require_e2e=True)
+            task = self.guard(S.reviewing)
+            report = self.sandbox.run_suite(
+                self.task_id, app_sha, qa_sha, require_e2e=True, change_class=task.change_class
+            )
             result = self.sandbox.e2e_result(self.task_id, report, test_file)
             if result.status != "no_evidence":
                 return result
@@ -545,13 +618,22 @@ class TaskGraph:
     def ask_qa(self, task: Task, test_file: str, feedback: str) -> dict[str, Any]:
         fixed = self.spec_entries(task) + self.rework_reason(task) + [Entry("Файл теста QA", test_file, required=True)]
         root = self.workspace.worktree_path(self.task_id)
-        api_files = [rel for rel in QA_API_FILES if (root / rel).is_file()]
+        if backend(task):
+            api_files = [rel for rel in QA_PYTEST_FILES if (root / rel).is_file()]
+            title = "Фикстуры тестов API и контракт API vibe-chat"
+        else:
+            api_files = [rel for rel in QA_API_FILES if (root / rel).is_file()]
+            title = "Контракт API vibe-chat, клиент и примеры ответов"
         if api_files:
-            fixed.append(Entry("Контракт API vibe-chat, клиент и примеры ответов", "\n".join(api_files), required=True))
+            fixed.append(Entry(title, "\n".join(api_files), required=True))
         if feedback:
             fixed.append(Entry("Результат прошлой попытки", feedback, required=True))
-        fixed.append(Entry("Файлы apps/chat/web/src", self.listing()))
-        reply = self.turns(AgentRole.qa, "qa", QA, fixed, QaTurn, QA_TURNS, S.reviewing, test_file)
+        if backend(task):
+            fixed.append(Entry("Файлы apps/chat/api/app и apps/chat/contracts", self.listing(SERVER_DIRS)))
+        else:
+            fixed.append(Entry("Файлы apps/chat/web/src", self.listing()))
+        system = QA_API if backend(task) else QA
+        reply = self.turns(AgentRole.qa, "qa", system, fixed, QaTurn, QA_TURNS, S.reviewing, test_file)
         self.guard(S.reviewing)
         return {
             "summary": reply.summary,
@@ -586,15 +668,17 @@ class TaskGraph:
         qa_sha = qa_state["qa_sha"]
         base = self.evidence(task.base_sha, qa_sha, test_file)
         if base.status == "passed":
-            return PASSED_ON_BASE, f"Тест QA проходит на исходной версии {QA_EXHAUSTED}.", None
+            passed = PASSED_ON_BASE_API if backend(task) else PASSED_ON_BASE
+            return passed, f"Тест QA проходит на исходной версии {QA_EXHAUSTED}.", None
         after = base if base.status in ("invalid", "test_error") else self.evidence(qa_sha, qa_sha, test_file)
         if after.status == "invalid":
             return after.reason, f"Тест QA обращается к API vibe-chat без подмены {QA_EXHAUSTED}.", None
         if after.status == "test_error":
             version = "исходной версии" if after is base else "версии задачи"
             first = (after.message.splitlines() or [""])[0][:200]
+            hint = PYTEST_ERROR_HINT if backend(task) else TEST_ERROR_HINT
             return (
-                error_feedback(after.message, after.line, version),
+                error_feedback(after.message, after.line, version, hint),
                 f"Тест QA завершается ошибкой до проверки утверждения {QA_EXHAUSTED}: {first}",
                 None,
             )
@@ -609,7 +693,7 @@ class TaskGraph:
         task = self.guard(S.reviewing)
         cycle = task.fix_cycles
         marker = f"{self.attempt}-{state['dev_round']}"
-        test_file = f"{QA_TEST_DIR}/{self.task_id}.pw.ts"
+        test_file = f"{QA_PYTEST_DIR}/test_{self.task_id}.py" if backend(task) else f"{QA_TEST_DIR}/{self.task_id}.pw.ts"
         path = self.settings.artifacts_dir / self.task_id / f"qa-state-{marker}.json"
         qa_state = self.load_qa_state(path) or {
             "qa_try": 1, "phase": "start", "feedback": "", "recheck_used": False, "pending": None
@@ -674,8 +758,10 @@ class TaskGraph:
         fixed = self.spec_entries(task) + self.rework_reason(task) + [
             Entry("Отчёт проверок", state.get("check_summary", ""), required=True),
             Entry("Diff изменений", diff),
+            *(self.file_entries(task)[1:] if backend(task) else []),
         ]
-        review = self.ask(AgentRole.critic, "review", CRITIC, fixed, [], CriticReview, S.reviewing)
+        system = CRITIC_API if backend(task) else CRITIC
+        review = self.ask(AgentRole.critic, "review", system, fixed, [], CriticReview, S.reviewing)
         findings = [
             Finding(id=f"critic-{cycle}-{index}", source="critic", **item.model_dump()).model_dump()
             for index, item in enumerate(review.findings, 1)

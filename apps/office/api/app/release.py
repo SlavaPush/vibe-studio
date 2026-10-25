@@ -1,6 +1,7 @@
 import json
 import logging
 import threading
+import tomllib
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -10,8 +11,8 @@ from typing import Any
 import httpx
 from pydantic import BaseModel
 
-from app.branch_check import WorkspaceError
-from app.config import Settings
+from app.branch_check import PACKAGE_JSON, PYPROJECT, SCHEMA_SQL, NPM_SECTIONS, WorkspaceError
+from app.config import APP_DIR, Settings
 from app.db import Connection, from_text, to_text, utcnow
 from app.github import ACTIONS_APP_ID, GitHubClient, GitHubError, GitHubUnavailable
 from app.models_gateway import InvalidModelResponse, ModelsGateway, ProviderError
@@ -20,12 +21,15 @@ from app.release_queue import QueueBusy, ReleaseQueue, fixed_targets, targets_of
 from app.render import RenderClient, RenderError, RenderUnavailable
 from app.required_checks import RequiredCheck
 from app.roles import CHECKLIST, PR_REVIEWER, ContextTooLarge, Entry, PrReview, assemble
-from app.sandbox import SUITE, CommandsPolicy, SandboxCancelled, SandboxError
+from app.sandbox import CommandsPolicy, SandboxCancelled, SandboxError, suite_commands, suite_steps
 from app.schemas import (
     AgentRole,
+    ChangeClass,
     CheckReport,
+    Contour,
     Decision,
     FailureKind,
+    OwnerReview,
     Participant,
     PullRequestCheck,
     PullRequestChecks,
@@ -61,6 +65,12 @@ CLOSE_PR = "close_pr"
 PR_REVIEW = "pr_review"
 MERGE_PR = "merge_pr"
 REVERT = "revert"
+OWNER_SUMMARY = "owner_summary"
+DEPENDENCY_FILES = (PACKAGE_JSON, f"{APP_DIR}/web/package-lock.json", PYPROJECT, f"{APP_DIR}/api/uv.lock")
+SCHEMA_ONLY = (
+    "изменение затрагивает только схему БД; проверьте текущий main и снимите блокировку решением "
+    "resume_releases с fix_sha"
+)
 INTEGRATION_OPS = frozenset({PUSH, CREATE_PR, CLOSE_PR, PR_REVIEW, MERGE_PR})
 MAX_ATTEMPTS = 3
 STEPS_PER_PASS = 8
@@ -92,10 +102,19 @@ class Carrier:
     merge_sha: str | None
     checks: PullRequestChecks | None
     release_id: str | None = None
+    change_class: ChangeClass | None = None
+    owner_review: OwnerReview | None = None
 
     @property
     def branch(self) -> str:
         return branch_name(self.tree)
+
+    @property
+    def awaiting_owner(self) -> bool:
+        return (
+            not self.merge_sha and self.owner_review is not None and self.owner_review.state == "requested"
+            and self.owner_review.head_sha == self.head_sha
+        )
 
 
 def task_carrier(task: Task) -> Carrier:
@@ -103,7 +122,7 @@ def task_carrier(task: Task) -> Carrier:
     return Carrier(
         id=tree, task_id=task.id, tree=tree, title=task.title, base_sha=task.base_sha,
         head_sha=task.head_sha, pr_number=task.pr_number, pr_url=task.pr_url, merge_sha=task.merge_sha,
-        checks=task.checks,
+        checks=task.checks, change_class=task.change_class, owner_review=task.owner_review,
     )
 
 
@@ -117,7 +136,7 @@ def revert_carrier(release: ReleaseCandidate, task: Task) -> Carrier:
         id=revert_id(release.id, revert.attempt), task_id=release.task_id, tree=revert.tree or f"revert-{release.id}",
         title=f"Revert: {task.title}"[:120], base_sha=revert.base_sha, head_sha=revert.head_sha,
         pr_number=revert.pr_number, pr_url=revert.pr_url, merge_sha=revert.fix_sha, checks=revert.checks,
-        release_id=release.id,
+        release_id=release.id, owner_review=revert.owner_review,
     )
 
 
@@ -396,11 +415,18 @@ class ReleaseWorker:
             commits = sorted(picked.values(), key=lambda item: order.get(item[0], len(order)))
             self._fail_targets(found)
             base, head = self.workspace.revert_branch(tree, commits)
+            empty = not self.workspace.changed_names(tree, base, head)
         except WorkspaceError as error:
             with self.store.db.locked_transaction() as conn:
                 self.ops.finish(conn, operation, OpStatus.failed, detail=str(error)[:300])
                 self._save_in(conn, c, targets=covered())
                 self._halt_in(conn, c, f"Revert откатанного выпуска не создан: {error}", step=REVERT)
+            return False
+        if empty:
+            with self.store.db.locked_transaction() as conn:
+                self.ops.finish(conn, operation, OpStatus.failed, detail="schema only")
+                self._save_in(conn, c, targets=covered())
+                self._halt_in(conn, c, SCHEMA_ONLY, step=REVERT)
             return False
         updated = covered()
         with self.store.db.locked_transaction() as conn:
@@ -540,7 +566,7 @@ class ReleaseWorker:
 
     def _push(self, c: Carrier, head: str) -> bool:
         try:
-            found = self.workspace.verify_branch(c.tree, c.base_sha)
+            found = self.workspace.verify_branch(c.tree, c.base_sha, c.change_class)
         except WorkspaceError as error:
             found = [str(error)]
         if found:
@@ -642,7 +668,8 @@ class ReleaseWorker:
 
     def _review(self, c: Carrier) -> bool:
         try:
-            found = self.workspace.verify_branch(c.tree, c.base_sha)
+            found = self.workspace.verify_branch(c.tree, c.base_sha, c.change_class)
+            contour = self._contour(c)
         except WorkspaceError as error:
             found = [str(error)]
         if found:
@@ -650,12 +677,151 @@ class ReleaseWorker:
         with self.store.db.connection() as conn:
             review = self.store.load_review(conn, c.task_id, c.head_sha)
         if review is None:
-            return self._ask_reviewer(c)
+            return self._ask_reviewer(c, contour)
         if review.verdict == "reject":
+            return self._close(c)
+        if contour == Contour.server:
+            return self._owner_gate(c, review)
+        return self._merge(c, review)
+
+    def _contour(self, c: Carrier) -> Contour:
+        contour = self.workspace.paths.contour(self.workspace.changed_names(c.tree, c.base_sha, c.head_sha))
+        current = self._task_contour(c)
+        if current != contour:
+            with self.store.db.locked_transaction() as conn:
+                self._save_in(conn, c, contour=contour if c.release_id else contour.value)
+        return contour
+
+    def _task_contour(self, c: Carrier) -> str | None:
+        if c.release_id is not None:
+            revert = self.store.get_candidate(c.release_id).revert
+            return revert.contour.value if revert and revert.contour else None
+        contour = self.store.get_task(c.task_id).contour
+        return contour.value if contour else None
+
+    def _owner_gate(self, c: Carrier, review: PullRequestReview) -> bool:
+        if not c.awaiting_owner and not self._owner_answered(c):
+            return self._request_owner(c, review)
+        try:
+            reviews = self.github.reviews(c.pr_number)
+        except (GitHubError, GitHubUnavailable) as error:
+            logger.warning("owner review of %s is not read: %s", c.id, error)
+            return False
+        login = self.settings.owner_login.lower()
+        owner = [
+            item for item in reviews
+            if str((item.get("user") or {}).get("login", "")).lower() == login
+            and item.get("commit_id") == c.head_sha and item.get("state") in ("APPROVED", "CHANGES_REQUESTED")
+        ]
+        if not owner:
+            return False
+        last = max(owner, key=lambda item: (str(item.get("submitted_at") or ""), int(item.get("id") or 0)))
+        state = "approved" if last["state"] == "APPROVED" else "changes_requested"
+        decided = OwnerReview(
+            state=state, head_sha=c.head_sha, login=str(last["user"]["login"]), comment=str(last.get("body") or "")[:2000]
+        )
+        if c.owner_review != decided:
+            with self.store.db.locked_transaction() as conn:
+                if not self._active_in(conn, c):
+                    return False
+                self._save_in(conn, c, owner_review=decided)
+                self._event(
+                    conn, c, TaskEventType.owner_review,
+                    {"pr_number": c.pr_number, "head_sha": c.head_sha, "state": state, "login": decided.login},
+                )
+            c = self._reload(c)
+        if state == "changes_requested":
             return self._close(c)
         return self._merge(c, review)
 
-    def _ask_reviewer(self, c: Carrier) -> bool:
+    def _owner_answered(self, c: Carrier) -> bool:
+        return (
+            not c.merge_sha and c.owner_review is not None and c.owner_review.head_sha == c.head_sha
+            and c.owner_review.state != "requested"
+        )
+
+    def _request_owner(self, c: Carrier, review: PullRequestReview) -> bool:
+        if not self._active(c):
+            return False
+        key = f"{OWNER_SUMMARY}:{c.id}:{c.head_sha}"
+        found = self.ops.find(key)
+        if found is not None and found.status == OpStatus.started:
+            self.ops.mark(found, OpStatus.failed, detail="restart")
+        operation, allowed = self.ops.begin(OWNER_SUMMARY, key, c.task_id, c.release_id)
+        if not allowed:
+            if operation.status == OpStatus.succeeded:
+                return self._owner_requested(None, c)
+            return False
+        body = f"{self._body(c)}\n## Сводка для владельца\n\n{review.owner_summary or 'нет данных'}\n"
+        try:
+            self.github.update_pr_body(c.pr_number, body)
+        except GitHubUnavailable:
+            self.ops.mark(operation, OpStatus.failed, detail="unavailable")
+            return False
+        except GitHubError as error:
+            with self.store.db.locked_transaction() as conn:
+                self.ops.finish(conn, operation, OpStatus.failed, detail=f"HTTP {error.status}")
+                if error.status < 500:
+                    self._halt_in(
+                        conn, c, f"GitHub отклонил запись сводки для владельца в PR #{c.pr_number}: HTTP {error.status}.",
+                        step=OWNER_SUMMARY,
+                    )
+            return False
+        return self._owner_requested(operation, c)
+
+    def _owner_requested(self, operation: Operation | None, c: Carrier) -> bool:
+        with self.store.db.locked_transaction() as conn:
+            if operation is not None:
+                self.ops.finish(conn, operation, OpStatus.succeeded, external_ref=str(c.pr_number))
+            if not self._active_in(conn, c):
+                return False
+            self._save_in(conn, c, owner_review=OwnerReview(state="requested", head_sha=c.head_sha))
+            self._event(
+                conn, c, TaskEventType.owner_review_requested,
+                {"pr_number": c.pr_number, "head_sha": c.head_sha, "pr_url": c.pr_url, "login": self.settings.owner_login},
+            )
+        return True
+
+    def _owner_facts(self, c: Carrier) -> str:
+        changed = self.workspace.changed_names(c.tree, c.base_sha, c.head_sha)
+        facts = []
+        files = [path for path in DEPENDENCY_FILES if path in changed]
+        if files:
+            facts.append(f"Изменены манифесты и lock-файлы: {', '.join(files)}.")
+        packages = self._changed_packages(c.base_sha, c.head_sha)
+        if packages:
+            facts.append(
+                f"Новые или изменённые зависимости: {', '.join(packages)}. "
+                "Их install-скрипты выполнялись в шаге установки зависимостей с сетью."
+            )
+        if SCHEMA_SQL in changed:
+            facts.append(
+                f"Изменена схема БД ({SCHEMA_SQL}). Откат Render не возвращает состояние общей БД: "
+                "добавленные таблицы и колонки останутся после отката."
+            )
+        return "\n".join(f"- {fact}" for fact in facts)
+
+    def _changed_packages(self, base: str, head: str) -> list[str]:
+        def python_deps(sha: str) -> list[str]:
+            data = tomllib.loads((self.workspace.file_at(sha, PYPROJECT) or b"").decode("utf-8"))
+            groups = (data.get("dependency-groups") or {}).values()
+            items = [*(data.get("project") or {}).get("dependencies", []), *(item for group in groups for item in group)]
+            return [item for item in items if isinstance(item, str)]
+
+        found = []
+        try:
+            before = json.loads(self.workspace.file_at(base, PACKAGE_JSON) or b"{}")
+            after = json.loads(self.workspace.file_at(head, PACKAGE_JSON) or b"{}")
+            for section in NPM_SECTIONS:
+                known = before.get(section) or {}
+                found += [f"{name}@{value}" for name, value in (after.get(section) or {}).items() if known.get(name) != value]
+            known_python = set(python_deps(base))
+            found += [item for item in python_deps(head) if item not in known_python]
+        except (ValueError, AttributeError, TypeError):
+            return found
+        return found
+
+    def _ask_reviewer(self, c: Carrier, contour: Contour = Contour.ui) -> bool:
         if not self._active(c):
             return False
         operation, allowed = self.ops.begin(PR_REVIEW, f"{PR_REVIEW}:{c.id}:{c.head_sha}", c.task_id, c.release_id)
@@ -670,11 +836,14 @@ class ReleaseWorker:
                 )
         reason = None
         try:
-            user = self._review_input(c)
+            user = self._review_input(c, contour)
             profile = self.store.get_task(c.task_id).profile
             reply = self.gateway.structured(
                 self.store, c.task_id, profile, AgentRole.pr_reviewer, PR_REVIEW, PR_REVIEWER, user, PrReview
             )
+            if contour == Contour.server and reply.verdict == "approve" and not reply.owner_summary.strip():
+                reason = "Агент ревью PR не подготовил сводку для владельца по PR серверного контура; решение не принято, PR открыт."
+            facts = self._owner_facts(c) if contour == Contour.server else ""
         except InvalidModelResponse:
             reason = "Ответ агента ревью PR не соответствует схеме или неполон; решение не принято, PR открыт."
         except ProviderError:
@@ -685,7 +854,10 @@ class ReleaseWorker:
             reason = f"Diff для агента ревью PR не получен: {error}"
         if reason is not None:
             return self._review_failed(c, operation, reason)
-        self._apply_review(operation, c, reply)
+        summary = reply.owner_summary.strip()
+        if facts:
+            summary = f"{summary}\n\nФакты офиса:\n{facts}".strip()
+        self._apply_review(operation, c, reply, summary or None)
         return True
 
     def _review_failed(self, c: Carrier, operation: Operation, reason: str) -> bool:
@@ -694,13 +866,15 @@ class ReleaseWorker:
             self._halt_in(conn, c, reason, step=PR_REVIEW, role=AgentRole.pr_reviewer)
         return False
 
-    def _apply_review(self, operation: Operation, c: Carrier, reply: PrReview) -> None:
+    def _apply_review(self, operation: Operation, c: Carrier, reply: PrReview, summary: str | None = None) -> None:
         review_id = new_id("prv")
         with self.store.db.locked_transaction() as conn:
             conn.execute(
                 "INSERT INTO pr_reviews (id, task_id, head_sha, verdict, reasons, required_changes, checklist, model, "
-                "created_at) VALUES (:id, :task_id, :head, :verdict, :reasons, :changes, :checklist, :model, :now)",
+                "created_at, owner_summary) VALUES (:id, :task_id, :head, :verdict, :reasons, :changes, :checklist, "
+                ":model, :now, :summary)",
                 {
+                    "summary": summary,
                     "id": review_id,
                     "task_id": c.task_id,
                     "head": c.head_sha,
@@ -735,8 +909,14 @@ class ReleaseWorker:
                 summaries[event.role] = str(event.payload.get("summary", ""))
         return summaries
 
-    def _review_input(self, c: Carrier) -> str:
+    def _review_input(self, c: Carrier, contour: Contour = Contour.ui) -> str:
         task = self.store.get_task(c.task_id)
+        scope = Entry(
+            "Контур PR",
+            "server — серверный контур: PR сливается только после одобрения владельца, owner_summary обязателен"
+            if contour == Contour.server else "ui — контур интерфейса: owner_summary — пустая строка",
+            required=True,
+        )
         checks = "\n".join(
             f"{check.name}: {check.status} {check.conclusion or ''}".strip()
             for check in (c.checks.checks if c.checks else [])
@@ -755,6 +935,7 @@ class ReleaseWorker:
                     required=True,
                 ),
                 Entry("Причина отката", reasons, required=True),
+                scope,
                 checks_entry,
                 checklist,
                 Entry(
@@ -777,6 +958,8 @@ class ReleaseWorker:
                     f"{spec.summary}\n\nКритерии приёмки:\n{criteria}" if spec else "нет данных",
                     required=True,
                 ),
+                Entry("Класс задачи", task.change_class.value, required=True),
+                scope,
                 checks_entry,
                 Entry("Итог QA последнего цикла", summaries[AgentRole.qa], required=True),
                 Entry("Итог критика последнего цикла", summaries[AgentRole.critic], required=True),
@@ -947,24 +1130,26 @@ class ReleaseWorker:
 
     def _final_suite(self, c: Carrier) -> CheckReport | None:
         sha = c.merge_sha
-        require = True
-        if c.release_id is not None:
-            try:
-                with self.workspace.lock:
-                    self.workspace.git("fetch", "--quiet", "origin", "main", timeout=NETWORK_TIMEOUT)
-                require = bool(self.workspace.qa_files(sha))
-            except WorkspaceError as error:
-                self._halt(c, f"Итоговый commit {sha[:7]} не получен: {error}")
-                return None
-        commands = [self.commands.steps[name].command for name in SUITE if require or name != "e2e"]
+        try:
+            with self.workspace.lock:
+                self.workspace.git("fetch", "--quiet", "origin", "main", timeout=NETWORK_TIMEOUT)
+            playwright = bool(self.workspace.qa_files(sha))
+            changed = self.workspace.changed_between(f"{sha}^", sha)
+        except WorkspaceError as error:
+            self._halt(c, f"Итоговый commit {sha[:7]} не получен: {error}")
+            return None
+        require = c.release_id is None or playwright
+        if c.release_id is None and c.change_class != ChangeClass.backend_api:
+            playwright = True
+        commands = suite_commands(self.commands, suite_steps(changed, c.change_class, playwright))
         for saved in self.store.check_reports(c.task_id, sha):
             if saved.suite_hash and {check.command for check in saved.checks} >= set(commands):
                 return self._judge(c, saved, commands)
         try:
-            with self.workspace.lock:
-                self.workspace.git("fetch", "--quiet", "origin", "main", timeout=NETWORK_TIMEOUT)
             self.suite.reset_task(c.task_id)
-            report = self.suite.run_suite(c.task_id, sha, sha, require_e2e=require)
+            report = self.suite.run_suite(
+                c.task_id, sha, sha, require_e2e=require, diff_base=f"{sha}^", change_class=c.change_class
+            )
         except (SandboxError, SandboxCancelled, WorkspaceError, OSError) as error:
             self._halt(c, f"Критический E2E итогового commit {sha[:7]} не выполнен: {error}")
             return None
@@ -1231,6 +1416,14 @@ class ReleaseWorker:
             self._event(conn, c, TaskEventType.pr_closed, {"pr_number": current.pr_number})
             if not self._active_in(conn, c):
                 return
+            owner = current.owner_review
+            if owner is not None and owner.state == "changes_requested" and owner.head_sha == current.head_sha:
+                self._halt_in(
+                    conn, c,
+                    f"Владелец {owner.login} отклонил PR #{current.pr_number}: {owner.comment or 'комментарий не указан'}",
+                    step="owner_review", failure_kind=FailureKind.owner_rejected,
+                )
+                return
             review = self.store.load_review(conn, c.task_id, current.head_sha)
             if review is not None and review.verdict == "reject":
                 changes = "; ".join(review.required_changes)
@@ -1313,6 +1506,8 @@ class ReleaseWorker:
         return from_text(row["since"]) if row and row["since"] else None
 
     def _checks_expired(self, c: Carrier) -> bool:
+        if c.awaiting_owner or self._owner_answered(c):
+            return False
         since = self._last_event(
             c.task_id,
             "type IN ('pr_opened', 'pr_merged', 'decision_recorded') OR (type = 'tool_called' AND tool = 'git_push')",

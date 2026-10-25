@@ -128,7 +128,60 @@ describe('TaskCard: PR задачи', () => {
       { item: 'network', ok: false, note: 'Новый fetch к https://example.com.' },
     ],
     created_at: '2026-10-24T10:00:00Z',
+    owner_summary: null,
   }
+
+  const server: Task = {
+    ...integrating,
+    change_class: 'backend_api',
+    contour: 'server',
+    pr_review: {
+      ...rejection,
+      verdict: 'approve',
+      required_changes: [],
+      owner_summary: 'Добавлено поле message_count. Рекомендация: одобрить.',
+    },
+    owner_review: { state: 'requested', head_sha: integrating.head_sha as string, login: null, comment: null },
+  }
+
+  it('показывает контур, сводку для владельца и ожидание одобрения владельца', () => {
+    fakeApi()
+    renderCard(maria, server)
+    expect(screen.getByText('Контур: Сервер')).toBeInTheDocument()
+    const review = screen.getByRole('region', { name: /Решение агента ревью PR/ })
+    expect(within(review).getByText('Сводка для владельца')).toBeInTheDocument()
+    expect(within(review).getByText('Добавлено поле message_count. Рекомендация: одобрить.')).toBeInTheDocument()
+    const owner = screen.getByRole('region', { name: 'Одобрение владельца' })
+    expect(within(owner).getByRole('status')).toHaveTextContent('Ждёт одобрения владельца на GitHub')
+    expect(within(owner).getByRole('link', { name: 'PR #7' })).toHaveAttribute('href', server.pr_url)
+  })
+
+  it('показывает отказ владельца с его комментарием', () => {
+    fakeApi()
+    renderCard(maria, {
+      ...server,
+      status: 'failed',
+      failure_kind: 'owner_rejected',
+      owner_review: {
+        state: 'changes_requested',
+        head_sha: integrating.head_sha as string,
+        login: 'SlavaPush',
+        comment: 'Нужна пагинация',
+      },
+    })
+    expect(screen.getByText('Причина ошибки: Владелец отклонил PR, PR закрыт.')).toBeInTheDocument()
+    const owner = screen.getByRole('region', { name: 'Одобрение владельца' })
+    expect(within(owner).getByText('Комментарий владельца: Нужна пагинация')).toBeInTheDocument()
+    expect(owner).toHaveTextContent('Владелец SlavaPush отклонил')
+    expect(screen.getByRole('button', { name: 'Повторить' })).toBeDisabled()
+  })
+
+  it('задача интерфейса показывает контур интерфейса без блока владельца', () => {
+    fakeApi()
+    renderCard(maria, { ...integrating, contour: 'ui' })
+    expect(screen.getByText('Контур: Интерфейс')).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Одобрение владельца' })).not.toBeInTheDocument()
+  })
 
   it('показывает отказ агента ревью отдельно от отказа фильтра приёма', () => {
     fakeApi()

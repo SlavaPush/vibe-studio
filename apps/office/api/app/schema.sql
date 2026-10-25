@@ -56,7 +56,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     rework_reason TEXT,
     rework_priority BOOLEAN NOT NULL DEFAULT false,
     rework_context TEXT,
-    rework_of TEXT
+    rework_of TEXT,
+    change_class TEXT NOT NULL DEFAULT 'frontend_ui',
+    contour TEXT,
+    owner_review TEXT
 );
 
 CREATE INDEX IF NOT EXISTS tasks_status_created ON tasks (status, created_at);
@@ -130,6 +133,7 @@ CREATE TABLE IF NOT EXISTS pr_reviews (
     checklist TEXT NOT NULL,
     model TEXT NOT NULL,
     created_at TEXT NOT NULL,
+    owner_summary TEXT,
     UNIQUE (task_id, head_sha)
 );
 

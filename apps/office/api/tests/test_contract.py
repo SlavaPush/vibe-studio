@@ -52,6 +52,8 @@ PLAN_EVENT_TYPES = [
     "release_unblocked",
     "external_publish",
     "rework_started",
+    "owner_review_requested",
+    "owner_review",
 ]
 
 

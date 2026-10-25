@@ -72,6 +72,7 @@ class Settings:
     trusted_github_logins: tuple[str, ...] = ("SlavaPush",)
     github_app_slug: str = "vibe-office"
     rework_limit: int = 1
+    owner_login: str = "SlavaPush"
 
     @property
     def github_app_configured(self) -> bool:
@@ -133,4 +134,5 @@ class Settings:
             trusted_github_logins=_list(env.get("OFFICE_TRUSTED_GITHUB_LOGINS"), cls.trusted_github_logins),
             github_app_slug=env.get("OFFICE_GITHUB_APP_SLUG") or cls.github_app_slug,
             rework_limit=int(env.get("OFFICE_REWORK_LIMIT") or cls.rework_limit),
+            owner_login=env.get("OFFICE_OWNER_LOGIN") or cls.owner_login,
         )

@@ -40,6 +40,7 @@
         "strict_required_status_checks_policy": false,
         "do_not_enforce_on_create": false,
         "required_status_checks": [
+          { "context": "chat-api", "integration_id": 15368 },
           { "context": "chat-web", "integration_id": 15368 },
           { "context": "chat-containers", "integration_id": 15368 },
           { "context": "office-paths", "integration_id": 15368 }

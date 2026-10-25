@@ -12,6 +12,15 @@ if [ "$STEP" = install ]; then
   exit 0
 fi
 
+if [ "$STEP" = lock ]; then
+  mkdir -p /work/project
+  cp /src/pyproject.toml /src/uv.lock /work/project/
+  cd /work/project
+  uv lock
+  cp uv.lock /out/uv.lock
+  exit 0
+fi
+
 if [ "$STEP" = test ]; then
   cd /src/api
   exec /deps/venv/bin/python -m pytest -p no:cacheprovider "$@"

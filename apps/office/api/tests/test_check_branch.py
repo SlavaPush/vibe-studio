@@ -7,6 +7,7 @@ import pytest
 from conftest import Origin, git
 
 API_DIR = Path(__file__).resolve().parents[1]
+SCHEMA = b"CREATE TABLE IF NOT EXISTS users (\n    id uuid PRIMARY KEY,\n    source_hash text NOT NULL\n);\n"
 
 
 @pytest.fixture
@@ -14,7 +15,15 @@ def repo(tmp_path):
     return Origin(tmp_path).work
 
 
-def branch(repo: Path, files: dict[str, bytes | None]) -> tuple[str, str]:
+def branch(
+    repo: Path, files: dict[str, bytes | None], start: dict[str, bytes] | None = None
+) -> tuple[str, str]:
+    for rel, content in (start or {}).items():
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_bytes(content)
+        git(repo, "add", rel)
+    if start:
+        git(repo, "commit", "-q", "--no-verify", "-m", "start")
     base = git(repo, "rev-parse", "main")
     git(repo, "switch", "-q", "-c", f"office/tsk_{len(files)}{os.urandom(3).hex()}", base)
     for rel, content in files.items():
@@ -72,7 +81,14 @@ def test_diff_starts_at_merge_base(repo):
         ({".github/workflows/ci.yml": b"name: changed\n"}, ".github/workflows/ci.yml: "),
         ({".github/workflows/office-paths.yml": b"name: new\n"}, ".github/workflows/office-paths.yml: "),
         ({"apps/chat/api/main.py": b"app = 1\n"}, "apps/chat/api/main.py: "),
-        ({"apps/chat/web/src/api/client.ts": b"export {}\n"}, "apps/chat/web/src/api/client.ts: "),
+        ({"apps/chat/api/tests/test_runs.py": b"def test_x():\n    pass\n"}, "apps/chat/api/tests/test_runs.py: "),
+        ({"apps/chat/infra/Dockerfile": b"FROM scratch\n"}, "apps/chat/infra/Dockerfile: "),
+        ({"apps/chat/api/.env": b"KEY=1\n"}, "apps/chat/api/.env: "),
+        ({"apps/chat/web/package.json": b'{"name": "web", "scripts": {"test": "true"}}\n'}, "вне разделов зависимостей"),
+        (
+            {"apps/chat/api/app/schema.sql": SCHEMA + b"ALTER TABLE users DROP COLUMN source_hash;\n"},
+            "неаддитивное изменение схемы",
+        ),
         ({"apps/chat/web/src/App.test.tsx": None}, "apps/chat/web/src/App.test.tsx: "),
         ({"apps/chat/web/src/Quiet.tsx": b"// eslint-disable-next-line\nexport {}\n"}, "eslint-disable"),
         ({"apps/chat/web/src/Bin.ts": b"// \x00\n// @ts-nocheck\nexport {}\n"}, "@ts-nocheck"),
@@ -84,6 +100,24 @@ def test_forbidden_branch_fails(repo, files, expected):
     assert result.returncode == 1
     assert expected in result.stdout
     assert "Fine.tsx" not in result.stdout
+
+
+def test_server_zone_branch_passes(repo):
+    base, head = branch(
+        repo,
+        {
+            "apps/chat/api/app/main.py": b"app = 1\n",
+            "apps/chat/api/app/schema.sql": SCHEMA + b"ALTER TABLE users ADD COLUMN IF NOT EXISTS nickname text;\n",
+            "apps/chat/contracts/api.md": b"# API\n\nnew field\n",
+            "apps/chat/web/src/api/client.ts": b"export {}\n",
+            "apps/chat/web/package.json": b'{"name": "web", "dependencies": {"left-pad": "^1.3.0"}}\n',
+            "apps/chat/web/package-lock.json": b'{"name": "web", "lockfileVersion": 3, "packages": {}}\n' + b" " * 300000,
+            "apps/chat/api/tests/office/test_tsk_1.py": b"def test_new():\n    assert True\n",
+        },
+        start={"apps/chat/api/app/schema.sql": SCHEMA},
+    )
+    result = check(repo, base, head)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_binary_content_is_reported(repo):

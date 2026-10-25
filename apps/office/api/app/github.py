@@ -123,6 +123,21 @@ class GitHubClient:
     def close_pr(self, number: int) -> dict[str, Any]:
         return self._call("PATCH", f"/pulls/{number}", body={"state": "closed"})
 
+    def update_pr_body(self, number: int, body: str) -> dict[str, Any]:
+        return self._call("PATCH", f"/pulls/{number}", body={"body": body})
+
+    def reviews(self, number: int, pages: int = 10) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"per_page": 100}
+        found: list[dict[str, Any]] = []
+        for _ in range(pages):
+            links: dict[str, str] = {}
+            found += self._call("GET", f"/pulls/{number}/reviews", params=params, links=links) or []
+            following = links.get("next")
+            if not following:
+                return found
+            params = dict(httpx.URL(following).params)
+        raise GitHubError("GET", f"/pulls/{number}/reviews", 200)
+
     def merge_pr(self, number: int, sha: str, title: str) -> dict[str, Any]:
         body = {"sha": sha, "merge_method": "squash", "commit_title": title}
         return self._call("PUT", f"/pulls/{number}/merge", body=body)

@@ -1,24 +1,20 @@
 max_file_bytes: 204800
+max_lock_bytes: 2097152
 max_list_entries: 500
 
 deny:
   - apps/office/**
-  - apps/chat/api/**
-  - apps/chat/contracts/**
   - apps/chat/infra/**
+  - apps/chat/api/scripts/**
   - .git
   - .git/**
   - .github/**
   - "**/.env*"
-  - "**/package.json"
-  - "**/package-lock.json"
   - "**/npm-shrinkwrap.json"
   - "**/yarn.lock"
   - "**/pnpm-lock.yaml"
   - "**/bun.lock"
   - "**/bun.lockb"
-  - "**/uv.lock"
-  - "**/pyproject.toml"
   - "**/Dockerfile"
   - "**/docker-compose*.yml"
   - apps/chat/web/vite.config.*
@@ -27,26 +23,57 @@ deny:
   - apps/chat/web/components.json
   - apps/chat/web/.oxlintrc.json
   - apps/chat/web/scripts/**
-  - apps/chat/web/src/api/**
-  - apps/chat/web/src/mocks/**
   - apps/chat/web/src/test/**
   - "**/*.test.*"
   - "**/*.spec.*"
   - "**/migrations/**"
+
+zones:
+  server:
+    - apps/chat/api/**
+    - apps/chat/contracts/**
+    - apps/chat/web/src/api/**
+    - apps/chat/web/src/mocks/**
+    - apps/chat/web/package.json
+    - apps/chat/web/package-lock.json
+    - apps/chat/web/src/components/chat/ModelSelector.tsx
 
 read_deny:
   - .git
   - .git/**
   - "**/.env*"
 
-roles:
-  developer:
-    write:
-      - apps/chat/web/src/**
-      - apps/chat/web/public/**
-      - apps/chat/web/index.html
-    extensions: [.ts, .tsx, .css, .json, .svg, .md, .html]
-  qa:
-    write:
-      - apps/chat/web/e2e/office/**/*.pw.ts
-    extensions: [.ts]
+classes:
+  frontend_ui:
+    developer:
+      write:
+        - apps/chat/web/src/**
+        - apps/chat/web/public/**
+        - apps/chat/web/index.html
+      extensions: [.ts, .tsx, .css, .json, .svg, .md, .html]
+    qa:
+      write:
+        - apps/chat/web/e2e/office/**/*.pw.ts
+      extensions: [.ts]
+  backend_api:
+    developer:
+      write:
+        - apps/chat/web/src/**
+        - apps/chat/web/public/**
+        - apps/chat/web/index.html
+        - apps/chat/web/package.json
+        - apps/chat/api/app/**/*.py
+        - apps/chat/api/app/**/*.sql
+        - apps/chat/api/pyproject.toml
+        - apps/chat/contracts/**/*.md
+      extensions: [.ts, .tsx, .css, .json, .svg, .md, .html, .py, .sql, .toml]
+    qa:
+      write:
+        - apps/chat/api/tests/office/test_*.py
+      extensions: [.py]
+
+office:
+  write:
+    - apps/chat/web/package-lock.json
+    - apps/chat/api/uv.lock
+  extensions: [.json, .lock]

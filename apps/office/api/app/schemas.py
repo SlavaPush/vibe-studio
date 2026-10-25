@@ -52,6 +52,17 @@ class FailureKind(StrEnum):
     deploy_failed = "deploy_failed"
     verify_failed = "verify_failed"
     rolled_back = "rolled_back"
+    owner_rejected = "owner_rejected"
+
+
+class ChangeClass(StrEnum):
+    frontend_ui = "frontend_ui"
+    backend_api = "backend_api"
+
+
+class Contour(StrEnum):
+    ui = "ui"
+    server = "server"
 
 
 REWORK_SOURCES = frozenset({FailureKind.verify_failed, FailureKind.rolled_back, FailureKind.checks_failed})
@@ -97,6 +108,8 @@ class TaskEventType(StrEnum):
     release_unblocked = "release_unblocked"
     external_publish = "external_publish"
     rework_started = "rework_started"
+    owner_review_requested = "owner_review_requested"
+    owner_review = "owner_review"
 
 
 class TaskDecision(StrEnum):
@@ -203,6 +216,14 @@ class PullRequestReview(ContractModel):
     required_changes: list[str]
     checklist: list[PullRequestReviewItem]
     created_at: datetime
+    owner_summary: str | None = None
+
+
+class OwnerReview(ContractModel):
+    state: Literal["requested", "approved", "changes_requested"]
+    head_sha: str
+    login: str | None = None
+    comment: str | None = None
 
 
 class Task(ContractModel):
@@ -235,6 +256,9 @@ class Task(ContractModel):
     rework_count: int = Field(ge=0)
     rework_limit: int = Field(ge=0)
     rework_reason: str | None
+    change_class: ChangeClass = ChangeClass.frontend_ui
+    contour: Contour | None = None
+    owner_review: OwnerReview | None = None
 
 
 class TaskEvent(ContractModel):
@@ -347,6 +371,8 @@ class RevertResult(ContractModel):
     attempt: int = Field(default=1, ge=1)
     tree: str | None = None
     targets: list[RevertTarget] = Field(default_factory=list)
+    contour: Contour | None = None
+    owner_review: OwnerReview | None = None
 
 
 class ReleaseCandidate(ContractModel):

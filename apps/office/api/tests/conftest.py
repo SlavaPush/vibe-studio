@@ -26,7 +26,7 @@ from app.db import Database
 from app.main import create_app
 from app.models_gateway import ModelCall, ModelsGateway, ProviderReply
 from app.runner import Checkpoints, Runner
-from app.sandbox import E2EResult, SandboxCancelled
+from app.sandbox import COMPAT_COMMANDS, E2EResult, SandboxCancelled, suite_steps
 from app.schemas import ApiError, CheckReport, CheckResult, ModelProfile, ReleaseCandidate, ReleaseKind
 from app.tasks import IntakeOutcome, TaskStore
 
@@ -52,6 +52,9 @@ ORIGIN_FILES = {
     "apps/chat/web/package-lock.json": '{"name": "web", "lockfileVersion": 3}\n',
     "apps/chat/web/index.html": "<title>vibe-chat</title>\n",
     "apps/chat/api/main.py": "app = None\n",
+    "apps/chat/api/pyproject.toml": '[project]\nname = "vibe-chat-api"\ndependencies = []\n',
+    "apps/chat/api/uv.lock": "version = 1\n",
+    "apps/chat/api/tests/conftest.py": "import pytest\n",
     "apps/chat/contracts/api.md": "# API\n",
     "apps/office/policies/paths.yaml": "deny: []\n",
     "apps/office/web/src/Panel.test.tsx": "export {}\n",
@@ -174,8 +177,9 @@ class FakeOpenAI:
         )
 
 
-QA_FILE = re.compile(r"apps/chat/web/e2e/office/tsk_[0-9a-f]+\.pw\.ts")
+QA_FILE = re.compile(r"apps/chat/web/e2e/office/tsk_[0-9a-f]+\.pw\.ts|apps/chat/api/tests/office/test_tsk_[0-9a-f]+\.py")
 QA_TEST = 'import { test, expect } from "@playwright/test";\n\ntest("feature", async ({ page }) => {\n  await page.goto("/");\n});\n'
+QA_PYTEST = "def test_feature(client):\n    assert client.get('/api/version').status_code == 200\n"
 SPEC_ANSWER = {
     "summary": "Под ответом ассистента появляется кнопка копирования.",
     "acceptance_criteria": ["Кнопка копирования видна под ответом.", "Нажатие копирует текст ответа."],
@@ -193,12 +197,13 @@ def developer_answer(content: str, path: str = "apps/chat/web/src/App.tsx", done
 
 
 CHECKLIST_ITEMS = (
-    "paths", "network", "external_navigation", "inputs", "system_messages", "sent_text", "third_party_code"
+    "paths", "network", "external_navigation", "inputs", "system_messages", "sent_text", "third_party_code", "models"
 )
 
 
-def pr_review_answer(verdict: str = "approve", changes: list[str] | None = None) -> dict[str, Any]:
+def pr_review_answer(verdict: str = "approve", changes: list[str] | None = None, summary: str = "") -> dict[str, Any]:
     return {
+        "owner_summary": summary,
         "verdict": verdict,
         "checklist": [
             {"item": item, "ok": verdict == "approve" or item != "network", "note": "проверено"}
@@ -211,8 +216,9 @@ def pr_review_answer(verdict: str = "approve", changes: list[str] | None = None)
 
 def qa_answer(call: ModelCall, criteria: list[int] | None = None, findings: list | None = None) -> dict[str, Any]:
     path = QA_FILE.search(call.user).group(0)
+    content = QA_PYTEST if path.endswith(".py") else QA_TEST
     return {
-        "actions": [{"kind": "write_file", "path": path, "content": QA_TEST, "step": None}],
+        "actions": [{"kind": "write_file", "path": path, "content": content, "step": None}],
         "done": True,
         "summary": "Тест кнопки копирования",
         "criteria_covered": [1] if criteria is None else criteria,
@@ -262,12 +268,33 @@ SUITE_COMMANDS = {
     "test": "npm run test",
     "build": "npm run build",
     "e2e": "playwright test --config /office-e2e/playwright.config.ts",
+    "api-test": "python -m pytest -p no:cacheprovider",
 }
 
 
+class FakeLock:
+    def __init__(self, rel: str, command: str) -> None:
+        self.rel = rel
+        self.command = command
+        self.calls: list[str] = []
+        self.exit_code = 0
+        self.content: str | None = None
+
+    def __call__(self, task_id: str, root: Path) -> CheckResult:
+        self.calls.append(task_id)
+        if self.exit_code == 0:
+            target = root / self.rel if self.rel.startswith("apps/") else root / "api" / self.rel
+            target.write_text(self.content or target.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        return CheckResult(command=self.command, exit_code=self.exit_code, duration_ms=1, artifact_urls=[])
+
+
 class FakeSuite:
-    def __init__(self, store: TaskStore) -> None:
+    def __init__(self, store: TaskStore, workspace: Any = None) -> None:
         self.store = store
+        self.workspace = workspace
+        self.lock_node = FakeLock("apps/chat/web/package-lock.json", "npm install --package-lock-only")
+        self.python = SimpleNamespace(lock=FakeLock("uv.lock", "uv lock"))
+        self.steps: list[list[str]] = []
         self.calls: list[tuple[str, str, str, bool]] = []
         self.exits: Callable[[str, str, str, bool], dict[str, int]] = lambda task_id, app, qa, e2e: {}
         self.e2e: Callable[[str, str, str], E2EResult] = self.default_e2e
@@ -288,23 +315,31 @@ class FakeSuite:
         if task_id in self.cancelled:
             raise SandboxCancelled("cancelled")
 
-    def run_suite(self, task_id: str, app_sha: str, qa_sha: str, *, require_e2e: bool = False) -> CheckReport:
+    def run_suite(
+        self, task_id: str, app_sha: str, qa_sha: str, *, require_e2e: bool = False, diff_base: str | None = None,
+        change_class: Any = None,
+    ) -> CheckReport:
         self.check_cancelled(task_id)
         with self.lock:
             self.calls.append((task_id, app_sha, qa_sha, require_e2e))
         if self.on_suite is not None:
             self.on_suite(task_id, app_sha, qa_sha, require_e2e)
         exits = self.exits(task_id, app_sha, qa_sha, require_e2e)
-        steps = ["lint", "test", "build"] + (["e2e"] if require_e2e else [])
         task = self.store.get_task(task_id)
+        changed: list[str] = []
+        if self.workspace is not None:
+            changed = self.workspace.changed_between(diff_base or task.base_sha or app_sha, app_sha)
+        steps = suite_steps(changed, change_class, require_e2e and change_class != "backend_api")
+        self.steps.append(steps)
         report = CheckReport(
             task_id=task_id,
             commit_sha=app_sha,
             spec_hash=task.spec.spec_hash if task.spec else None,
             suite_hash="sha256:fake",
             checks=[
-                CheckResult(command=SUITE_COMMANDS[step], exit_code=exits.get(step, 0), duration_ms=1, artifact_urls=[])
+                CheckResult(command=command, exit_code=exits.get(step, 0), duration_ms=1, artifact_urls=[])
                 for step in steps
+                for command in ([SUITE_COMMANDS[step]] if step in SUITE_COMMANDS else COMPAT_COMMANDS)
             ],
         )
         self.store.add_check_report(report)
@@ -478,7 +513,7 @@ class Office:
         )
         settings = app.state.settings
         app.state.gateway = gateway or ScriptedGateway(settings)
-        app.state.suite = suite or FakeSuite(app.state.store)
+        app.state.suite = suite or FakeSuite(app.state.store, app.state.workspace)
         app.state.runner = Runner(
             settings,
             app.state.store,
@@ -518,7 +553,7 @@ class Office:
 
 
 REPO_PATH = "/repos/SlavaPush/vibe-studio"
-CI_JOBS = ("chat-web", "chat-containers")
+CI_JOBS = ("chat-api", "chat-web", "chat-containers")
 
 
 class FakeGitHub:
@@ -541,6 +576,16 @@ class FakeGitHub:
         self.merged_by = "vibe-office[bot]"
         self.commit_prs: dict[str, list[dict[str, Any]]] = {}
         self.activity: list[dict[str, Any]] = []
+        self.reviews: dict[int, list[dict[str, Any]]] = {}
+
+    def review(self, number: int, login: str, state: str, sha: str, body: str = "") -> None:
+        items = self.reviews.setdefault(number, [])
+        items.append(
+            {
+                "id": 9000 + len(items), "user": {"login": login}, "state": state, "commit_id": sha, "body": body,
+                "submitted_at": f"2026-10-25T12:{len(items):02d}:00Z",
+            }
+        )
 
     def pushed(self, before: str, after: str, login: str = "SlavaPush") -> None:
         self.activity.insert(
@@ -680,6 +725,16 @@ class FakeGitHub:
                 return httpx.Response(200, json=self.compare(match.group(1), match.group(2)))
             except subprocess.CalledProcessError:
                 return httpx.Response(404, json={"message": "Not Found"})
+        match = re.fullmatch(r"/pulls/(\d+)/reviews", rel)
+        if match:
+            items = self.reviews.get(int(match.group(1)), [])
+            page = int(request.url.params.get("page", 1))
+            size = int(request.url.params["per_page"])
+            headers = {}
+            if page * size < len(items):
+                link = f"https://api.github.com{REPO_PATH}{rel}?per_page={size}&page={page + 1}"
+                headers["Link"] = f'<{link}>; rel="next"'
+            return httpx.Response(200, json=items[(page - 1) * size:page * size], headers=headers)
         match = re.fullmatch(r"/pulls/(\d+)", rel)
         if match:
             number = int(match.group(1))
@@ -687,7 +742,7 @@ class FakeGitHub:
                 return httpx.Response(404, json={"message": "Not Found"})
             pr = self.pr(number)
             if method == "PATCH":
-                pr["state"] = body["state"]
+                pr.update({key: body[key] for key in ("state", "body") if key in body})
             return httpx.Response(200, json=pr)
         match = re.fullmatch(r"/git/ref/heads/(.+)", rel)
         if match:
