@@ -25,6 +25,9 @@ MODEL_CATALOG = ModelCatalog(
             id="gpt-6.1-sol", provider="openai", label="GPT-6.1 Sol", kind="text", selectable=True
         ),
         ModelProfile(
+            id="gpt-5-mini", provider="openai", label="GPT-5 mini", kind="text", selectable=True
+        ),
+        ModelProfile(
             id="gpt-image-2.5-flare",
             provider="openai",
             label="GPT Image 2.5 Flare",

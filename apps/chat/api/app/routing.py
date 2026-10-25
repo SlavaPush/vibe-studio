@@ -6,6 +6,7 @@ PROVIDERS = {
     "claude-sonnet-5-5": "anthropic",
     "gpt-6-luna": "openai",
     "gpt-6.1-sol": "openai",
+    "gpt-5-mini": "openai",
     IMAGE_MODEL: "openai",
     "omni-moderation-latest": "openai",
 }
@@ -14,12 +15,14 @@ MAX_OUTPUT_TOKENS = {
     "claude-sonnet-5-5": 128_000,
     "gpt-6-luna": 128_000,
     "gpt-6.1-sol": 128_000,
+    "gpt-5-mini": 128_000,
 }
 FALLBACK = {
     "claude-haiku-5-5": "gpt-6-luna",
     "gpt-6-luna": "claude-haiku-5-5",
     "claude-sonnet-5-5": "gpt-6.1-sol",
     "gpt-6.1-sol": "claude-sonnet-5-5",
+    "gpt-5-mini": "claude-haiku-5-5",
 }
 OUTPUT_TOKENS = {"low": 2048, "medium": 8192, "high": 16000}
 CLASSIFIER_MODELS = ("claude-haiku-5-5", "gpt-6-luna")

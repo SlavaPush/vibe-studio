@@ -7,6 +7,7 @@ EXPECTED_IDS = [
     "claude-sonnet-5-5",
     "gpt-6-luna",
     "gpt-6.1-sol",
+    "gpt-5-mini",
     "gpt-image-2.5-flare",
 ]
 
@@ -24,3 +25,11 @@ def test_models_returns_catalog_without_secrets(monkeypatch):
     assert "sk-" not in response.text
     assert [item["id"] for item in items if item["kind"] == "image"] == ["gpt-image-2.5-flare"]
     assert [item["id"] for item in items if not item["selectable"]] == ["gpt-image-2.5-flare"]
+    mini = next(item for item in items if item["id"] == "gpt-5-mini")
+    assert mini == {
+        "id": "gpt-5-mini",
+        "provider": "openai",
+        "label": "GPT-5 mini",
+        "kind": "text",
+        "selectable": True,
+    }
