@@ -332,14 +332,14 @@
 | `commit_sha` | string | Итоговый commit для деплоя |
 | `expected_previous_sha` | string | Основание выпуска: опубликованная версия, относительно которой проверен состав выпуска |
 | `spec_hash` | string | Хеш требований |
-| `suite_hash` | string | Хеш набора проверок |
-| `ci_run_ids` | string[] | Идентификаторы запусков обязательных проверок GitHub Actions для `commit_sha` |
+| `suite_hash` | string | Хеш набора проверок; пустая строка у кандидата `pending`, пересозданного после смены опубликованной версии, пока проверки итогового commit не выполнены заново |
+| `ci_run_ids` | string[] | Идентификаторы запусков обязательных проверок GitHub Actions для `commit_sha`; пуст до повторных проверок пересозданного кандидата |
 | `pr_url` | string или `null` | PR, из которого получен commit; `null` для отката и исправления по `fix_sha` |
 | `created_at` | string (дата-время) | Время создания |
 | `is_published` | boolean | Версия этого кандидата опубликована сейчас |
 | `deploy` | `DeployResult` или `null` | Результат деплоя; для кандидата вида `rollback` — деплой Render rollback |
 | `pr_review_id` | string или `null` | Решение агента ревью PR (`PullRequestReview.id`) — основание выпуска; `null` для отката |
-| `e2e` | `CheckReport` или `null` | Критический E2E итогового commit: `lint`, `test`, `build`, `e2e` со всеми тестами QA из `main` на `commit_sha`, с `suite_hash`; без шага `e2e`, если в commit исправления не осталось тестов QA; `null` для отката |
+| `e2e` | `CheckReport` или `null` | Критический E2E итогового commit: `lint`, `test`, `build`, `e2e` со всеми тестами QA из `main` на `commit_sha`, с `suite_hash`; без шага `e2e`, если в commit исправления не осталось тестов QA; `null` для отката и до повторных проверок пересозданного кандидата |
 | `origin` | `ReleaseOrigin` | Основание кандидата: `task` — задача, `auto_revert` — слитый revert-PR после отката, `resume` — `fix_sha` решения `resume_releases`, `manual_rollback` — решение `rollback` |
 | `origin_decision_id` | string или `null` | Решение администратора — основание кандидата (`resume`, `manual_rollback`) |
 | `superseded_by` | string или `null` | Кандидат, в составе которого опубликован или выбран для деплоя этот (`superseded`); `null` при внешней публикации |
@@ -351,7 +351,7 @@
 
 Кандидат вида `release` в статусе `failed` без `deploy` создаётся, когда обязательные проверки события `push` (`conclusion = failure`) или критический E2E итогового commit слияния офиса не пройдены: `commit_sha` — итоговый commit, `expected_previous_sha` — его родитель, `blocked_reason` — причина. Деплоя не было; кандидат блокирует выпуск до публикации revert.
 
-Статусы кандидата: `pending` — ждёт очереди; `deploying` — деплой Render; `verifying` — проверка после деплоя; `rolling_back` — автоматический откат и его проверка; `released` — опубликован и проверен; `failed` — деплой не удался или выпуск откатан; `superseded` — опубликован или будет опубликован в составе более нового кандидата; `revoked` — опубликованная версия сменилась до деплоя, создан новый кандидат того же commit (для отката — откат отменён); `rolled_back` — выпуск откатан решением `rollback`.
+Статусы кандидата: `pending` — ждёт очереди; `deploying` — деплой Render; `verifying` — проверка после деплоя; `rolling_back` — автоматический откат и его проверка; `released` — опубликован и проверен; `failed` — деплой не удался или выпуск откатан; `superseded` — опубликован или будет опубликован в составе более нового кандидата; `revoked` — опубликованная версия сменилась до деплоя, создан новый кандидат того же commit, который деплоится только после повторных проверок итогового commit (для отката — откат отменён); `rolled_back` — выпуск откатан решением `rollback`.
 
 `DeployResult`: `render_deploy_id` (string), `render_status` (string, статус деплоя Render), `started_at` (дата-время), `finished_at` (дата-время или `null`), `published_sha` (string или `null` — версия из `GET /api/version` после успешной проверки), `error` (string или `null`).
 

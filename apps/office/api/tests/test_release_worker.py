@@ -1204,3 +1204,46 @@ def test_candidate_and_status_change_are_one_transaction(setup, monkeypatch):
     assert setup.task().status == TaskStatus.awaiting_release
     assert len(candidates_of(setup)) == 1
     assert len(setup.suite.calls) == 1
+
+
+def test_candidate_requirements_and_suite_are_not_replaced(setup):
+    worker = merged(setup)
+    sha = setup.task().merge_sha
+    setup.fake.add_push_runs(sha)
+    drive(worker, setup.task_id)
+    [candidate] = candidates_of(setup)
+    assert (candidate.commit_sha, candidate.spec_hash, candidate.suite_hash) == (sha, SPEC["spec_hash"], "sha256:fake")
+    other = SPEC | {"spec_hash": "sha256:other", "summary": "Другие требования."}
+    assert setup.store.publish_spec(setup.task_id, other, None) is None
+    response = decide(setup, "approve_spec", "approve-after-candidate")
+    assert (response.status_code, response.json()["code"]) == (409, "decision_not_allowed")
+    assert setup.task().spec.spec_hash == SPEC["spec_hash"]
+    setup.store.add_check_report(CheckReport(
+        task_id=setup.task_id, commit_sha=sha, spec_hash="sha256:other", suite_hash="sha256:other",
+        checks=[CheckResult(command="npm run lint", exit_code=0, duration_ms=1, artifact_urls=[])],
+    ))
+    drive(setup.worker(), setup.task_id)
+    [same] = candidates_of(setup)
+    assert (same.id, same.commit_sha, same.spec_hash, same.suite_hash) == (
+        candidate.id, sha, SPEC["spec_hash"], "sha256:fake"
+    )
+    assert same.e2e == candidate.e2e
+    assert setup.task().status == TaskStatus.awaiting_release
+
+
+def test_report_of_other_suite_does_not_admit_candidate(setup):
+    worker = merged(setup)
+    sha = setup.task().merge_sha
+    setup.fake.add_push_runs(sha)
+    setup.store.add_check_report(CheckReport(
+        task_id=setup.task_id, commit_sha=sha, spec_hash=SPEC["spec_hash"], suite_hash="sha256:old",
+        checks=[
+            CheckResult(command=command, exit_code=0, duration_ms=1, artifact_urls=[])
+            for command in ("npm run lint", "npm run test", "npm run build")
+        ],
+    ))
+    drive(worker, setup.task_id)
+    assert setup.suite.calls == [(setup.task_id, sha, sha, True)]
+    [candidate] = candidates_of(setup)
+    assert candidate.suite_hash == candidate.e2e.suite_hash == "sha256:fake"
+    assert candidate.e2e.checks[-1].command.startswith("playwright test")

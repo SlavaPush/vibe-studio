@@ -79,3 +79,17 @@ def test_revert_of_schema_only_change_keeps_block_without_pr(q):
     assert [(row["status"], row["detail"]) for row in q.ops(release.id) if row["kind"] == "revert"] == [
         ("failed", "schema only")
     ]
+
+
+def test_rollback_returns_previous_version_and_revert_keeps_schema(q):
+    q.origin.write("apps/chat/api/app/schema.sql", SCHEMA)
+    sha = q.push("apps/chat/api/app/notes.py", "NOTES = []\n")
+    admit(q, sha)
+    worker, release = roll_back(q, sha)
+    assert q.render.posts()[-1] == ("/rollback", {"deployId": "dep-1"})
+    assert q.service.version == q.base[:7]
+    drive_revert(q, worker)
+    revert = q.release(release.id).revert
+    assert (revert.status, revert.pr_number) == ("active", 1)
+    assert q.workspace.file_at(revert.head_sha, "apps/chat/api/app/schema.sql") == SCHEMA.encode()
+    assert q.workspace.file_at(revert.head_sha, "apps/chat/api/app/notes.py") is None

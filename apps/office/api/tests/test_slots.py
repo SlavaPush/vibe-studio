@@ -139,6 +139,25 @@ def test_queued_task_takes_slot_in_new_app_instance(office):
     assert app.state.store.get_task(task_id).status == TaskStatus.awaiting_spec_approval
 
 
+def test_restart_keeps_occupied_slots_and_cancel_releases_one(office):
+    client, me = office.login()
+    ids = [office.queued_task(me["id"]) for _ in range(4)]
+    office.store.promote_queue()
+    app = office.new_app()
+    store = app.state.store
+    assert store.slots_used() == 3
+    assert store.get_task(ids[3]).status == TaskStatus.queued
+    restarted = office.client(app, cookies=client.cookies)
+    task = restarted.get(f"/api/tasks/{ids[0]}").json()
+    response = restarted.post(
+        f"/api/tasks/{ids[0]}/decisions",
+        json={"decision": "cancel", "expected_version": task["version"], "idempotency_key": "cancel-after-restart"},
+    )
+    assert response.status_code == 200
+    assert store.get_task(ids[3]).status == TaskStatus.awaiting_spec_approval
+    assert store.slots_used() == 3
+
+
 def test_awaiting_integration_frees_slot_for_queued_task(office):
     _, me = office.login()
     ids = [office.queued_task(me["id"]) for _ in range(4)]

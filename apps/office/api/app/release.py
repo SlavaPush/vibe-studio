@@ -54,7 +54,7 @@ from app.tasks import (
     new_id,
     rework_tree,
 )
-from app.workspace import NETWORK_TIMEOUT, PushResult, Workspace, branch_name
+from app.workspace import PushResult, Workspace, branch_name
 
 logger = logging.getLogger("office.release")
 
@@ -229,6 +229,7 @@ class ReleaseWorker:
         for task_id in self.candidates():
             self._drive(lambda: self.step(task_id), task_id)
         self._drive(self.revert_step, "revert")
+        self._drive(self.recheck_step, "recheck")
         self._drive(self.queue.step, "queue")
 
     def _drive(self, step: Callable[[], bool], name: str) -> None:
@@ -1137,20 +1138,22 @@ class ReleaseWorker:
             self.queue._block_in(conn, created, reason, FailureKind.checks_failed.value)
         return False
 
+    def _suite_plan(self, sha: str, release: bool, change_class: ChangeClass | None) -> tuple[bool, list[str]]:
+        self.workspace.parent(sha)
+        playwright = bool(self.workspace.qa_files(sha))
+        changed = self.workspace.changed_between(f"{sha}^", sha)
+        require = not release or playwright
+        if not release and change_class != ChangeClass.backend_api:
+            playwright = True
+        return require, suite_commands(self.commands, suite_steps(changed, change_class, playwright))
+
     def _final_suite(self, c: Carrier) -> CheckReport | None:
         sha = c.merge_sha
         try:
-            with self.workspace.lock:
-                self.workspace.git("fetch", "--quiet", "origin", "main", timeout=NETWORK_TIMEOUT)
-            playwright = bool(self.workspace.qa_files(sha))
-            changed = self.workspace.changed_between(f"{sha}^", sha)
+            require, commands = self._suite_plan(sha, c.release_id is not None, c.change_class)
         except WorkspaceError as error:
             self._halt(c, f"Итоговый commit {sha[:7]} не получен: {error}")
             return None
-        require = c.release_id is None or playwright
-        if c.release_id is None and c.change_class != ChangeClass.backend_api:
-            playwright = True
-        commands = suite_commands(self.commands, suite_steps(changed, c.change_class, playwright))
         for saved in self.store.check_reports(c.task_id, sha):
             if saved.suite_hash and {check.command for check in saved.checks} >= set(commands):
                 return self._judge(c, saved, commands)
@@ -1164,21 +1167,110 @@ class ReleaseWorker:
             return None
         return self._judge(c, report, commands)
 
-    def _judge(self, c: Carrier, report: CheckReport, commands: list[str]) -> CheckReport | None:
-        sha = c.merge_sha[:7]
+    def _verdict(self, sha: str, report: CheckReport, commands: list[str]) -> tuple[bool, str | None]:
+        sha = sha[:7]
         failed = [f"{check.command} (exit {check.exit_code})" for check in report.checks if check.exit_code != 0]
         if any(check.exit_code != 0 and check.command in commands for check in report.checks):
-            self._fail_final(
-                c, f"Критический E2E итогового commit {sha} не пройден: {', '.join(failed)}.", revert=True, report=report
-            )
-            return None
+            return True, f"Критический E2E итогового commit {sha} не пройден: {', '.join(failed)}."
         found = {check.command for check in report.checks}
         missing = [f"{command} (не выполнен)" for command in commands if command not in found]
         if failed or missing or not report.suite_hash:
             details = ", ".join(failed + missing) or "нет хеша набора"
-            self._halt(c, f"Набор проверок итогового commit {sha} выполнен не полностью: {details}.")
+            return False, f"Набор проверок итогового commit {sha} выполнен не полностью: {details}."
+        return False, None
+
+    def _judge(self, c: Carrier, report: CheckReport, commands: list[str]) -> CheckReport | None:
+        critical, reason = self._verdict(c.merge_sha, report, commands)
+        if critical:
+            self._fail_final(c, reason, revert=True, report=report)
+            return None
+        if reason:
+            self._halt(c, reason)
             return None
         return report
+
+    def recheck_step(self) -> bool:
+        with self.store.db.connection() as conn:
+            waiting = self.queue._candidates(
+                conn, "status = :status AND kind = :kind AND suite_hash = '' AND blocked_reason IS NULL",
+                {"status": ReleaseStatus.pending.value, "kind": ReleaseKind.release.value},
+            )
+        if not waiting:
+            return False
+        candidate = waiting[0]
+        sha = candidate.commit_sha
+        own = candidate.origin == ReleaseOrigin.task
+        change_class = self.store.get_task(candidate.task_id).change_class if own else None
+        required = [(check, check.push_event) for check in self.required if check.push_event]
+        if not required:
+            return self.queue._halt(candidate, "Нет обязательных проверок итогового commit: workflow без события push.")
+        summary, run_ids = self._summary(sha, required, lambda run: run.get("head_branch") == "main")
+        problems = [
+            f"{check.name} ({check.conclusion or check.status})"
+            for check in summary.checks
+            if check.status != "completed" or check.conclusion != "success"
+        ]
+        if problems:
+            reason = f"Обязательные проверки итогового commit {sha[:7]} не пройдены: {', '.join(problems)}."
+            failed = [check for check in summary.checks if check.status == "completed" and check.conclusion != "success"]
+            if not failed:
+                return self.queue._halt(candidate, reason)
+            broken = any(check.conclusion == "failure" for check in failed)
+            return self._recheck_failed(candidate, reason, broken, run_ids, None)
+        try:
+            require, commands = self._suite_plan(sha, not own, change_class)
+            self.suite.reset_task(candidate.task_id)
+            report = self.suite.run_suite(
+                candidate.task_id, sha, sha, require_e2e=require, diff_base=f"{sha}^", change_class=change_class
+            )
+        except (SandboxError, SandboxCancelled, WorkspaceError, OSError) as error:
+            return self.queue._halt(candidate, f"Проверки итогового commit {sha[:7]} не выполнены: {error}")
+        critical, reason = self._verdict(sha, report, commands)
+        if critical:
+            return self._recheck_failed(candidate, reason, True, run_ids, report)
+        if reason:
+            return self.queue._halt(candidate, reason)
+        with self.store.db.locked_transaction() as conn:
+            current = self.store.load_candidate(conn, candidate.id)
+            if current.status != ReleaseStatus.pending or current.version != candidate.version:
+                return False
+            self.store.update_candidate(
+                conn, candidate.id, suite_hash=report.suite_hash, ci_run_ids=_json(run_ids), e2e=report
+            )
+            self.store.record_event(
+                conn, candidate.task_id, TaskEventType.role_finished,
+                {
+                    "step": "release", "outcome": "ok", "release_id": candidate.id,
+                    "summary": f"Проверки итогового commit {sha[:7]} выполнены заново и пройдены.",
+                },
+            )
+        return True
+
+    def _recheck_failed(
+        self, candidate: ReleaseCandidate, reason: str, revert: bool, run_ids: list[str], report: CheckReport | None
+    ) -> bool:
+        if candidate.origin != ReleaseOrigin.task:
+            return self.queue._halt(candidate, reason)
+        fields: dict[str, Any] = {
+            "status": ReleaseStatus.failed.value, "blocked_reason": reason, "ci_run_ids": _json(run_ids),
+        }
+        if report is not None:
+            fields |= {"suite_hash": report.suite_hash or "", "e2e": report}
+        if revert:
+            try:
+                fields["expected_previous_sha"] = self.workspace.parent(candidate.commit_sha)
+            except WorkspaceError as error:
+                return self.queue._halt(candidate, f"{reason} Revert не подготовлен: {error}")
+        with self.store.db.locked_transaction() as conn:
+            current = self.store.load_candidate(conn, candidate.id)
+            if current.status != ReleaseStatus.pending or current.version != candidate.version:
+                return False
+            self.store.update_candidate(conn, candidate.id, **fields)
+            failed = self.store.load_candidate(conn, candidate.id)
+            if revert:
+                self.queue._block_in(conn, failed, reason, FailureKind.checks_failed.value)
+            self.queue._settle(conn, failed, S.failed, reason, FailureKind.checks_failed)
+        return False
 
     def _candidate(self, c: Carrier, report: CheckReport, run_ids: list[str]) -> bool:
         sha = c.merge_sha

@@ -582,8 +582,82 @@ def test_published_version_change_revokes_and_recreates_candidate(q):
     [recreated] = [
         item for item in q.store.list_releases() if item.commit_sha == newer and item.status != "revoked"
     ]
-    assert (recreated.expected_previous_sha, recreated.status, recreated.task_id) == (external, "deploying", pending.task_id)
+    assert (recreated.expected_previous_sha, recreated.status, recreated.task_id) == (external, "pending", pending.task_id)
+    assert (recreated.suite_hash, recreated.ci_run_ids, recreated.e2e) == ("", [], None)
     assert q.events(pending.task_id, TaskEventType.external_publish)[0].payload == {"published_sha": external}
+    q.fake.add_push_runs(newer)
+    calls = len(q.suite.calls)
+    assert worker.recheck_step() is True
+    assert q.suite.calls[calls:] == [(pending.task_id, newer, newer, True)]
+    checked = q.release(recreated.id)
+    assert checked.suite_hash == "sha256:fake" and checked.ci_run_ids and checked.e2e is not None
+    q.settle(worker)
+    assert q.release(recreated.id).status == "deploying"
+    assert q.render.posts()[-1] == ("/deploys", {"commitId": newer})
+
+
+def rebased(q):
+    first = q.push("apps/chat/web/src/A.tsx", "export const a = 1\n")
+    worker = published(q, q.candidate(first))
+    external = q.push("apps/chat/web/src/C.tsx", "export const c = 1\n")
+    newer = q.push("apps/chat/web/src/B.tsx", "export const b = 1\n")
+    pending = q.candidate(newer, base=first)
+    q.render.add(external, "live")
+    posts = len(q.render.posts())
+    q.settle(worker)
+    [fresh] = [item for item in q.store.list_releases() if item.commit_sha == newer and item.status == "pending"]
+    assert fresh.id != pending.id and fresh.suite_hash == ""
+    assert len(q.render.posts()) == posts and q.state()["active_release_id"] is None
+    return worker, fresh, external, posts
+
+
+def test_rebased_candidate_is_not_deployed_before_checks_even_after_restart(q):
+    worker, fresh, _, posts = rebased(q)
+    q.fake.add_push_runs(fresh.commit_sha)
+
+    def crash(*_):
+        raise Crash()
+
+    q.suite.on_suite = crash
+    with pytest.raises(Crash):
+        worker.recheck_step()
+    worker = q.worker()
+    q.settle(worker)
+    assert q.release(fresh.id).status == "pending" and q.release(fresh.id).suite_hash == ""
+    assert len(q.render.posts()) == posts
+    q.suite.on_suite = None
+    worker.run_once()
+    assert q.release(fresh.id).status == "deploying"
+    assert q.release(fresh.id).suite_hash == "sha256:fake"
+
+
+@pytest.mark.parametrize("failure", ["e2e", "ci"])
+def test_failed_recheck_fails_task_and_blocks_for_revert(q, failure):
+    worker, fresh, external, posts = rebased(q)
+    if failure == "e2e":
+        q.fake.add_push_runs(fresh.commit_sha)
+        q.suite.exits = lambda task_id, app, qa, e2e: {"e2e": 1}
+    else:
+        q.fake.add_push_runs(fresh.commit_sha, "failure")
+    assert worker.recheck_step() is False
+    q.settle(worker)
+    current = q.release(fresh.id)
+    assert (current.status, current.expected_previous_sha) == ("failed", external)
+    assert "не пройден" in current.blocked_reason
+    task = q.task(fresh.task_id)
+    assert (task.status, task.failure_kind) == ("failed", FailureKind.checks_failed)
+    assert q.state()["release_blocked_by"] == fresh.id
+    assert len(q.render.posts()) == posts
+
+
+def test_recheck_without_ci_runs_needs_attention(q):
+    worker, fresh, _, posts = rebased(q)
+    assert worker.recheck_step() is False
+    q.settle(worker)
+    current = q.release(fresh.id)
+    assert current.status == "pending" and "не пройдены" in current.blocked_reason
+    assert q.task(fresh.task_id).status == "needs_attention"
+    assert len(q.render.posts()) == posts
 
 
 @pytest.mark.parametrize("failure", ["down", "body"])
@@ -1151,6 +1225,9 @@ def test_resume_returning_to_rebased_fix_links_pending(q):
     drive_revert(q, worker)
     current = q.release(release.id)
     assert (current.revert.status, current.revert.candidate_id) == ("merged", fresh.id)
+    q.settle(worker)
+    assert q.release(fresh.id).status == "pending"
+    assert worker.recheck_step() is True
     q.settle(worker)
     q.render.set(q.release(fresh.id).deploy.render_deploy_id, "live")
     q.settle(worker)

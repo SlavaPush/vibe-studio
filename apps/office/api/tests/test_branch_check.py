@@ -1,6 +1,9 @@
 import json
+import uuid
 
+import psycopg
 import pytest
+from conftest import CHAT_SCHEMA, PG_URL
 
 from app.branch_check import npm_violation, python_violation, schema_violation
 
@@ -70,6 +73,39 @@ def test_changed_or_removed_lines_are_rejected():
     assert schema_violation(BASE, BASE.replace(b"NOT NULL", b"")) is True
     assert schema_violation(BASE, None) is True
     assert schema_violation(None, BASE) is False
+
+
+def test_rolled_back_version_keeps_data_of_additive_schema():
+    if not PG_URL:
+        pytest.skip("OFFICE_TEST_POSTGRES_URL не задан")
+    base = CHAT_SCHEMA.read_text(encoding="utf-8")
+    new = base + (
+        "\nALTER TABLE users ADD COLUMN IF NOT EXISTS nickname text;\n"
+        "CREATE TABLE IF NOT EXISTS notes (\n    id uuid PRIMARY KEY,\n"
+        "    user_id uuid NOT NULL REFERENCES users (id) ON DELETE CASCADE,\n    body text NOT NULL\n);\n"
+    )
+    assert schema_violation(base.encode(), new.encode()) is False
+    schema = f"r_{uuid.uuid4().hex[:12]}"
+    old_user, new_user, late_user, note = (uuid.uuid4() for _ in range(4))
+    with psycopg.connect(PG_URL, autocommit=True) as conn:
+        conn.execute(f"CREATE SCHEMA {schema}")
+        try:
+            conn.execute(f"SET search_path = {schema}")
+            conn.execute(base)
+            conn.execute("INSERT INTO users (id, source_hash) VALUES (%s, 'old')", (old_user,))
+            conn.execute(new)
+            conn.execute("INSERT INTO users (id, source_hash, nickname) VALUES (%s, 'new', 'Мария')", (new_user,))
+            conn.execute("INSERT INTO notes (id, user_id, body) VALUES (%s, %s, 'заметка')", (note, new_user))
+            conn.execute(base)
+            conn.execute("INSERT INTO users (id, source_hash) VALUES (%s, 'late')", (late_user,))
+            users = conn.execute("SELECT id, source_hash, nickname FROM users").fetchall()
+            notes = conn.execute("SELECT id, user_id, body FROM notes").fetchall()
+        finally:
+            conn.execute(f"DROP SCHEMA {schema} CASCADE")
+    assert sorted(users, key=lambda row: row[1]) == [
+        (late_user, "late", None), (new_user, "new", "Мария"), (old_user, "old", None)
+    ]
+    assert notes == [(note, new_user, "заметка")]
 
 
 PACKAGE = {

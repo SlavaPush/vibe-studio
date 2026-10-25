@@ -72,6 +72,29 @@ def test_three_tasks_get_three_worktrees(office, app, origin, owner):
     assert len(paths) == 3
 
 
+def test_task_changes_only_its_own_worktree(office, app, owner):
+    first, second = office.start_tasks(app, owner, 2)
+    workspace = app.state.workspace
+    other = workspace.worktree_path(second)
+
+    def state():
+        return (
+            git(workspace.clone, "rev-parse", "HEAD", "refs/heads/main", f"office/{second}"),
+            git(workspace.clone, "status", "--porcelain"),
+            sorted(os.listdir(workspace.clone)),
+            git(other, "rev-parse", "HEAD"),
+            git(other, "status", "--porcelain"),
+        )
+
+    before = state()
+    (workspace.worktree_path(first) / "apps/chat/web/src" / "Feature.tsx").write_text("export {}\n")
+    commit = workspace.commit(first, "feature")
+    assert git(workspace.worktree_path(first), "rev-parse", "HEAD") == commit
+    assert git(workspace.clone, "rev-parse", f"office/{first}") == commit
+    assert state() == before
+    assert not (other / "apps/chat/web/src" / "Feature.tsx").exists()
+
+
 def test_fetch_error_fails_task(office, app, origin, owner):
     office.start_tasks(app, owner)
     origin.bare.rename(origin.bare.with_name("moved.git"))

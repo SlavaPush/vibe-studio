@@ -798,6 +798,8 @@ class ReleaseQueue:
         if rollbacks:
             return self._deploy(rollbacks[0], base, [])
         releases = [item for item in pending if item.kind == ReleaseKind.release]
+        if any(not item.suite_hash for item in releases):
+            return False
         with self.store.db.connection() as conn:
             blocked = self.store.queue_state(conn)["release_blocked_by"]
             source = self.store.load_candidate(conn, blocked) if blocked else None
@@ -890,7 +892,7 @@ class ReleaseQueue:
     def _rebase(self, candidate: ReleaseCandidate, base: str) -> bool:
         reason = (
             f"Опубликованная версия сменилась: {base[:7]} вместо {candidate.expected_previous_sha[:7]}. "
-            "Создан новый кандидат того же commit."
+            "Создан новый кандидат того же commit: проверки итогового commit выполняются заново."
         )
         with self.store.db.locked_transaction() as conn:
             if self.store.load_candidate(conn, candidate.id).status != R.pending:
@@ -903,11 +905,10 @@ class ReleaseQueue:
                 commit_sha=candidate.commit_sha,
                 expected_previous_sha=base,
                 spec_hash=candidate.spec_hash,
-                suite_hash=candidate.suite_hash,
-                ci_run_ids=candidate.ci_run_ids,
+                suite_hash="",
+                ci_run_ids=[],
                 pr_url=candidate.pr_url,
                 pr_review_id=candidate.pr_review_id,
-                e2e=candidate.e2e,
                 origin=candidate.origin,
                 origin_decision_id=candidate.origin_decision_id,
             )
