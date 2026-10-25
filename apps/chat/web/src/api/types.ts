@@ -23,7 +23,12 @@ export type Risk = 'none' | 'illegal' | 'internal_probe'
 export type Effort = 'low' | 'medium' | 'high' | 'unsupported'
 export type Provider = 'anthropic' | 'openai'
 export type ModelKind = 'text' | 'image'
-export type TextModelId = 'claude-haiku-5-5' | 'claude-sonnet-5-5' | 'gpt-6-luna' | 'gpt-6.1-sol'
+export type TextModelId =
+  | 'claude-haiku-5-5'
+  | 'claude-sonnet-5-5'
+  | 'gpt-6-luna'
+  | 'gpt-6.1-sol'
+  | 'gpt-5-mini'
 export type ModelId = TextModelId | 'gpt-image-2.5-flare'
 export type ModelChoice = 'auto' | 'image' | TextModelId
 export type SwitchReason = 'intent_mismatch' | 'provider_fallback'

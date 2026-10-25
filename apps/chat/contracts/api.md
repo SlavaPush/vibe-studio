@@ -180,19 +180,19 @@
 
 <!-- enum: TextModelId -->
 ```json
-["claude-haiku-5-5", "claude-sonnet-5-5", "gpt-6-luna", "gpt-6.1-sol"]
+["claude-haiku-5-5", "claude-sonnet-5-5", "gpt-6-luna", "gpt-6.1-sol", "gpt-5-mini"]
 ```
 
 <!-- enum: ModelId -->
 ```json
-["claude-haiku-5-5", "claude-sonnet-5-5", "gpt-6-luna", "gpt-6.1-sol", "gpt-image-2.5-flare"]
+["claude-haiku-5-5", "claude-sonnet-5-5", "gpt-6-luna", "gpt-6.1-sol", "gpt-5-mini", "gpt-image-2.5-flare"]
 ```
 
 Выбор модели в запросе: `auto` — модель и уровень усилий выбирает маршрутизация; идентификатор текстовой модели — явная модель; `image` — генерация изображения. Уровень усилий всегда выбирает сервер.
 
 <!-- enum: ModelChoice -->
 ```json
-["auto", "image", "claude-haiku-5-5", "claude-sonnet-5-5", "gpt-6-luna", "gpt-6.1-sol"]
+["auto", "image", "claude-haiku-5-5", "claude-sonnet-5-5", "gpt-6-luna", "gpt-6.1-sol", "gpt-5-mini"]
 ```
 
 Причина переключения модели: `intent_mismatch` — выбранная модель не подходит для намерения запроса; `provider_fallback` — основной провайдер отказал, ответ выполнен резервной моделью.
@@ -898,7 +898,7 @@ data: {"event_id":"e3", "run_id":"0b8d…", "seq":3, "type":"model_switched", ..
 
 ### `GET /api/models`
 
-Каталог профилей моделей для селектора. Не требует сеанса. Не содержит ключей, адресов провайдеров и внутренних настроек. Профиль с `selectable: false` нельзя указать в `model` напрямую: генерация изображения выбирается значением `image`. Ответ `200`:
+Каталог профилей моделей для селектора. Не требует сеанса. Не содержит ключей, адресов провайдеров и внутренних настроек. Профиль с `selectable: false` нельзя указать в `model` напрямую: генерация изображения выбирается значением `image`. Модель `gpt-5-mini` (GPT-5 mini, провайдер `openai`) — обычная выбираемая текстовая модель; её резервная модель при отказе провайдера — `claude-haiku-5-5`. Ответ `200`:
 
 <!-- example: ModelCatalog -->
 ```json
@@ -929,6 +929,13 @@ data: {"event_id":"e3", "run_id":"0b8d…", "seq":3, "type":"model_switched", ..
       "id": "gpt-6.1-sol",
       "provider": "openai",
       "label": "GPT-6.1 Sol",
+      "kind": "text",
+      "selectable": true
+    },
+    {
+      "id": "gpt-5-mini",
+      "provider": "openai",
+      "label": "GPT-5 mini",
       "kind": "text",
       "selectable": true
     },
