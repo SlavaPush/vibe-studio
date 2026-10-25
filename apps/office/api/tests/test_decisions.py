@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from app.schemas import TaskStatus
-from app.tasks import SIGNAL_DECISION_RECORDED
+from app.schemas import ChangeClass, ModelProfile, TaskStatus
+from app.tasks import SIGNAL_DECISION_RECORDED, IntakeOutcome
 
 pytestmark = pytest.mark.pg
 
@@ -104,6 +104,19 @@ def test_retry_with_exhausted_budget_is_not_allowed(office, owner):
     client, _, task_id = owner
     office.set_task(task_id, status="failed", model_calls=30)
     response = decide(client, task_id, "retry", version_of(office, task_id), "retry-broke")
+    assert response.status_code == 409
+    assert response.json()["code"] == "decision_not_allowed"
+
+
+def test_retry_of_backend_task_uses_its_limit(office):
+    client, me = office.login("Мария")
+    outcome = IntakeOutcome(True, None, change_class=ChangeClass.backend_api)
+    task_id = office.store.create_task(me["id"], "Поле в ответе API.", ModelProfile.hybrid, outcome).id
+    assert office.store.get_task(task_id).usage.model_calls_limit == 60
+    office.set_task(task_id, status="needs_attention", model_calls=30)
+    assert decide(client, task_id, "retry", version_of(office, task_id), "retry-backend").status_code == 200
+    office.set_task(task_id, status="needs_attention", model_calls=60)
+    response = decide(client, task_id, "retry", version_of(office, task_id), "retry-backend-broke")
     assert response.status_code == 409
     assert response.json()["code"] == "decision_not_allowed"
 

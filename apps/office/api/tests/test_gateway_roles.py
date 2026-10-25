@@ -288,6 +288,18 @@ def test_budget_is_checked_before_each_call(setup, office):
     assert store.get_task(task_id).usage.model_calls == 30
 
 
+def test_budget_uses_limit_of_the_task(setup, office):
+    store, task_id, claude, _, _, make = setup
+    office.set_task(task_id, model_calls=30, model_calls_limit=60)
+    claude.answer = json.dumps(TURN)
+    make().structured(store, task_id, ModelProfile.cloud, AgentRole.qa, "qa", "S", "U", Turn)
+    assert store.get_task(task_id).usage.model_calls == 31
+    office.set_task(task_id, model_calls=60)
+    with pytest.raises(BudgetExceeded):
+        make().structured(store, task_id, ModelProfile.cloud, AgentRole.qa, "qa", "S", "U", Turn)
+    assert len(claude.calls) == 1
+
+
 @pytest.mark.parametrize(
     "answer",
     [

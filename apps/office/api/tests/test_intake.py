@@ -57,10 +57,12 @@ def test_rejected_classes_get_fixed_reason(office, change_class):
     assert events[1].payload == {"reason": CLASS_REASONS[change_class]}
 
 
-def test_unrelated_frontend_class_is_rejected(office):
+@pytest.mark.parametrize("change_class", ["frontend_ui", "backend_api"])
+def test_unrelated_task_is_rejected_with_default_limit(office, change_class):
     client, _ = office.login()
-    office.anthropic.answer = classification(False, "frontend_ui")
-    assert office.post_task(client).json()["status"] == "rejected"
+    office.anthropic.answer = classification(False, change_class)
+    task = office.post_task(client).json()
+    assert (task["status"], task["usage"]["model_calls_limit"]) == ("rejected", 30)
 
 
 def test_server_task_is_accepted_with_backend_class(office):
@@ -68,6 +70,7 @@ def test_server_task_is_accepted_with_backend_class(office):
     office.anthropic.answer = classification(True, "backend_api")
     task = office.post_task(client, "Добавить в ответ GET /api/conversations поле с числом сообщений.").json()
     assert (task["status"], task["change_class"], task["contour"]) == ("queued", "backend_api", None)
+    assert task["usage"]["model_calls_limit"] == 60
     assert client.get(f"/api/tasks/{task['id']}").json()["change_class"] == "backend_api"
     assert "backend_api" in office.anthropic.calls[0]["system"]
     assert events_of(office, task["id"])[0].payload["change_class"] == "backend_api"
@@ -98,6 +101,7 @@ def test_interface_task_keeps_frontend_class(office):
     client, _ = office.login()
     task = office.post_task(client).json()
     assert (task["status"], task["change_class"]) == ("queued", "frontend_ui")
+    assert task["usage"]["model_calls_limit"] == 30
 
 
 @pytest.mark.parametrize(

@@ -18,6 +18,7 @@ from app.render import render_client
 from app.required_checks import load_required_checks
 from app.rework import HIDDEN, SOURCE_LIMIT, ReworkMaterials, clip, sanitize, secrets_of
 from app.schemas import (
+    ChangeClass,
     DeployResult,
     ModelProfile,
     ReleaseKind,
@@ -294,6 +295,18 @@ def test_attempt_counts_retries_and_rework_without_offset(office):
     assert store.attempt(task_id) == 1
     office.set_task(task_id, rework_count=1)
     assert store.attempt(task_id) == 2
+
+
+@pytest.mark.pg
+def test_rework_adds_limit_of_task_class(office):
+    _, me = office.login()
+    outcome = IntakeOutcome(True, None, change_class=ChangeClass.backend_api)
+    task_id = office.store.create_task(me["id"], "Поле в ответе API.", ModelProfile.hybrid, outcome).id
+    office.set_task(task_id, status="failed", failure_kind="verify_failed")
+    context = {"source": "verify_failed", "release_id": "rel_x", "owner_id": "rel_x", "merge_sha": "c" * 40}
+    with office.store.db.locked_transaction() as conn:
+        assert office.store.start_rework_in(conn, task_id, "rel_x", context)
+    assert office.store.get_task(task_id).usage.model_calls_limit == 120
 
 
 @pytest.mark.pg

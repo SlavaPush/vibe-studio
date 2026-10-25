@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("office.tasks")
 
-MODEL_CALLS_LIMIT = 30
+MODEL_CALLS_LIMITS = {ChangeClass.frontend_ui: 30, ChangeClass.backend_api: 60}
 SIGNAL_SLOT_ACQUIRED = "slot_acquired"
 SIGNAL_DECISION_RECORDED = "decision_recorded"
 SIGNAL_TASK_CLOSED = "task_closed"
@@ -698,8 +698,8 @@ class TaskStore:
             "UPDATE tasks SET rework_of = :owner, rework_count = :count, rework_priority = :yes, rework_context = :context, "
             "model_calls_limit = model_calls_limit + :calls WHERE id = :id",
             {
-                "owner": owner_id, "count": attempt, "yes": True, "context": _json(context), "calls": MODEL_CALLS_LIMIT,
-                "id": task_id,
+                "owner": owner_id, "count": attempt, "yes": True, "context": _json(context),
+                "calls": MODEL_CALLS_LIMITS[task.change_class], "id": task_id,
             },
         )
         self.record_event(
@@ -817,7 +817,7 @@ class TaskStore:
                     "reason": None if outcome.accepted else outcome.reason,
                     "files": "[]",
                     "calls": outcome.model_calls,
-                    "limit": MODEL_CALLS_LIMIT,
+                    "limit": MODEL_CALLS_LIMITS[outcome.change_class if outcome.accepted else ChangeClass.frontend_ui],
                     "input_tokens": outcome.input_tokens,
                     "output_tokens": outcome.output_tokens,
                     "change_class": outcome.change_class.value,
