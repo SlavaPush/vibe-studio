@@ -32,13 +32,9 @@ const DESKTOP_QUERY = '(min-width: 768px)'
 
 const COMPOSER_INPUT_ID = 'composer-input'
 
-const APP_TITLE = 'vibe-chat'
-
 export default function App({ store, controller, version = buildVersion() }: AppProps) {
   const state = useChatState(store, (current) => current)
   const active = state.conversations.find((item) => item.id === state.activeConversationId)
-  const activeTitle = (active?.title ?? '').trim()
-  const documentTitle = activeTitle ? `${activeTitle} — ${APP_TITLE}` : APP_TITLE
   const error = state.errors[state.activeConversationId ?? NO_CONVERSATION]
   const listFailed = state.errors[NO_CONVERSATION] !== undefined
   const versionLabel = (
@@ -59,10 +55,6 @@ export default function App({ store, controller, version = buildVersion() }: App
   ) {
     setUpdatePrompt('open')
   }
-
-  useEffect(() => {
-    document.title = documentTitle
-  }, [documentTitle])
 
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') return
