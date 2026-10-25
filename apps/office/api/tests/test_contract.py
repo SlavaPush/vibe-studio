@@ -51,6 +51,7 @@ PLAN_EVENT_TYPES = [
     "release_blocked",
     "release_unblocked",
     "external_publish",
+    "rework_started",
 ]
 
 

@@ -32,6 +32,7 @@ FINAL_FAILURES: dict[FailureKind, str] = {
     FailureKind.pr_rejected: "Агент ревью отклонил PR. Повтор недоступен: поставьте новую задачу.",
     FailureKind.deploy_failed: "Деплой выпуска не выполнен. Повтор недоступен: изменение уже в main и войдёт в следующий выпуск.",
     FailureKind.verify_failed: "Выпуск откатан после проверки. Повтор недоступен: поставьте новую задачу.",
+    FailureKind.rolled_back: "Выпуск откатан администратором. Повтор недоступен: поставьте новую задачу.",
 }
 
 
@@ -81,9 +82,13 @@ def check_task_decision(task: Task, decision: TaskDecision) -> None:
         raise not_allowed("Бюджет обращений к моделям исчерпан. Повтор недоступен.")
 
 
-def check_release_decision(candidate: ReleaseCandidate, decision: ReleaseDecision, fix_sha: str | None = None) -> None:
+def check_release_decision(
+    candidate: ReleaseCandidate, decision: ReleaseDecision, fix_sha: str | None = None, reason: str | None = None
+) -> None:
     if decision == ReleaseDecision.rollback and fix_sha is not None:
         raise not_allowed("fix_sha указывается только в решении «Возобновить выпуск».")
+    if decision == ReleaseDecision.resume_releases and reason is not None:
+        raise not_allowed("Причина указывается только в решении «Откатить».")
     if decision == ReleaseDecision.rollback and not (
         candidate.status == ReleaseStatus.released and candidate.is_published and candidate.kind == ReleaseKind.release
     ):

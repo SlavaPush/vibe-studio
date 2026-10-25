@@ -985,16 +985,36 @@ def test_cancel_racing_merge_keeps_pr_and_records_merge(setup, monkeypatch):
     assert setup.fake.mutations().count(("PATCH", "/repos/SlavaPush/vibe-studio/pulls/1")) == 0
 
 
+def blocked_by_checks(setup):
+    [candidate] = candidates_of(setup)
+    sha = setup.origin.main()
+    assert (candidate.status, candidate.commit_sha, candidate.expected_previous_sha) == ("failed", sha, setup.published)
+    with setup.store.db.connection() as conn:
+        assert setup.store.queue_state(conn)["release_blocked_by"] == candidate.id
+    [target] = candidate.revert.targets
+    assert (target.source, target.base_sha, target.head_sha) == ("checks_failed", setup.published, sha)
+    assert candidate.revert.status == "pending"
+    assert setup.task().rework_reason == candidate.blocked_reason
+    return candidate
+
+
 @pytest.mark.parametrize("conclusion", ["failure", "cancelled", "skipped"])
-def test_failed_push_check_of_merge_commit_fails_without_candidate(setup, conclusion):
+def test_failed_push_check_of_merge_commit_fails_and_failure_blocks_for_revert(setup, conclusion):
     worker = merged(setup)
-    setup.fake.add_push_runs(setup.task().merge_sha, chat_web=conclusion)
+    run_id = setup.fake.add_push_runs(setup.task().merge_sha, chat_web=conclusion)
     drive(worker, setup.task_id)
     task = setup.task()
     assert (task.status, task.failure_kind) == (TaskStatus.failed, FailureKind.checks_failed)
-    assert candidates_of(setup) == []
     assert setup.suite.calls == []
     assert decide(setup, "retry", "retry-merge-checks").status_code == 409
+    if conclusion != "failure":
+        assert candidates_of(setup) == []
+        return
+    candidate = blocked_by_checks(setup)
+    assert candidate.ci_run_ids == [str(run_id)]
+    assert "chat-web (failure)" in candidate.blocked_reason
+    drive(setup.worker(), setup.task_id)
+    assert len(candidates_of(setup)) == 1
 
 
 def test_merge_commit_checks_wait_then_need_attention(setup):
@@ -1010,14 +1030,15 @@ def test_merge_commit_checks_wait_then_need_attention(setup):
 
 
 @pytest.mark.parametrize("step", ["lint", "e2e"])
-def test_failed_critical_e2e_fails_without_candidate(setup, step):
+def test_failed_critical_e2e_fails_and_blocks_for_revert(setup, step):
     worker = merged(setup)
     setup.fake.add_push_runs(setup.task().merge_sha)
     setup.suite.exits = lambda task_id, app, qa, e2e: {step: 1}
     drive(worker, setup.task_id)
     task = setup.task()
     assert (task.status, task.failure_kind) == (TaskStatus.failed, FailureKind.checks_failed)
-    assert candidates_of(setup) == []
+    candidate = blocked_by_checks(setup)
+    assert [check.exit_code for check in candidate.e2e.checks if check.exit_code] == [1]
     reason = [event for event in setup.events(TaskEventType.role_finished) if event.payload["step"] == "merge_checks"]
     assert "exit 1" in reason[-1].payload["summary"]
 

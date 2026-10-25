@@ -14,6 +14,7 @@ from app.permissions import not_allowed, require_admin
 from app.render import FAILED, LIVE, RenderClient, RenderError, RenderUnavailable, is_terminal
 from app.schemas import (
     ACTIVE_RELEASE_STATUSES,
+    REWORK_SOURCES,
     Decision,
     DeployResult,
     FailureKind,
@@ -25,6 +26,7 @@ from app.schemas import (
     ReleaseOrigin,
     ReleaseStatus,
     RevertResult,
+    RevertTarget,
     RollbackResult,
     TaskEventType,
     TaskStatus,
@@ -62,11 +64,46 @@ def created_of(deploy: dict[str, Any]) -> datetime:
         return EPOCH
 
 
-def new_revert(source: str = "auto", fix_sha: str | None = None, decision_id: str | None = None) -> RevertResult:
+def new_revert(
+    source: str = "auto", fix_sha: str | None = None, decision_id: str | None = None,
+    targets: list[RevertTarget] | None = None,
+) -> RevertResult:
     return RevertResult(
         status="pending", source=source, base_sha=None, head_sha=None, pr_number=None, pr_url=None, checks=None,
-        fix_sha=fix_sha, decision_id=decision_id, candidate_id=None, reason=None,
+        fix_sha=fix_sha, decision_id=decision_id, candidate_id=None, reason=None, targets=targets or [],
     )
+
+
+def targets_of(release: ReleaseCandidate) -> list[RevertTarget]:
+    if release.revert is None:
+        return []
+    if release.revert.targets:
+        return list(release.revert.targets)
+    source = "rolled_back" if release.status == ReleaseStatus.rolled_back else "verify_failed"
+    return [
+        RevertTarget(
+            release_id=release.id, source=source, base_sha=release.expected_previous_sha, head_sha=release.commit_sha
+        )
+    ]
+
+
+def fixes_of(release: ReleaseCandidate) -> list[str] | None:
+    revert = release.revert
+    if revert is None or revert.status != "merged" or not revert.fix_sha:
+        return None
+    if not revert.targets:
+        return [revert.fix_sha]
+    if any(target.fixed_by is None for target in revert.targets):
+        return None
+    return list(dict.fromkeys([target.fixed_by for target in revert.targets] + [revert.fix_sha]))
+
+
+def fixed_targets(revert: RevertResult, sha: str) -> list[RevertTarget]:
+    return [
+        target.model_copy(update={"fixed_by": sha, "resumed": revert.source == "resume"})
+        if target.fixed_by is None and target.attempt == revert.attempt else target
+        for target in revert.targets
+    ]
 
 
 class ReleaseQueue:
@@ -228,7 +265,61 @@ class ReleaseQueue:
             conn.execute(
                 "UPDATE tasks SET failure_kind = :kind WHERE id = :id", {"kind": failure_kind.value, "id": task.id}
             )
+        if failure_kind in REWORK_SOURCES:
+            self.store.set_rework_reason(conn, task, reason)
         self.store.transition(conn, task.id, target, expected_from=task.status)
+
+    def contained(self, candidate: ReleaseCandidate) -> frozenset[str]:
+        with self.store.db.connection() as conn:
+            blocked = self.store.queue_state(conn)["release_blocked_by"]
+            owner = self.store.load_candidate(conn, blocked) if blocked else None
+        fixes = fixes_of(owner) if owner is not None else None
+        found = frozenset(sha for sha in fixes or [] if self.contains(candidate.commit_sha, sha))
+        if fixes and set(fixes) <= found:
+            self._backfill(owner)
+        return found
+
+    def _backfill(self, owner: ReleaseCandidate) -> None:
+        revert = owner.revert
+        legacy = not revert.targets
+        if legacy and revert.source == "resume":
+            return
+        targets = [
+            target.model_copy(update={"attempt": revert.attempt, "fixed_by": revert.fix_sha}) if legacy else target
+            for target in targets_of(owner)
+        ]
+        missing = [target for target in targets if target.merges is None and not target.resumed]
+        if not missing and not legacy:
+            return
+        merges = {target.release_id: self.office_merges(target.base_sha, target.head_sha) for target in missing}
+        filled = [
+            target.model_copy(update={"merges": merges[target.release_id]}) if target.release_id in merges else target
+            for target in targets
+        ]
+        with self.store.db.locked_transaction() as conn:
+            current = self.store.load_candidate(conn, owner.id)
+            if current.version != owner.version:
+                return
+            self.store.update_candidate(conn, owner.id, revert=revert.model_copy(update={"targets": filled}))
+            for target in missing:
+                release = self.store.load_candidate(conn, target.release_id)
+                reason = (release.blocked_reason if release else None) or "Изменение отменено revert."
+                for sha in merges[target.release_id]:
+                    task_id = self.store.merge_task(conn, sha)
+                    if task_id is not None:
+                        self.store.fail_merged_in(conn, task_id, FailureKind(target.source), reason)
+
+    def office_merges(self, base: str, head: str) -> list[str]:
+        data = self.github.compare(base, head)
+        parents = {
+            item["sha"]: [parent["sha"] for parent in item.get("parents") or []] for item in data.get("commits") or []
+        }
+        line = []
+        sha = head
+        while sha != base and parents.get(sha):
+            line.append(sha)
+            sha = parents[sha][0]
+        return [sha for sha in line if self.office_merge(sha)]
 
     def _halt_in(self, conn: Connection, candidate: ReleaseCandidate, reason: str) -> None:
         self.store.update_candidate(conn, candidate.id, blocked_reason=reason)
@@ -486,16 +577,17 @@ class ReleaseQueue:
                 candidate, "Во время проверки после деплоя в Render появился деплой вне офиса: отката нет."
             )
         if result.ok:
+            contained = self.contained(candidate)
             with self.store.db.locked_transaction() as conn:
                 if not self._is_active(conn, candidate, R.verifying):
                     return False
-                self._publish_in(conn, self.store.load_candidate(conn, candidate.id))
+                self._publish_in(conn, self.store.load_candidate(conn, candidate.id), contained)
             return True
         if candidate.kind == ReleaseKind.rollback:
             return self._halt(candidate, f"Проверка после ручного отката не пройдена: {result.error}")
         return self._start_rollback(self.store.get_candidate(candidate.id))
 
-    def _publish_in(self, conn: Connection, candidate: ReleaseCandidate) -> None:
+    def _publish_in(self, conn: Connection, candidate: ReleaseCandidate, contained: frozenset[str]) -> None:
         state = self.store.queue_state(conn)
         short = candidate.commit_sha[:7]
         self.store.update_candidate(conn, candidate.id, status=R.released.value, blocked_reason=None)
@@ -508,13 +600,33 @@ class ReleaseQueue:
         for item in self._candidates(conn, "superseded_by = :id", {"id": candidate.id}):
             self._settle(conn, item, S.released, f"Опубликовано в составе {short}.")
         blocked = state["release_blocked_by"]
-        if blocked:
-            self.store.set_queue(conn, release_blocked_by=None)
-            source = self.store.load_candidate(conn, blocked)
-            for task_id in dict.fromkeys((source.task_id, candidate.task_id)):
-                self.store.record_event(
-                    conn, task_id, TaskEventType.release_unblocked, {"release_id": blocked, "fixed_by": candidate.id}
-                )
+        source = self.store.load_candidate(conn, blocked) if blocked else None
+        fixes = fixes_of(source) if source is not None else None
+        if source is None or not fixes or not set(fixes) <= contained:
+            return
+        self.store.set_queue(conn, release_blocked_by=None)
+        for task_id in dict.fromkeys((source.task_id, candidate.task_id)):
+            self.store.record_event(
+                conn, task_id, TaskEventType.release_unblocked, {"release_id": blocked, "fixed_by": candidate.id}
+            )
+        self._rework_in(conn, source)
+
+    def _rework_in(self, conn: Connection, owner: ReleaseCandidate) -> None:
+        targets = owner.revert.targets if owner.revert.targets or owner.revert.source == "resume" else targets_of(owner)
+        for target in targets:
+            if target.resumed:
+                continue
+            release = self.store.load_candidate(conn, target.release_id)
+            for sha in target.merges or []:
+                task_id = self.store.merge_task(conn, sha)
+                if task_id is None:
+                    continue
+                context = {
+                    "source": target.source, "release_id": target.release_id, "owner_id": owner.id, "merge_sha": sha,
+                    "comment": release.reason if release else None, "materials": None,
+                }
+                self.store.start_rework_in(conn, task_id, owner.id, context)
+        self.store._promote(conn)
 
     def _rolled_back_manually(self, conn: Connection, candidate: ReleaseCandidate) -> None:
         row = conn.fetchone(
@@ -523,8 +635,8 @@ class ReleaseQueue:
             {"kind": ReleaseKind.release.value, "status": R.released.value, "sha": candidate.expected_previous_sha},
         )
         reason = (
-            f"Ручной откат администратора: опубликована прежняя версия {candidate.commit_sha[:7]} вместо "
-            f"{candidate.expected_previous_sha[:7]}."
+            f"Ручной откат администратора: {candidate.reason or 'причина не указана'}. Опубликована прежняя версия "
+            f"{candidate.commit_sha[:7]} вместо {candidate.expected_previous_sha[:7]}."
         )
         self.store.record_event(
             conn, candidate.task_id, TaskEventType.rollback_status,
@@ -537,14 +649,32 @@ class ReleaseQueue:
             return
         selected = candidate_from_row(row)
         self.store.update_candidate(
-            conn, selected.id, status=R.rolled_back.value, blocked_reason=reason, revert=new_revert()
+            conn, selected.id, status=R.rolled_back.value, blocked_reason=reason, reason=candidate.reason
         )
-        self._block_in(conn, selected, reason)
+        self._block_in(conn, selected, reason, "rolled_back")
+        for item in [selected] + self._candidates(conn, "superseded_by = :id", {"id": selected.id}):
+            if item.kind == ReleaseKind.release and item.origin == ReleaseOrigin.task:
+                self.store.fail_merged_in(conn, item.task_id, FailureKind.rolled_back, reason)
 
-    def _block_in(self, conn: Connection, candidate: ReleaseCandidate, reason: str) -> None:
-        self.store.set_queue(conn, release_blocked_by=candidate.id)
+    def _block_in(self, conn: Connection, candidate: ReleaseCandidate, reason: str, source: str) -> None:
+        target = RevertTarget(
+            release_id=candidate.id, source=source, base_sha=candidate.expected_previous_sha,
+            head_sha=candidate.commit_sha,
+        )
+        blocked = self.store.queue_state(conn)["release_blocked_by"]
+        owner = self.store.load_candidate(conn, blocked) if blocked else None
+        if owner is None or owner.revert is None:
+            self.store.update_candidate(conn, candidate.id, revert=new_revert(targets=[target]))
+            self.store.set_queue(conn, release_blocked_by=candidate.id)
+            owner = candidate
+        else:
+            targets = targets_of(owner)
+            if candidate.id not in {item.release_id for item in targets}:
+                revert = owner.revert.model_copy(update={"targets": targets + [target]})
+                self.store.update_candidate(conn, owner.id, revert=revert)
         self.store.record_event(
-            conn, candidate.task_id, TaskEventType.release_blocked, {"release_id": candidate.id, "reason": reason[:300]}
+            conn, candidate.task_id, TaskEventType.release_blocked,
+            {"release_id": candidate.id, "blocked_by": owner.id, "reason": reason[:300]},
         )
 
     def _start_rollback(self, candidate: ReleaseCandidate) -> bool:
@@ -627,9 +757,7 @@ class ReleaseQueue:
                 f"{current.verify.error if current.verify else 'нет данных'}. "
                 f"Выполнен откат к {rollback.target_sha[:7]}."
             )
-            self.store.update_candidate(
-                conn, candidate.id, status=R.failed.value, blocked_reason=reason, revert=new_revert()
-            )
+            self.store.update_candidate(conn, candidate.id, status=R.failed.value, blocked_reason=reason)
             self.store.set_queue(conn, active_release_id=None)
             self.store.record_event(
                 conn, candidate.task_id, TaskEventType.rollback_status,
@@ -642,7 +770,7 @@ class ReleaseQueue:
         return True
 
     def _fail_rolled_back(self, conn: Connection, candidate: ReleaseCandidate, reason: str) -> None:
-        self._block_in(conn, candidate, reason)
+        self._block_in(conn, candidate, reason, "verify_failed")
         self._settle(conn, candidate, S.failed, reason, FailureKind.verify_failed)
         for item in self._candidates(conn, "superseded_by = :id", {"id": candidate.id}):
             self._settle(conn, item, S.failed, f"Выпуск в составе {candidate.commit_sha[:7]} откатан.", FailureKind.verify_failed)
@@ -674,8 +802,10 @@ class ReleaseQueue:
             blocked = self.store.queue_state(conn)["release_blocked_by"]
             source = self.store.load_candidate(conn, blocked) if blocked else None
         if source is not None:
-            fix = source.revert.fix_sha if source.revert and source.revert.status == "merged" else None
-            releases = [item for item in releases if fix and self.contains(item.commit_sha, fix)]
+            fixes = fixes_of(source)
+            releases = [
+                item for item in releases if fixes and all(self.contains(item.commit_sha, sha) for sha in fixes)
+            ]
         if not releases:
             return False
         chosen = releases[0]
@@ -893,7 +1023,11 @@ class ReleaseQueue:
                 )
                 active = self.store.queue_state(conn)["active_release_id"]
             if request.fix_sha is None and replayed is None and active == release_id:
-                observed = self.observe()
+                live = self.observe()
+                try:
+                    observed = (live, self.contained(self.store.get_candidate(release_id)))
+                except (GitHubError, GitHubUnavailable):
+                    raise not_allowed("GitHub недоступен: состав выпуска не сверен, повторите решение.") from None
         return decide_release(self.store, participant, release_id, request, partial(self.resume_in, observed))
 
     def observe(self) -> str:
@@ -919,8 +1053,8 @@ class ReleaseQueue:
         return sha
 
     def resume_in(
-        self, observed: str | None, conn: Connection, candidate: ReleaseCandidate, decision: Decision,
-        request: ReleaseDecisionRequest,
+        self, observed: tuple[str, frozenset[str]] | None, conn: Connection, candidate: ReleaseCandidate,
+        decision: Decision, request: ReleaseDecisionRequest,
     ) -> None:
         state = self.store.queue_state(conn)
         if request.fix_sha is not None:
@@ -934,7 +1068,11 @@ class ReleaseQueue:
                 )
             resumed = new_revert("resume", request.fix_sha, decision.decision_id)
             if revert is not None:
-                resumed = resumed.model_copy(update={"attempt": revert.attempt, "tree": revert.tree})
+                targets = [
+                    target if target.fixed_by else target.model_copy(update={"attempt": revert.attempt})
+                    for target in targets_of(candidate)
+                ]
+                resumed = resumed.model_copy(update={"attempt": revert.attempt, "tree": revert.tree, "targets": targets})
             self.store.update_candidate(conn, candidate.id, revert=resumed)
             return
         if state["release_blocked_by"] == candidate.id:
@@ -945,7 +1083,7 @@ class ReleaseQueue:
         if candidate.id == state["active_release_id"]:
             if observed is None:
                 raise not_allowed("Сверка не выполнена: повторите решение.")
-            self._resolve_in(conn, candidate, observed)
+            self._resolve_in(conn, candidate, observed[0], observed[1])
             return
         if candidate.status != R.pending:
             raise not_allowed("Возобновить можно только остановленный выпуск в очереди или активный выпуск.")
@@ -979,7 +1117,7 @@ class ReleaseQueue:
             ),
         )
 
-    def _resolve_in(self, conn: Connection, candidate: ReleaseCandidate, live: str) -> None:
+    def _resolve_in(self, conn: Connection, candidate: ReleaseCandidate, live: str, contained: frozenset[str]) -> None:
         rows = conn.fetchall(
             "SELECT * FROM operations WHERE release_id = :id AND kind IN ('deploy', 'rollback')", {"id": candidate.id}
         )
@@ -995,7 +1133,7 @@ class ReleaseQueue:
                     },
                 )
         if published:
-            self._publish_in(conn, candidate)
+            self._publish_in(conn, candidate, contained)
             return
         reason = f"Сверка «Возобновить выпуск»: опубликована {live[:7]}, выпуск {candidate.commit_sha[:7]} не опубликован."
         self.store.update_candidate(conn, candidate.id, status=R.failed.value)
@@ -1003,7 +1141,7 @@ class ReleaseQueue:
         released = self._candidates(conn, "status = :status AND commit_sha = :sha", {"status": R.released.value, "sha": live})
         self._set_published(conn, released[-1] if released else None, live)
         if rolled:
-            self.store.update_candidate(conn, candidate.id, blocked_reason=reason, revert=new_revert())
+            self.store.update_candidate(conn, candidate.id, blocked_reason=reason)
             self._fail_rolled_back(conn, candidate, reason)
             return
         self._restore_superseded(conn, candidate)

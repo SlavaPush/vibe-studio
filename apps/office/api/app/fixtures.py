@@ -66,6 +66,9 @@ TASKS = [
         changed_files=[],
         fix_cycles=0,
         usage=Usage(model_calls=1, model_calls_limit=30, input_tokens=640, output_tokens=85),
+        rework_count=0,
+        rework_limit=1,
+        rework_reason=None,
     ),
     Task(
         id="tsk_101",
@@ -100,6 +103,9 @@ TASKS = [
         changed_files=["web/src/components/chat/MessageActions.tsx"],
         fix_cycles=0,
         usage=Usage(model_calls=9, model_calls_limit=30, input_tokens=48210, output_tokens=9120),
+        rework_count=0,
+        rework_limit=1,
+        rework_reason=None,
     ),
     Task(
         id="tsk_102",
@@ -134,6 +140,9 @@ TASKS = [
         changed_files=["web/src/components/settings/ThemeSwitch.tsx"],
         fix_cycles=1,
         usage=Usage(model_calls=21, model_calls_limit=30, input_tokens=132400, output_tokens=24310),
+        rework_count=0,
+        rework_limit=1,
+        rework_reason=None,
     ),
 ]
 

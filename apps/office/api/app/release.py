@@ -16,7 +16,7 @@ from app.db import Connection, from_text, to_text, utcnow
 from app.github import ACTIONS_APP_ID, GitHubClient, GitHubError, GitHubUnavailable
 from app.models_gateway import InvalidModelResponse, ModelsGateway, ProviderError
 from app.operations import Operation, OperationLog, OpStatus
-from app.release_queue import QueueBusy, ReleaseQueue
+from app.release_queue import QueueBusy, ReleaseQueue, fixed_targets, targets_of
 from app.render import RenderClient, RenderError, RenderUnavailable
 from app.required_checks import RequiredCheck
 from app.roles import CHECKLIST, PR_REVIEWER, ContextTooLarge, Entry, PrReview, assemble
@@ -48,6 +48,7 @@ from app.tasks import (
     TaskStore,
     _json,
     new_id,
+    rework_tree,
 )
 from app.workspace import NETWORK_TIMEOUT, PushResult, Workspace, branch_name
 
@@ -98,8 +99,9 @@ class Carrier:
 
 
 def task_carrier(task: Task) -> Carrier:
+    tree = rework_tree(task.id, task.rework_count)
     return Carrier(
-        id=task.id, task_id=task.id, tree=task.id, title=task.title, base_sha=task.base_sha,
+        id=tree, task_id=task.id, tree=tree, title=task.title, base_sha=task.base_sha,
         head_sha=task.head_sha, pr_number=task.pr_number, pr_url=task.pr_url, merge_sha=task.merge_sha,
         checks=task.checks,
     )
@@ -238,7 +240,7 @@ class ReleaseWorker:
         if pending:
             return self._reconcile(c, pending[0])
         if task.status == S.cancelled:
-            closed = self.ops.find(f"{CLOSE_PR}:{task_id}")
+            closed = self.ops.find(f"{CLOSE_PR}:{c.id}")
             if task.merge_sha or task.pr_number is None or (closed is not None and closed.status == OpStatus.succeeded):
                 return False
             return self._close(c)
@@ -248,7 +250,11 @@ class ReleaseWorker:
         with self.store.db.connection() as conn:
             blocked = self.store.queue_state(conn)["release_blocked_by"]
             release = self.store.load_candidate(conn, blocked) if blocked else None
-        if release is None or release.revert is None or release.revert.status not in ("pending", "active"):
+        if release is None or release.revert is None:
+            return False
+        if self._needs_attempt(release):
+            return self._next_attempt(release)
+        if release.revert.status not in ("pending", "active"):
             return False
         c = revert_carrier(release, self.store.get_task(release.task_id))
         if release.revert.status == "pending":
@@ -258,12 +264,59 @@ class ReleaseWorker:
             return self._reconcile(c, pending[0])
         return self._integrate(c)
 
+    def _needs_attempt(self, release: ReleaseCandidate) -> bool:
+        revert = release.revert
+        statuses = ("active", "merged", "needs_attention") if revert.source == "auto" else ("merged",)
+        if revert.status not in statuses:
+            return False
+        added = [target for target in revert.targets if target.fixed_by is None and target.attempt != revert.attempt]
+        return bool(added) and not self.ops.open_for(release.task_id, release.id)
+
+    def _next_attempt(self, release: ReleaseCandidate) -> bool:
+        with self.store.db.locked_transaction() as conn:
+            current = self.store.load_candidate(conn, release.id)
+            if self.store.queue_state(conn)["release_blocked_by"] != release.id or current.version != release.version:
+                return False
+            revert = current.revert.model_copy(
+                update={
+                    "status": "pending", "source": "auto", "attempt": current.revert.attempt + 1, "fix_sha": None,
+                    "candidate_id": None, "reason": None,
+                }
+            )
+            self.store.update_candidate(conn, release.id, revert=revert)
+            self.store.record_event(
+                conn, release.task_id, TaskEventType.role_finished,
+                {
+                    "step": REVERT, "outcome": "ok", "revert_of": release.id,
+                    "summary": f"В набор отмены добавлены новые слияния: revert, попытка {revert.attempt}.",
+                },
+            )
+        return True
+
+    def _fail_targets(self, found: list[tuple[Any, list[str]]]) -> None:
+        with self.store.db.locked_transaction() as conn:
+            for target, shas in found:
+                release = self.store.load_candidate(conn, target.release_id)
+                reason = (release.blocked_reason if release else None) or "Изменение отменено revert."
+                for sha in shas:
+                    task_id = self.store.merge_task(conn, sha)
+                    if task_id is not None:
+                        self.store.fail_merged_in(conn, task_id, FailureKind(target.source), reason)
+
     def _start_revert(self, c: Carrier, release: ReleaseCandidate) -> bool:
         if release.revert.source == "resume":
             fix = release.revert.fix_sha
+            covered = [
+                target for target in release.revert.targets
+                if target.fixed_by is None and target.attempt == release.revert.attempt and target.release_id != release.id
+            ]
             try:
                 in_main = self.github.compare(fix, "main")
                 after = self.github.compare(release.commit_sha, fix)
+                outside = {
+                    target.release_id for target in covered
+                    if self.github.compare(target.head_sha, fix).get("status") != "ahead"
+                }
             except GitHubError as error:
                 if error.status in (404, 422):
                     return self._halt(c, f"Исправляющий commit {fix[:7]} не найден в репозитории.", step=REVERT)
@@ -279,8 +332,12 @@ class ReleaseWorker:
                     c, f"Исправляющий commit {fix[:7]} не является потомком откатанного {release.commit_sha[:7]}.",
                     step=REVERT,
                 )
+            targets = [
+                target.model_copy(update={"attempt": None}) if target.release_id in outside else target
+                for target in release.revert.targets
+            ]
             with self.store.db.locked_transaction() as conn:
-                self._save_in(conn, c, status="active")
+                self._save_in(conn, c, status="active", targets=targets)
                 self._event(
                     conn, c, TaskEventType.role_finished,
                     {"step": REVERT, "outcome": "ok", "summary": f"Исправляющий commit {fix[:7]} принят: проверяется итоговый commit."},
@@ -300,31 +357,57 @@ class ReleaseWorker:
         operation, allowed = self.ops.begin(REVERT, c.id, c.task_id, release.id)
         if not allowed:
             return False
-        base_sha, head_sha = release.expected_previous_sha, release.commit_sha
+        targets = targets_of(release)
+        done = {sha for target in targets if target.fixed_by for sha in target.merges or []}
+        pending = [target for target in targets if target.fixed_by is None]
+        ranges = ", ".join(f"{target.base_sha[:7]}..{target.head_sha[:7]}" for target in pending)
+        found: list[tuple[Any, list[str]]] = []
+
+        def covered() -> list[Any]:
+            merges = {target.release_id: shas for target, shas in found}
+            return [
+                target.model_copy(
+                    update={"merges": merges.get(target.release_id, target.merges), "attempt": release.revert.attempt}
+                )
+                if target.fixed_by is None else target
+                for target in targets
+            ]
+
         try:
-            line = self.workspace.first_parent(base_sha, head_sha)
-            commits = [item for item in line if self.queue.office_merge(item[0])]
-            if not commits:
+            picked: dict[str, list[str]] = {}
+            for target in pending:
+                line = self.workspace.first_parent(target.base_sha, target.head_sha)
+                merges = [item for item in line if item[0] not in done and self.queue.office_merge(item[0])]
+                found.append((target, [item[0] for item in merges]))
+                for item in merges:
+                    picked.setdefault(item[0], item)
+            if not picked:
                 with self.store.db.locked_transaction() as conn:
                     self.ops.finish(conn, operation, OpStatus.failed, detail="no office merges")
+                    self._save_in(conn, c, targets=covered())
                     self._halt_in(
                         conn, c,
-                        f"В диапазоне {base_sha[:7]}..{head_sha[:7]} нет слияний PR офиса: revert не создаётся. "
+                        f"В диапазоне {ranges} нет слияний PR офиса: revert не создаётся. "
                         "Исправьте main и укажите fix_sha в решении «Возобновить выпуск».",
                         step=REVERT,
                     )
                 return False
+            order = {sha: index for index, sha in enumerate(self.workspace.main_line())}
+            commits = sorted(picked.values(), key=lambda item: order.get(item[0], len(order)))
+            self._fail_targets(found)
             base, head = self.workspace.revert_branch(tree, commits)
         except WorkspaceError as error:
             with self.store.db.locked_transaction() as conn:
                 self.ops.finish(conn, operation, OpStatus.failed, detail=str(error)[:300])
+                self._save_in(conn, c, targets=covered())
                 self._halt_in(conn, c, f"Revert откатанного выпуска не создан: {error}", step=REVERT)
             return False
+        updated = covered()
         with self.store.db.locked_transaction() as conn:
             self.ops.finish(conn, operation, OpStatus.succeeded, external_ref=head)
             self._save_in(
                 conn, c, status="active", base_sha=base, head_sha=None, pr_number=None, pr_url=None, checks=None,
-                fix_sha=None, candidate_id=None, tree=None if tree == f"revert-{release.id}" else tree,
+                fix_sha=None, candidate_id=None, tree=None if tree == f"revert-{release.id}" else tree, targets=updated,
             )
             self._event(
                 conn, c, TaskEventType.tool_called,
@@ -663,16 +746,15 @@ class ReleaseWorker:
         checks_entry = Entry(f"Обязательные проверки PR #{c.pr_number} для head {c.head_sha}", checks, required=True)
         diff_entry = Entry(f"Diff {str(c.base_sha)[:7]}..{str(c.head_sha)[:7]}", diff)
         if c.release_id is not None:
-            release = self.store.get_candidate(c.release_id)
+            ranges, reasons = self._revert_scope(self.store.get_candidate(c.release_id))
             fixed = [
                 Entry(
                     "Назначение PR",
-                    f"Revert выпуска {release.expected_previous_sha[:7]}..{release.commit_sha[:7]} задачи "
-                    f"«{task.title}» после отката на Render: отменяются только слияния PR офиса из этого диапазона, "
-                    "commit владельца остаются.",
+                    f"Revert выпуска {ranges} задачи «{task.title}» после отката или непрошедших проверок: "
+                    "отменяются только слияния PR офиса из этого диапазона, commit владельца остаются.",
                     required=True,
                 ),
-                Entry("Причина отката", release.blocked_reason or "нет данных", required=True),
+                Entry("Причина отката", reasons, required=True),
                 checks_entry,
                 checklist,
                 Entry(
@@ -774,7 +856,20 @@ class ReleaseWorker:
             current = self._carrier_in(conn, c)
             self.ops.finish(conn, operation, OpStatus.succeeded, external_ref=sha)
             self._save_in(conn, c, merge_sha=sha, checks=None)
+            if c.release_id is not None:
+                self._fix_targets_in(conn, c.release_id, sha)
             self._event(conn, c, TaskEventType.pr_merged, {"pr_number": current.pr_number, "merge_sha": sha})
+
+    def _fix_targets_in(self, conn: Connection, release_id: str, sha: str) -> None:
+        revert = self.store.load_candidate(conn, release_id).revert
+        if revert.targets:
+            self.store.update_candidate(
+                conn, release_id, revert=revert.model_copy(update={"targets": fixed_targets(revert, sha)})
+            )
+
+    def _merged_in(self, conn: Connection, c: Carrier, candidate_id: str) -> None:
+        self._save_in(conn, c, status="merged", candidate_id=candidate_id)
+        self._fix_targets_in(conn, c.release_id, c.merge_sha)
 
     def _finish(self, c: Carrier) -> bool:
         minutes = f"{self.settings.checks_timeout_minutes:g}"
@@ -799,7 +894,11 @@ class ReleaseWorker:
             if check.status == "completed" and check.conclusion != "success"
         ]
         if failed:
-            return self._fail_final(c, f"Обязательные проверки итогового commit {sha[:7]} не пройдены: {', '.join(failed)}.")
+            broken = any(check.conclusion == "failure" for check in summary.checks if check.status == "completed")
+            return self._fail_final(
+                c, f"Обязательные проверки итогового commit {sha[:7]} не пройдены: {', '.join(failed)}.",
+                revert=broken, run_ids=run_ids,
+            )
         waiting = [check.name for check in summary.checks if check.status != "completed"]
         if waiting:
             if self._checks_expired(c):
@@ -812,8 +911,39 @@ class ReleaseWorker:
             return False
         return self._candidate(self._reload(c), report, run_ids)
 
-    def _fail_final(self, c: Carrier, reason: str) -> bool:
-        return self._halt(c, reason, step="merge_checks", failure_kind=FailureKind.checks_failed)
+    def _fail_final(
+        self, c: Carrier, reason: str, *, revert: bool = False, run_ids: list[str] | None = None,
+        report: CheckReport | None = None,
+    ) -> bool:
+        if c.release_id is not None or not revert:
+            return self._halt(c, reason, step="merge_checks", failure_kind=FailureKind.checks_failed)
+        sha = c.merge_sha
+        try:
+            parent = self.workspace.parent(sha)
+        except WorkspaceError as error:
+            return self._halt(c, f"{reason} Revert не подготовлен: {error}", step="merge_checks")
+        with self.store.db.locked_transaction() as conn:
+            if not self._active_in(conn, c) or self._carrier_in(conn, c).merge_sha != sha:
+                return False
+            task = self.store.load_task(conn, c.task_id)
+            created = self.store.create_candidate(
+                conn,
+                task_id=c.task_id,
+                kind=ReleaseKind.release,
+                commit_sha=sha,
+                expected_previous_sha=parent,
+                spec_hash=task.spec.spec_hash if task.spec else "",
+                suite_hash=(report.suite_hash if report else None) or "",
+                ci_run_ids=run_ids or [],
+                pr_url=c.pr_url,
+                status=ReleaseStatus.failed,
+                e2e=report,
+            )
+            self.store.update_candidate(conn, created.id, blocked_reason=reason)
+            self._halt_in(conn, c, reason, step="merge_checks", failure_kind=FailureKind.checks_failed)
+            self.store.set_rework_reason(conn, task, reason)
+            self.queue._block_in(conn, created, reason, FailureKind.checks_failed.value)
+        return False
 
     def _final_suite(self, c: Carrier) -> CheckReport | None:
         sha = c.merge_sha
@@ -844,7 +974,9 @@ class ReleaseWorker:
         sha = c.merge_sha[:7]
         failed = [f"{check.command} (exit {check.exit_code})" for check in report.checks if check.exit_code != 0]
         if any(check.exit_code != 0 and check.command in commands for check in report.checks):
-            self._fail_final(c, f"Критический E2E итогового commit {sha} не пройден: {', '.join(failed)}.")
+            self._fail_final(
+                c, f"Критический E2E итогового commit {sha} не пройден: {', '.join(failed)}.", revert=True, report=report
+            )
             return None
         found = {check.command for check in report.checks}
         missing = [f"{command} (не выполнен)" for command in commands if command not in found]
@@ -899,7 +1031,7 @@ class ReleaseWorker:
             if c.release_id is None:
                 self.store.transition(conn, c.task_id, S.awaiting_release, expected_from=S.awaiting_integration)
             else:
-                self._save_in(conn, c, status="merged", candidate_id=candidate.id)
+                self._merged_in(conn, c, candidate.id)
         if c.release_id is not None and c.head_sha:
             with suppress(WorkspaceError):
                 self.workspace.remove_worktree(c.tree)
@@ -917,7 +1049,7 @@ class ReleaseWorker:
                     conn, c, f"Кандидат выпуска {short} уже создан и находится в статусе {found.status}: укажите другой commit."
                 )
                 return False
-            self._save_in(conn, c, status="merged", candidate_id=found.id)
+            self._merged_in(conn, c, found.id)
             self._event(
                 conn, c, TaskEventType.role_finished,
                 {"step": "release", "outcome": "ok", "summary": f"Кандидат выпуска {short} уже создан: выпуск продолжится с ним."},
@@ -1187,15 +1319,25 @@ class ReleaseWorker:
         )
         return self.clock() - (since or self.clock()) > timedelta(minutes=self.settings.checks_timeout_minutes)
 
+    def _revert_scope(self, release: ReleaseCandidate) -> tuple[str, str]:
+        targets = [target for target in targets_of(release) if target.attempt in (None, release.revert.attempt)]
+        targets = targets or targets_of(release)
+        ranges = ", ".join(f"{target.base_sha[:7]}..{target.head_sha[:7]}" for target in targets)
+        reasons = []
+        for target in targets:
+            found = release if target.release_id == release.id else self.store.get_candidate(target.release_id)
+            reasons.append(found.blocked_reason or "нет данных")
+        return ranges, "\n\n".join(dict.fromkeys(reasons))
+
     def _body(self, c: Carrier) -> str:
         task = self.store.get_task(c.task_id)
         if c.release_id is not None:
             release = self.store.get_candidate(c.release_id)
+            ranges, reasons = self._revert_scope(release)
             return (
-                f"## Исправление после отката\n\nRevert выпуска `{release.id}` "
-                f"({release.expected_previous_sha[:7]}..{release.commit_sha[:7]}) задачи «{task.title}»: "
+                f"## Исправление после отката\n\nRevert выпуска `{release.id}` ({ranges}) задачи «{task.title}»: "
                 "отменяются только слияния PR офиса, commit владельца остаются.\n\n"
-                f"## Причина отката\n\n{release.blocked_reason or 'нет данных'}\n\n"
+                f"## Причина отката\n\n{reasons}\n\n"
                 f"Задача офиса: `{task.id}`.\n"
             )
         summaries = self._summaries(task.id)

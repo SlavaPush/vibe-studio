@@ -86,6 +86,7 @@ export const EVENT_TYPE_LABELS: Record<TaskEventType, string> = {
   release_blocked: 'Выпуск заблокирован',
   release_unblocked: 'Блокировка снята',
   external_publish: 'Публикация вне офиса',
+  rework_started: 'Доработка после отката',
 }
 
 export const FAILURE_KIND_LABELS: Record<FailureKind, string> = {
@@ -93,6 +94,7 @@ export const FAILURE_KIND_LABELS: Record<FailureKind, string> = {
   pr_rejected: 'Агент ревью отклонил PR.',
   deploy_failed: 'Деплой выпуска на Render не выполнен.',
   verify_failed: 'Проверка после деплоя не пройдена, выпуск откатан.',
+  rolled_back: 'Выпуск откатан администратором.',
 }
 
 export function failureLabel(task: Task): string | null {

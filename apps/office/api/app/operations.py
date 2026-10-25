@@ -47,12 +47,15 @@ class OperationLog:
     def __init__(self, db: Database) -> None:
         self.db = db
 
-    def begin(self, kind: str, key: str, task_id: str | None, release_id: str | None = None) -> tuple[Operation, bool]:
+    def begin(
+        self, kind: str, key: str, task_id: str | None, release_id: str | None = None, *, detail: str | None = None
+    ) -> tuple[Operation, bool]:
         with self.db.transaction() as conn:
-            return self.begin_in(conn, kind, key, task_id, release_id)
+            return self.begin_in(conn, kind, key, task_id, release_id, detail=detail)
 
     def begin_in(
-        self, conn: Connection, kind: str, key: str, task_id: str | None, release_id: str | None = None
+        self, conn: Connection, kind: str, key: str, task_id: str | None, release_id: str | None = None, *,
+        detail: str | None = None,
     ) -> tuple[Operation, bool]:
         now = to_text(utcnow())
         row = conn.fetchone("SELECT * FROM operations WHERE key = :key", {"key": key})
@@ -60,7 +63,7 @@ class OperationLog:
             conn.execute(
                 "INSERT INTO operations (id, task_id, release_id, kind, key, status, attempt, external_ref, "
                 "detail, started_at, finished_at) VALUES (:id, :task_id, :release_id, :kind, :key, :status, 1, "
-                "NULL, NULL, :now, NULL)",
+                "NULL, :detail, :now, NULL)",
                 {
                     "id": new_id("op"),
                     "task_id": task_id,
@@ -68,6 +71,7 @@ class OperationLog:
                     "kind": kind,
                     "key": key,
                     "status": OpStatus.started.value,
+                    "detail": detail,
                     "now": now,
                 },
             )
@@ -75,8 +79,9 @@ class OperationLog:
         elif row["status"] == OpStatus.failed:
             conn.execute(
                 "UPDATE operations SET status = :status, attempt = attempt + 1, started_at = :now, "
-                "finished_at = NULL, external_ref = NULL WHERE id = :id",
-                {"status": OpStatus.started.value, "now": now, "id": row["id"]},
+                f"finished_at = NULL, external_ref = NULL{', detail = :detail' if detail is not None else ''} "
+                "WHERE id = :id",
+                {"status": OpStatus.started.value, "now": now, "id": row["id"], "detail": detail},
             )
             allowed = True
         else:

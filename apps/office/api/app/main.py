@@ -83,7 +83,7 @@ def create_app(
     db = Database(settings.database_url)
     db.init_schema()
     notifier = EventNotifier()
-    store = TaskStore(db, notifier.notify, settings.pr_review_calls)
+    store = TaskStore(db, notifier.notify, settings.pr_review_calls, settings.rework_limit)
     sessions = SessionStore(db, settings, AccessCodes(settings))
     models = gateway or ModelsGateway(settings)
     intake = IntakeFilter(models, settings)
@@ -117,6 +117,8 @@ def create_app(
                 settings, store, office_workspace, github, load_required_checks(settings.checkout_root),
                 gateway=models, suite=sandbox, render=render,
             )
+            office_runner.materials.github = github
+            office_runner.materials.render = render
         else:
             logger.warning(
                 "GitHub App не настроен (GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID, GITHUB_APP_PRIVATE_KEY_PATH): "

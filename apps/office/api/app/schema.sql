@@ -51,7 +51,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     failure_kind TEXT,
     checks TEXT,
     merge_sha TEXT,
-    pr_review_calls INTEGER NOT NULL DEFAULT 0
+    pr_review_calls INTEGER NOT NULL DEFAULT 0,
+    rework_count INTEGER NOT NULL DEFAULT 0,
+    rework_reason TEXT,
+    rework_priority BOOLEAN NOT NULL DEFAULT false,
+    rework_context TEXT,
+    rework_of TEXT
 );
 
 CREATE INDEX IF NOT EXISTS tasks_status_created ON tasks (status, created_at);
@@ -108,7 +113,8 @@ CREATE TABLE IF NOT EXISTS release_candidates (
     blocked_reason TEXT,
     verify TEXT,
     rollback TEXT,
-    revert TEXT
+    revert TEXT,
+    reason TEXT
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS release_candidates_live_commit ON release_candidates (task_id, commit_sha)

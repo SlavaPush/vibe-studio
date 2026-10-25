@@ -30,7 +30,10 @@ class RenderClient:
 
     def _call(self, method: str, path: str, *, params: dict[str, Any] | None = None,
               body: dict[str, Any] | None = None) -> Any:
-        full = f"/v1/services/{self.service_id}{path}"
+        return self._request(method, f"/v1/services/{self.service_id}{path}", params=params, body=body)
+
+    def _request(self, method: str, full: str, *, params: dict[str, Any] | None = None,
+                 body: dict[str, Any] | None = None) -> Any:
         headers = {"Accept": "application/json", "Authorization": f"Bearer {self.api_key}"}
         response = None
         try:
@@ -62,6 +65,19 @@ class RenderClient:
 
     def rollback(self, deploy_id: str) -> dict[str, Any]:
         return self._call("POST", "/rollback", body={"deployId": deploy_id})
+
+    def service(self) -> dict[str, Any]:
+        return self._call("GET", "")
+
+    def logs(self, owner_id: str, start: str | None, end: str | None, limit: int = 100) -> dict[str, Any]:
+        params = {
+            "ownerId": owner_id, "resource": self.service_id, "direction": "forward", "limit": limit,
+            "startTime": start, "endTime": end,
+        }
+        data = self._request("GET", "/v1/logs", params={key: value for key, value in params.items() if value})
+        if not isinstance(data, dict):
+            raise RenderUnavailable("GET", "/v1/logs")
+        return data
 
 
 def render_client(

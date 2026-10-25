@@ -150,6 +150,23 @@ class GitHubClient:
         data = self._call("GET", f"/actions/runs/{run_id}/jobs", params={"per_page": 100})
         return data.get("jobs", [])
 
+    def job_log(self, job_id: int) -> str:
+        path = f"/repos/{self.repo}/actions/jobs/{job_id}/logs"
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": API_VERSION,
+            "Authorization": f"token {self.auth.token()}",
+        }
+        try:
+            response = self.http.get(path, headers=headers)
+            if response.status_code in (301, 302, 303, 307, 308) and response.headers.get("location"):
+                response = self.http.get(response.headers["location"])
+        except httpx.HTTPError:
+            raise GitHubUnavailable("GET", path) from None
+        if response.status_code >= 300:
+            raise GitHubError("GET", path, response.status_code)
+        return response.text
+
     def suite_app(self, suite_id: int) -> int | None:
         data = self._call("GET", f"/check-suites/{suite_id}")
         return (data.get("app") or {}).get("id")

@@ -1,7 +1,9 @@
 import base64
 import io
+import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tarfile
@@ -25,13 +27,16 @@ from app.branch_check import (
 )
 from app.config import APP_DIR, Settings
 from app.errors import ErrorCode, OfficeError, not_found
+from app.operations import Operation, OperationLog, OpStatus
 from app.paths import PathDenied, PathPolicy
 from app.schemas import SLOT_STATUSES, WORKTREE_STATUSES, AgentRole, Task, TaskEventType, TaskStatus
-from app.tasks import CLOSED_STATUSES, SIGNAL_SLOT_ACQUIRED, SIGNAL_TASK_CLOSED, TaskStore
+from app.tasks import CLOSED_STATUSES, SIGNAL_SLOT_ACQUIRED, SIGNAL_TASK_CLOSED, TaskStore, rework_tree
 
 logger = logging.getLogger("office.workspace")
 
 NETWORK_TIMEOUT = 300
+REWORK_SUFFIX = re.compile(r"-r\d+$")
+REWORK_PREPARE = "rework_prepare"
 DIFF_LIMIT = 1024 * 1024
 CLONE_NAME = "vibe-studio"
 QA_DIR = f"{APP_DIR}/web/e2e/office"
@@ -51,6 +56,10 @@ class SparseUnsafe(WorkspaceError):
     pass
 
 
+class ReworkBlocked(WorkspaceError):
+    pass
+
+
 class PushResult(StrEnum):
     ok = "ok"
     rejected = "rejected"
@@ -59,6 +68,10 @@ class PushResult(StrEnum):
 
 def branch_name(task_id: str) -> str:
     return f"office/{task_id}"
+
+
+def rework_key(task: Task) -> str:
+    return f"{REWORK_PREPARE}:{task.id}:{task.rework_count}"
 
 
 def push_env(token: str) -> dict[str, str]:
@@ -89,6 +102,7 @@ class Workspace:
         self.clone = self.root / CLONE_NAME
         self.trees = self.root / "wt"
         self.paths = PathPolicy(settings.paths_policy)
+        self.ops = OperationLog(store.db)
         self.lock = threading.RLock()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="workspace")
         self._pending = 0
@@ -134,7 +148,7 @@ class Workspace:
                 task_id,
                 TaskEventType.tool_called,
                 {
-                    "arguments": branch_name(task_id),
+                    "arguments": branch_name(self.tree_name(task_id)),
                     "result": "error",
                     "reason": "Удаление рабочей копии отложено до следующего запуска: выполнение задачи не остановилось.",
                 },
@@ -150,12 +164,14 @@ class Workspace:
         tasks = {task.id: task for task in self.store.list_tasks()}
         if self.trees.is_dir():
             for entry in sorted(self.trees.iterdir()):
-                task = tasks.get(entry.name)
-                if task is not None and task.status in CLOSED_STATUSES:
+                task = tasks.get(entry.name) or tasks.get(REWORK_SUFFIX.sub("", entry.name))
+                if task is None:
+                    continue
+                if task.status in CLOSED_STATUSES or entry.name != rework_tree(task.id, task.rework_count):
                     try:
-                        self.remove_worktree(task.id)
+                        self._remove(entry.name)
                     except WorkspaceError:
-                        logger.exception("cannot remove worktree of %s", task.id)
+                        logger.exception("cannot remove worktree %s", entry.name)
         for task in sorted(tasks.values(), key=lambda item: (item.created_at, item.id)):
             if task.status in WORKTREE_STATUSES:
                 self.ensure_worktree(task.id)
@@ -164,10 +180,18 @@ class Workspace:
             timeout: float = GIT_TIMEOUT) -> str:
         return run_git(*args, cwd=cwd or self.clone, env=env, timeout=timeout).decode("utf-8").strip()
 
+    def tree_name(self, name: str) -> str:
+        with self.store.db.connection() as conn:
+            row = conn.fetchone("SELECT rework_count FROM tasks WHERE id = :id", {"id": name})
+        return rework_tree(name, row["rework_count"]) if row else name
+
     def worktree_path(self, task_id: str) -> Path:
-        return self.trees / task_id
+        return self.trees / self.tree_name(task_id)
 
     def is_task_worktree(self, path: Path, task_id: str) -> bool:
+        return self._is_tree(path, self.tree_name(task_id))
+
+    def _is_tree(self, path: Path, tree: str) -> bool:
         if path.is_symlink() or not path.is_dir():
             return False
         try:
@@ -179,7 +203,7 @@ class Workspace:
         return (
             Path(top).resolve() == path.resolve()
             and Path(common).resolve() == (self.clone / ".git").resolve()
-            and head == f"refs/heads/{branch_name(task_id)}"
+            and head == f"refs/heads/{branch_name(tree)}"
         )
 
     def _ensure_clone(self) -> None:
@@ -244,13 +268,21 @@ class Workspace:
         if self._outside_app(path):
             raise SparseUnsafe("После применения sparse checkout в рабочей копии остались файлы вне каталога приложения.")
 
-    def _prepare(self, task: Task) -> tuple[bool, str]:
-        branch = branch_name(task.id)
-        path = self.worktree_path(task.id)
+    def _prepare(self, task: Task) -> tuple[bool, str] | None:
+        tree = rework_tree(task.id, task.rework_count)
+        branch = branch_name(tree)
+        path = self.trees / tree
         self._ensure_clone()
         self.git("worktree", "prune")
+        prepared = self.ops.find(rework_key(task)) if task.rework_count else None
+        if task.rework_count and (prepared is None or prepared.status != OpStatus.succeeded):
+            if task.status not in SLOT_STATUSES:
+                return None
+            return self._prepare_rework(task, tree, prepared)
+        if prepared is not None and not task.base_sha:
+            task = task.model_copy(update={"base_sha": json.loads(prepared.detail)["base_sha"]})
         if os.path.lexists(path):
-            if not self.is_task_worktree(path, task.id):
+            if not self._is_tree(path, tree):
                 raise WorkspaceError("Каталог рабочей копии занят и не является worktree задачи.")
             self._ensure_sparse(path)
             created = False
@@ -268,6 +300,75 @@ class Workspace:
             return created, task.base_sha
         return created, self.git("merge-base", branch, "refs/remotes/origin/main")
 
+    def _prepare_rework(self, task: Task, tree: str, found: Operation | None) -> tuple[bool, str]:
+        for count in range(task.rework_count):
+            self._remove(rework_tree(task.id, count))
+        if found is not None and found.status == OpStatus.started:
+            detail = json.loads(found.detail)
+            return self._apply_rework(found, tree, detail["base_sha"], detail["source_sha"])
+        source = (self.store.rework_context(task.id) or {}).get("merge_sha")
+        if not source:
+            raise WorkspaceError("Исходное слияние доработки не записано.")
+        self.git("fetch", "--quiet", "origin", timeout=NETWORK_TIMEOUT)
+        base = self.git("rev-parse", "--verify", "refs/remotes/origin/main^{commit}")
+        self._remove(tree)
+        detail = json.dumps({"base_sha": base, "source_sha": source})
+        operation, allowed = self.ops.begin(REWORK_PREPARE, rework_key(task), task.id, detail=detail)
+        if not allowed:
+            raise WorkspaceError("Подготовка ветки доработки уже выполняется.")
+        return self._apply_rework(operation, tree, base, source)
+
+    def _apply_rework(self, operation: Operation, tree: str, base: str, source: str) -> tuple[bool, str]:
+        path = self.trees / tree
+        if not os.path.lexists(path):
+            self.trees.mkdir(parents=True, exist_ok=True)
+            self._add_worktree(path, "-B", branch_name(tree), str(path), base)
+        elif not self._is_tree(path, tree):
+            self._rework_blocked(operation, "каталог рабочей копии занят и не является worktree доработки")
+        head = self.git("rev-parse", "HEAD", cwd=path)
+        if head != base:
+            marker = self.git("log", "-1", "--format=%(trailers:key=Office-Rework,valueonly)", head, cwd=path)
+            if marker != tree or self.git("rev-parse", f"{head}^") != base:
+                self._rework_blocked(operation, f"HEAD {head[:7]} не является commit доработки {tree}")
+            self._rework_done(operation, head, base, source, True)
+            return True, base
+        if self.git("status", "--porcelain", "--untracked-files=no", cwd=path):
+            self._rework_reset(path, base)
+        applied = True
+        try:
+            self.git("cherry-pick", "--no-commit", source, cwd=path, env=COMMIT_ENV)
+        except WorkspaceError:
+            self._rework_reset(path, base)
+            applied = False
+        if applied and not self.git("diff", "--cached", "--name-only", cwd=path):
+            applied = False
+        if applied:
+            message = f"Доработка после отката: исходное изменение {source[:7]}\n\nOffice-Rework: {tree}\nOffice-Source: {source}"
+            self.git("commit", "--quiet", "--no-verify", "--no-gpg-sign", "-m", message, cwd=path, env=COMMIT_ENV)
+        head = self.git("rev-parse", "HEAD", cwd=path)
+        self._rework_done(operation, head, base, source, applied)
+        return True, base
+
+    def _rework_reset(self, path: Path, base: str) -> None:
+        with suppress(WorkspaceError):
+            self.git("cherry-pick", "--quit", cwd=path, env=COMMIT_ENV)
+        self.git("reset", "--quiet", "--hard", base, cwd=path)
+
+    def _rework_done(self, operation: Operation, head: str, base: str, source: str, applied: bool) -> None:
+        detail = json.dumps({"base_sha": base, "source_sha": source, "applied": applied})
+        with self.store.db.transaction() as conn:
+            self.ops.finish(conn, operation, OpStatus.succeeded, external_ref=head, detail=detail)
+
+    def _rework_blocked(self, operation: Operation, reason: str) -> None:
+        self.ops.mark(operation, OpStatus.failed, detail=reason)
+        raise ReworkBlocked(f"Подготовка ветки доработки остановлена: {reason}.")
+
+    def rework_applied(self, task: Task) -> bool | None:
+        found = self.ops.find(rework_key(task))
+        if found is None or found.status != OpStatus.succeeded:
+            return None
+        return bool(json.loads(found.detail).get("applied"))
+
     def ensure_worktree(self, task_id: str) -> None:
         try:
             task = self.store.get_task(task_id)
@@ -275,14 +376,15 @@ class Workspace:
             return
         if task.status not in WORKTREE_STATUSES:
             return
+        branch = branch_name(rework_tree(task_id, task.rework_count))
         try:
             with self.lock:
-                created, base_sha = self._prepare(task)
-        except SparseUnsafe as error:
+                prepared = self._prepare(task)
+        except (SparseUnsafe, ReworkBlocked) as error:
             self.store.add_event(
                 task_id,
                 TaskEventType.tool_called,
-                {"arguments": branch_name(task_id), "result": "error", "reason": str(error)},
+                {"arguments": branch, "result": "error", "reason": str(error)},
                 tool="git_worktree",
             )
             self.store.halt(
@@ -291,22 +393,28 @@ class Workspace:
             )
             return
         except WorkspaceError as error:
-            self.store.fail_task(task_id, tool="git_worktree", arguments=branch_name(task_id), reason=str(error))
+            self.store.fail_task(task_id, tool="git_worktree", arguments=branch, reason=str(error))
             return
         except OSError as error:
             reason = f"Файловая операция рабочей области не выполнена: {error.strerror or type(error).__name__}."
-            self.store.fail_task(task_id, tool="git_worktree", arguments=branch_name(task_id), reason=reason)
+            self.store.fail_task(task_id, tool="git_worktree", arguments=branch, reason=reason)
             return
-        if not self.store.record_worktree(task_id, branch_name(task_id), base_sha, created):
+        if prepared is None:
+            return
+        created, base_sha = prepared
+        if not self.store.record_worktree(task_id, branch, base_sha, created):
             self.remove_worktree(task_id)
 
     def remove_worktree(self, task_id: str) -> None:
-        path = self.worktree_path(task_id)
+        self._remove(self.tree_name(task_id))
+
+    def _remove(self, tree: str) -> None:
+        path = self.trees / tree
         with self.lock:
             if not (self.clone / ".git").is_dir():
                 return
             if os.path.lexists(path):
-                if not self.is_task_worktree(path, task_id):
+                if not self._is_tree(path, tree):
                     logger.warning("not removing foreign directory %s", path)
                     return
                 self.git("worktree", "remove", "--force", str(path))
@@ -380,6 +488,24 @@ class Workspace:
             output = self.git("rev-list", "--first-parent", "--parents", f"{base}..{head}")
         return [line.split() for line in output.splitlines() if line]
 
+    def main_line(self) -> list[str]:
+        with self.lock:
+            return self.git("rev-list", "--first-parent", "refs/remotes/origin/main").splitlines()
+
+    def parent(self, sha: str) -> str:
+        with self.lock:
+            self._ensure_clone()
+            self.git("fetch", "--quiet", "origin", "main", timeout=NETWORK_TIMEOUT)
+            return self.git("rev-parse", "--verify", f"{sha}^1^{{commit}}")
+
+    def source_diff(self, sha: str, limit: int) -> str:
+        with self.lock:
+            output = run_git("diff", "--no-color", "--no-ext-diff", "--no-textconv", f"{sha}^1", sha, cwd=self.clone)
+        text = output[:limit].decode("utf-8", "replace")
+        if len(output) > limit:
+            text += f"\n[обрезано: diff, {len(output)} байтов]\n"
+        return text
+
     def revert_branch(self, tree: str, commits: list[list[str]]) -> tuple[str, str]:
         path = self.worktree_path(tree)
         branch = branch_name(tree)
@@ -418,7 +544,7 @@ class Workspace:
 
     def push(self, task_id: str, url: str, token: str, sha: str) -> PushResult:
         path = self.task_worktree(task_id)
-        argv = ["git", "push", "--porcelain", url, f"{sha}:refs/heads/{branch_name(task_id)}"]
+        argv = ["git", "push", "--porcelain", url, f"{sha}:refs/heads/{branch_name(self.tree_name(task_id))}"]
         proc = None
         try:
             proc = subprocess.run(

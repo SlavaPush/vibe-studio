@@ -27,7 +27,8 @@ from app.schemas import (
     ReleaseOrigin,
     TaskEventType,
 )
-from conftest import FakeGitHub, FakeRender, FakeService, FakeSuite, ScriptedGateway
+from app.tasks import LIMIT_REACHED
+from conftest import FakeGitHub, FakeRender, FakeService, FakeSuite, ScriptedGateway, git
 
 pytestmark = pytest.mark.pg
 
@@ -555,7 +556,9 @@ def test_rollback_candidate_has_priority(q):
     assert (selected.status, selected.is_published, selected.revert.status) == ("rolled_back", False, "pending")
     assert q.state()["release_blocked_by"] == release.id
     assert q.release(pending.id).status == "pending"
-    assert q.task(release.task_id).status == "released"
+    task = q.task(release.task_id)
+    assert (task.status, task.failure_kind) == ("failed", FailureKind.rolled_back)
+    assert "причина не указана" in task.rework_reason
     q.settle(worker)
     assert [path for path, _ in q.render.posts()] == ["/deploys", "/rollback"]
 
@@ -634,10 +637,11 @@ def test_active_release_defers_new_candidate_and_rollback_keeps_publication(q):
     assert created.expected_previous_sha == first
 
 
-def admit(q, sha: str, head: str = "f" * 40) -> str:
-    task_id = q.office.queued_task(q.me["id"])
+def admit(q, sha: str, head: str = "f" * 40, task_id: str | None = None, carrier: str | None = None) -> str:
+    task_id = task_id or q.office.queued_task(q.me["id"])
+    carrier = carrier or task_id
     log = OperationLog(q.store.db)
-    for kind, key, ref in (("push", f"push:{task_id}:{head}", head), ("merge_pr", f"merge_pr:{task_id}:{head}", sha)):
+    for kind, key, ref in (("push", f"push:{carrier}:{head}", head), ("merge_pr", f"merge_pr:{carrier}:{head}", sha)):
         operation, _ = log.begin(kind, key, task_id)
         with q.store.db.transaction() as conn:
             log.finish(conn, operation, OpStatus.succeeded, external_ref=ref)
@@ -1254,3 +1258,361 @@ def test_api_routes_release_decisions_to_worker(office, origin, tmp_path, app_ke
     )
     assert response.status_code == 409
     assert "не остановлен" in response.json()["message"]
+
+
+def sync(q) -> None:
+    git(q.origin.work, "fetch", "-q", str(q.origin.bare), "main")
+    git(q.origin.work, "reset", "-q", "--hard", "FETCH_HEAD")
+
+
+def merge_failed(q, worker, rel, head, task_id=None, rework_count=0):
+    sync(q)
+    sha = q.push(rel, f"export const value = '{head[:4]}'\n")
+    task_id = task_id or q.office.queued_task(q.me["id"])
+    q.office.set_task(task_id, status="awaiting_integration", merge_sha=sha, rework_count=rework_count)
+    carrier = f"{task_id}-r{rework_count}" if rework_count else task_id
+    admit(q, sha, head, task_id=task_id, carrier=carrier)
+    reason = f"Обязательные проверки итогового commit {sha[:7]} не пройдены: chat-web (failure)."
+    assert worker._fail_final(task_carrier(q.task(task_id)), reason, revert=True, run_ids=["1"]) is False
+    return task_id, sha
+
+
+def publish(q, worker, candidate):
+    q.settle(worker)
+    q.render.set(q.release(candidate.id).deploy.render_deploy_id, "live")
+    q.settle(worker)
+    assert q.release(candidate.id).status == "released"
+
+
+def reverted_args(q, task_id):
+    return [item.payload["arguments"] for item in q.events(task_id, TaskEventType.tool_called) if item.tool == "git_revert"]
+
+
+def reworked(q, task_id, source):
+    q.workspace.wait_idle()
+    task = q.task(task_id)
+    assert (task.status, task.rework_count, task.failure_kind, task.merge_sha) == ("developing", 1, None, None)
+    [started] = q.events(task_id, TaskEventType.rework_started)
+    assert (started.payload["attempt"], started.payload["source"]) == (1, source)
+    path = q.workspace.worktree_path(task_id)
+    assert path.name == f"{task_id}-r1" and task.branch == f"office/{task_id}-r1"
+    assert git(path, "log", "-1", "--format=%(trailers:key=Office-Rework,valueonly)") == f"{task_id}-r1"
+    assert task.base_sha == q.origin.main()
+    return started
+
+
+def test_manual_rollback_reason_fails_task_and_rework_follows_revert(q):
+    sha = q.push("apps/chat/web/src/A.tsx", "export const a = 1\n")
+    release = q.candidate(sha)
+    admit(q, sha, task_id=release.task_id)
+    worker = published(q, release)
+    refused = q.decide(release.id, "resume_releases", "resume-reason", reason="нет")
+    assert refused.status_code == 409 and "Причина" in refused.json()["message"]
+    comment = "Кнопка «Выйти» ломает вход"
+    assert q.decide(release.id, "rollback", "manual-reason", reason=comment).status_code == 200
+    [rollback] = [item for item in q.store.list_releases() if item.kind == ReleaseKind.rollback]
+    assert rollback.reason == comment
+    recorded = [item for item in q.events(release.task_id, TaskEventType.decision_recorded) if item.payload["decision"] == "rollback"]
+    assert recorded[-1].payload["reason"] == comment
+    q.settle(worker)
+    q.render.set("dep-3", "live")
+    q.settle(worker)
+    selected = q.release(release.id)
+    assert (selected.status, selected.reason) == ("rolled_back", comment)
+    task = q.task(release.task_id)
+    assert (task.status, task.failure_kind) == ("failed", FailureKind.rolled_back)
+    assert comment in task.rework_reason
+    moves = [(item.payload["from"], item.payload["to"]) for item in q.events(task.id, TaskEventType.status_changed)]
+    assert moves[-1] == ("released", "failed")
+    drive_revert(q, worker)
+    candidate = finish_revert(q, worker, release)
+    publish(q, worker, candidate)
+    assert q.state()["release_blocked_by"] is None
+    started = reworked(q, task.id, "rolled_back")
+    assert comment in started.payload["reason"] and started.payload["release_id"] == release.id
+    assert q.store.rework_context(task.id)["comment"] == comment
+    with q.store.db.locked_transaction() as conn:
+        worker.queue._rework_in(conn, q.release(release.id))
+    assert len(q.events(task.id, TaskEventType.rework_started)) == 1
+
+
+def test_two_failed_merge_checks_share_one_revert_and_both_rework(q):
+    worker = q.worker()
+    first_task, first = merge_failed(q, worker, "apps/chat/web/src/A.tsx", "1" * 40)
+    second_task, second = merge_failed(q, worker, "apps/chat/web/src/B.tsx", "2" * 40)
+    owner_id = q.state()["release_blocked_by"]
+    owner = q.release(owner_id)
+    assert owner.task_id == first_task and owner.status == "failed" and owner.expected_previous_sha == q.base
+    assert [(item.source, item.head_sha) for item in owner.revert.targets] == [("checks_failed", first), ("checks_failed", second)]
+    assert [item.payload["blocked_by"] for item in q.events(second_task, TaskEventType.release_blocked)] == [owner_id]
+    drive_revert(q, worker)
+    assert reverted_args(q, first_task) == [f"office/revert-{owner_id} {second[:7]} {first[:7]}"]
+    candidate = finish_revert(q, worker, owner)
+    assert list(q.fake.prs) == [1]
+    publish(q, worker, candidate)
+    assert q.state()["release_blocked_by"] is None
+    reworked(q, first_task, "checks_failed")
+    reworked(q, second_task, "checks_failed")
+    assert [path for path, _ in q.render.posts()] == ["/deploys"]
+
+
+def test_failure_after_merged_revert_takes_next_attempt_for_added_merge(q):
+    worker = q.worker()
+    first_task, first = merge_failed(q, worker, "apps/chat/web/src/A.tsx", "1" * 40)
+    owner_id = q.state()["release_blocked_by"]
+    drive_revert(q, worker)
+    early = finish_revert(q, worker, q.release(owner_id))
+    second_task, second = merge_failed(q, worker, "apps/chat/web/src/B.tsx", "2" * 40)
+    owner = q.release(owner_id)
+    assert owner.revert.status == "merged"
+    assert [(item.attempt, item.fixed_by) for item in owner.revert.targets] == [(1, early.commit_sha), (None, None)]
+    q.settle(worker)
+    assert q.render.posts() == []
+    drive_revert(q, worker)
+    current = q.release(owner_id).revert
+    assert (current.attempt, current.status, current.pr_number) == (2, "active", 2)
+    assert reverted_args(q, first_task)[-1] == f"office/revert-{owner_id}-2 {second[:7]}"
+    late = finish_revert(q, worker, q.release(owner_id))
+    publish(q, worker, late)
+    assert q.release(early.id).status == "superseded"
+    assert q.state()["release_blocked_by"] is None
+    assert [item.fixed_by for item in q.release(owner_id).revert.targets] == [early.commit_sha, late.commit_sha]
+    reworked(q, first_task, "checks_failed")
+    reworked(q, second_task, "checks_failed")
+
+
+def test_auto_rollback_during_checks_block_joins_set(q):
+    worker = q.worker()
+    sha = q.push("apps/chat/web/src/A.tsx", "export const a = 1\n")
+    release = q.candidate(sha)
+    admit(q, sha, "1" * 40, task_id=release.task_id)
+    q.service.broken.add(sha[:7])
+    q.settle(worker)
+    second_task, second = merge_failed(q, worker, "apps/chat/web/src/B.tsx", "2" * 40)
+    owner_id = q.state()["release_blocked_by"]
+    q.render.set("dep-2", "live")
+    q.settle(worker)
+    q.render.set("dep-3", "live")
+    q.settle(worker)
+    assert q.release(release.id).status == "failed" and q.release(release.id).revert is None
+    assert q.state()["release_blocked_by"] == owner_id
+    targets = q.release(owner_id).revert.targets
+    assert [(item.release_id, item.source) for item in targets] == [(owner_id, "checks_failed"), (release.id, "verify_failed")]
+    assert q.task(release.task_id).failure_kind == FailureKind.verify_failed
+    drive_revert(q, worker)
+    assert reverted_args(q, second_task) == [f"office/revert-{owner_id} {second[:7]} {sha[:7]}"]
+    candidate = finish_revert(q, worker, q.release(owner_id))
+    publish(q, worker, candidate)
+    assert q.state()["release_blocked_by"] is None
+    reworked(q, release.task_id, "verify_failed")
+    reworked(q, second_task, "checks_failed")
+
+
+def test_checks_failure_during_active_release_keeps_block_after_publication(q):
+    worker = q.worker()
+    sha = q.push("apps/chat/web/src/A.tsx", "export const a = 1\n")
+    release = q.candidate(sha)
+    q.settle(worker)
+    second_task, _ = merge_failed(q, worker, "apps/chat/web/src/B.tsx", "2" * 40)
+    owner_id = q.state()["release_blocked_by"]
+    q.render.set("dep-2", "live")
+    q.settle(worker)
+    assert q.release(release.id).status == "released" and q.task(release.task_id).status == "released"
+    assert q.state()["release_blocked_by"] == owner_id
+    assert q.events(second_task, TaskEventType.release_unblocked) == []
+
+
+def test_revert_published_in_newer_candidate_starts_rework_after_restart(q):
+    worker = q.worker()
+    task_id, _ = merge_failed(q, worker, "apps/chat/web/src/A.tsx", "1" * 40)
+    owner_id = q.state()["release_blocked_by"]
+    drive_revert(q, worker)
+    fix = finish_revert(q, worker, q.release(owner_id))
+    sync(q)
+    newer = q.candidate(q.push("apps/chat/web/src/C.tsx", "export const c = 1\n"))
+    q.store.signal_handlers.remove(q.workspace.on_signal)
+    try:
+        publish(q, worker, newer)
+    finally:
+        q.store.signal_handlers.append(q.workspace.on_signal)
+    assert q.release(fix.id).status == "superseded"
+    assert q.state()["release_blocked_by"] is None
+    task = q.task(task_id)
+    assert (task.status, task.base_sha) == ("developing", None)
+    assert not q.workspace.worktree_path(task_id).exists()
+    q.workspace.recover()
+    reworked(q, task_id, "checks_failed")
+    with q.store.db.connection() as conn:
+        rows = conn.fetchall("SELECT status, attempt FROM operations WHERE kind = 'rework_prepare'")
+    assert rows == [{"status": "succeeded", "attempt": 1}]
+
+
+def test_failure_after_rework_only_reverts_and_queue_continues(q):
+    worker = q.worker()
+    task_id = q.office.queued_task(q.me["id"])
+    merge_failed(q, worker, "apps/chat/web/src/A.tsx", "1" * 40, task_id=task_id, rework_count=1)
+    assert LIMIT_REACHED in q.task(task_id).rework_reason
+    owner_id = q.state()["release_blocked_by"]
+    drive_revert(q, worker)
+    fix = finish_revert(q, worker, q.release(owner_id))
+    publish(q, worker, fix)
+    assert q.state()["release_blocked_by"] is None
+    task = q.task(task_id)
+    assert (task.status, task.rework_count, task.failure_kind) == ("failed", 1, FailureKind.checks_failed)
+    assert q.events(task_id, TaskEventType.rework_started) == []
+    summaries = [item.payload["summary"] for item in q.events(task_id, TaskEventType.role_finished) if item.payload["step"] == "rework"]
+    assert len(summaries) == 1 and summaries[0].startswith(LIMIT_REACHED)
+    sync(q)
+    newer = q.candidate(q.push("apps/chat/web/src/C.tsx", "export const c = 1\n"), base=fix.commit_sha)
+    publish(q, worker, newer)
+    assert q.task(newer.task_id).status == "released"
+
+
+def test_failure_while_merged_revert_is_checked_takes_next_attempt(q):
+    worker = q.worker()
+    first_task, _ = merge_failed(q, worker, "apps/chat/web/src/A.tsx", "1" * 40)
+    owner_id = q.state()["release_blocked_by"]
+    drive_revert(q, worker)
+    revert = q.release(owner_id).revert
+    q.fake.add_pr_runs(revert.head_sha, revert.pr_number)
+    drive_revert(q, worker)
+    current = q.release(owner_id).revert
+    assert current.status == "active" and current.fix_sha == q.origin.main()
+    early = current.fix_sha
+    second_task, second = merge_failed(q, worker, "apps/chat/web/src/B.tsx", "2" * 40)
+    drive_revert(q, worker)
+    current = q.release(owner_id).revert
+    assert (current.attempt, current.status, current.pr_number) == (2, "active", 2)
+    assert reverted_args(q, first_task)[-1] == f"office/revert-{owner_id}-2 {second[:7]}"
+    late = finish_revert(q, worker, q.release(owner_id))
+    publish(q, worker, late)
+    assert q.state()["release_blocked_by"] is None
+    assert [item.fixed_by for item in q.release(owner_id).revert.targets] == [early, late.commit_sha]
+    reworked(q, first_task, "checks_failed")
+    reworked(q, second_task, "checks_failed")
+
+
+def test_failure_after_accepted_owner_fix_is_reverted_and_only_new_task_reworks(q):
+    worker, release, _ = failed_verification(q)
+    q.push("apps/chat/web/src/A.tsx", "export const a = 2\n")
+    q.render.set("dep-3", "live")
+    q.settle(worker)
+    drive_revert(q, worker)
+    assert q.release(release.id).revert.status == "needs_attention"
+    fix = q.push("apps/chat/web/src/A.tsx", "export const a = 3\n")
+    assert q.decide(release.id, "resume_releases", "resume-owner-fix", fix_sha=fix).status_code == 200
+    drive_revert(q, worker)
+    q.fake.add_push_runs(fix)
+    drive_revert(q, worker)
+    owner = q.release(release.id).revert
+    assert (owner.source, owner.status) == ("resume", "merged")
+    assert [(item.fixed_by, item.resumed) for item in owner.targets] == [(fix, True)]
+    second_task, second = merge_failed(q, worker, "apps/chat/web/src/B.tsx", "2" * 40)
+    q.settle(worker)
+    assert [path for path, _ in q.render.posts()] == ["/deploys", "/rollback"]
+    drive_revert(q, worker)
+    current = q.release(release.id).revert
+    assert (current.source, current.attempt, current.status) == ("auto", 2, "active")
+    assert reverted_args(q, release.task_id)[-1].endswith(f" {second[:7]}")
+    late = finish_revert(q, worker, q.release(release.id))
+    publish(q, worker, late)
+    assert q.state()["release_blocked_by"] is None
+    reworked(q, second_task, "checks_failed")
+    assert q.events(release.task_id, TaskEventType.rework_started) == []
+
+
+def test_deploy_failed_task_reverted_with_later_release_gets_rework(q):
+    sha = q.push("apps/chat/web/src/A.tsx", "export const a = 1\n")
+    first = q.candidate(sha)
+    admit(q, sha, "1" * 40, task_id=first.task_id)
+    worker = q.worker()
+    q.settle(worker)
+    q.render.set("dep-2", "build_failed")
+    q.settle(worker)
+    assert q.task(first.task_id).failure_kind == FailureKind.deploy_failed
+    later = q.push("apps/chat/web/src/B.tsx", "export const b = 1\n")
+    second = q.candidate(later)
+    admit(q, later, "2" * 40, task_id=second.task_id)
+    q.service.broken.add(later[:7])
+    q.settle(worker)
+    q.render.set("dep-3", "live")
+    q.settle(worker)
+    q.render.set("dep-4", "live")
+    q.settle(worker)
+    assert q.state()["release_blocked_by"] == second.id
+    drive_revert(q, worker)
+    task = q.task(first.task_id)
+    assert (task.status, task.failure_kind) == ("failed", FailureKind.verify_failed)
+    assert "Проверка после деплоя" in task.rework_reason
+    candidate = finish_revert(q, worker, q.release(second.id))
+    publish(q, worker, candidate)
+    reworked(q, first.task_id, "verify_failed")
+    reworked(q, second.task_id, "verify_failed")
+
+
+def test_manual_rollback_from_previous_version_fails_released_task_and_reworks(q):
+    sha = q.push("apps/chat/web/src/A.tsx", "export const a = 1\n")
+    release = q.candidate(sha)
+    admit(q, sha, task_id=release.task_id)
+    worker = published(q, release)
+    assert q.decide(release.id, "rollback", "legacy-rollback").status_code == 200
+    q.settle(worker)
+    q.render.set("dep-3", "live")
+    q.settle(worker)
+    drive_revert(q, worker)
+    candidate = finish_revert(q, worker, release)
+    saved = q.release(release.id).revert.model_dump(mode="json")
+    del saved["targets"]
+    with q.store.db.locked_transaction() as conn:
+        conn.execute("UPDATE release_candidates SET revert = :revert WHERE id = :id", {"revert": json.dumps(saved), "id": release.id})
+    q.office.set_task(release.task_id, status="released", failure_kind=None, rework_reason=None)
+    publish(q, worker, candidate)
+    assert q.state()["release_blocked_by"] is None
+    [target] = q.release(release.id).revert.targets
+    assert (target.source, target.merges) == ("rolled_back", [sha])
+    started = reworked(q, release.task_id, "rolled_back")
+    assert "Ручной откат администратора" in started.payload["reason"]
+    moves = [(item.payload["from"], item.payload["to"]) for item in q.events(release.task_id, TaskEventType.status_changed)]
+    assert moves[-3:] == [("released", "failed"), ("failed", "queued"), ("queued", "developing")]
+
+
+def test_owner_fix_between_two_broken_merges_covers_only_earlier_one(q):
+    worker = q.worker()
+    first_task, _ = merge_failed(q, worker, "apps/chat/web/src/A.tsx", "1" * 40)
+    owner_id = q.state()["release_blocked_by"]
+    sync(q)
+    fix = q.push("apps/chat/web/src/A.tsx", "export const value = 'fixed'\n")
+    second_task, second = merge_failed(q, worker, "apps/chat/web/src/B.tsx", "2" * 40)
+    assert q.decide(owner_id, "resume_releases", "resume-between", fix_sha=fix).status_code == 200
+    drive_revert(q, worker)
+    targets = q.release(owner_id).revert.targets
+    assert [(item.head_sha, item.attempt) for item in targets][1] == (second, None)
+    q.fake.add_push_runs(fix)
+    drive_revert(q, worker)
+    owner = q.release(owner_id).revert
+    assert (owner.source, owner.attempt, owner.status) == ("auto", 2, "active")
+    assert [(item.fixed_by, item.resumed) for item in owner.targets] == [(fix, True), (None, False)]
+    assert reverted_args(q, first_task)[-1].endswith(f" {second[:7]}")
+    late = finish_revert(q, worker, q.release(owner_id))
+    publish(q, worker, late)
+    assert q.state()["release_blocked_by"] is None
+    reworked(q, second_task, "checks_failed")
+    assert q.events(first_task, TaskEventType.rework_started) == []
+
+
+def test_revert_saved_before_targets_starts_rework_after_publication(q):
+    sha = q.push("apps/chat/web/src/A.tsx", "export const a = 1\n")
+    worker, release = roll_back(q, sha)
+    admit(q, sha, task_id=release.task_id)
+    drive_revert(q, worker)
+    candidate = finish_revert(q, worker, release)
+    saved = q.release(release.id).revert.model_dump(mode="json")
+    del saved["targets"]
+    with q.store.db.locked_transaction() as conn:
+        conn.execute("UPDATE release_candidates SET revert = :revert WHERE id = :id", {"revert": json.dumps(saved), "id": release.id})
+    assert q.release(release.id).revert.targets == []
+    publish(q, worker, candidate)
+    assert q.state()["release_blocked_by"] is None
+    [target] = q.release(release.id).revert.targets
+    assert (target.merges, target.fixed_by) == ([sha], candidate.commit_sha)
+    reworked(q, release.task_id, "verify_failed")

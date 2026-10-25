@@ -5,6 +5,7 @@ import psycopg
 import pytest
 
 from app.db import Database
+from app.release_queue import fixes_of, targets_of
 from app.schemas import ReleaseKind, TaskStatus
 from app.tasks import TaskStore
 
@@ -13,6 +14,7 @@ pytestmark = pytest.mark.pg
 OLD_SCHEMA = Path(__file__).with_name("data") / "schema_1cfa9a5.sql"
 P51_SCHEMA = Path(__file__).with_name("data") / "schema_36bda3f.sql"
 P52_SCHEMA = Path(__file__).with_name("data") / "schema_8dc33dd.sql"
+P53_SCHEMA = Path(__file__).with_name("data") / "schema_3f92be1.sql"
 NOW = "2026-10-23T09:00:00.000000Z"
 TABLES = (
     "scheduler", "participants", "sessions", "tasks", "task_events", "decisions", "release_candidates",
@@ -153,6 +155,68 @@ def test_p51_database_gets_review_and_merge_columns(database_url):
                     expected_previous_sha="a" * 40, spec_hash="sha256:spec", suite_hash="sha256:suite",
                     ci_run_ids=[], pr_url=None,
                 )
+        first = dump(db)
+        db.init_schema()
+        assert dump(db) == first
+    finally:
+        db.close()
+
+
+def test_p53_database_gets_rework_columns_and_keeps_attempts(database_url):
+    db = Database(database_url)
+    try:
+        with db.transaction() as conn:
+            for statement in P53_SCHEMA.read_text(encoding="utf-8").split(";"):
+                if statement.strip():
+                    conn.execute(statement.strip())
+            conn.execute(
+                "INSERT INTO participants (id, display_name, role, created_at) VALUES ('prt_1', 'Мария', 'participant', :now)",
+                {"now": NOW},
+            )
+            for task_id, status in (("tsk_dev", "developing"), ("tsk_review", "reviewing")):
+                conn.execute(
+                    "INSERT INTO tasks (id, owner_id, title, text, status, profile, version, created_at, updated_at, "
+                    "rejection_reason, spec, branch, base_sha, pr_url, changed_files, fix_cycles, model_calls, "
+                    "model_calls_limit, input_tokens, output_tokens, event_seq) VALUES (:id, 'prt_1', 'Задача', "
+                    "'Текст задачи', :status, 'hybrid', 5, :now, :now, NULL, NULL, :branch, 'abc', NULL, '[]', 0, 4, "
+                    "30, 100, 20, 0)",
+                    {"id": task_id, "status": status, "now": NOW, "branch": f"office/{task_id}"},
+                )
+            conn.execute(
+                "INSERT INTO decisions (id, participant_id, idempotency_key, operation, object_id, request_hash, "
+                "decision, expected_version, recorded_at) VALUES ('dec_1', 'prt_1', 'retry-1', 'task_decision', "
+                "'tsk_review', 'h', 'retry', 3, :now)",
+                {"now": NOW},
+            )
+            revert = (
+                '{"status": "active", "source": "auto", "base_sha": "a", "head_sha": "b", "pr_number": 6, '
+                '"pr_url": null, "checks": null, "fix_sha": null, "decision_id": null, "candidate_id": null, '
+                '"reason": null, "attempt": 1, "tree": null}'
+            )
+            conn.execute(
+                "INSERT INTO release_candidates (id, task_id, kind, status, version, commit_sha, expected_previous_sha, "
+                "spec_hash, suite_hash, ci_run_ids, pr_url, created_at, is_published, revert) VALUES ('rel_0', 'tsk_dev', "
+                "'release', 'failed', 3, :commit, :previous, :spec, :suite, '[]', NULL, :now, :no, :revert)",
+                {
+                    "commit": "c" * 40, "previous": "a" * 40, "now": NOW, "no": False, "revert": revert,
+                    "spec": "sha256:spec", "suite": "sha256:suite",
+                },
+            )
+            conn.execute("UPDATE scheduler SET release_blocked_by = 'rel_0' WHERE id = 1")
+        db.init_schema()
+        store = TaskStore(db)
+        for task_id, attempt in (("tsk_dev", 0), ("tsk_review", 1)):
+            task = store.get_task(task_id)
+            assert (task.rework_count, task.rework_reason, task.version) == (0, None, 5)
+            assert store.attempt(task_id) == attempt
+        [release] = store.list_releases()
+        assert (release.reason, release.revert.targets, release.revert.pr_number) == (None, [], 6)
+        [target] = targets_of(release)
+        assert (target.source, target.base_sha, target.head_sha) == ("verify_failed", "a" * 40, "c" * 40)
+        assert fixes_of(release) is None
+        with db.connection() as conn:
+            row = conn.fetchone("SELECT rework_priority, rework_context, rework_of FROM tasks WHERE id = 'tsk_dev'")
+        assert (bool(row["rework_priority"]), row["rework_context"], row["rework_of"]) == (False, None, None)
         first = dump(db)
         db.init_schema()
         assert dump(db) == first

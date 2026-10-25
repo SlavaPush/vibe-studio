@@ -51,6 +51,10 @@ class FailureKind(StrEnum):
     pr_rejected = "pr_rejected"
     deploy_failed = "deploy_failed"
     verify_failed = "verify_failed"
+    rolled_back = "rolled_back"
+
+
+REWORK_SOURCES = frozenset({FailureKind.verify_failed, FailureKind.rolled_back, FailureKind.checks_failed})
 
 
 class ModelProfile(StrEnum):
@@ -92,6 +96,7 @@ class TaskEventType(StrEnum):
     release_blocked = "release_blocked"
     release_unblocked = "release_unblocked"
     external_publish = "external_publish"
+    rework_started = "rework_started"
 
 
 class TaskDecision(StrEnum):
@@ -227,6 +232,9 @@ class Task(ContractModel):
     changed_files: list[str]
     fix_cycles: int = Field(ge=0, le=2)
     usage: Usage
+    rework_count: int = Field(ge=0)
+    rework_limit: int = Field(ge=0)
+    rework_reason: str | None
 
 
 class TaskEvent(ContractModel):
@@ -267,6 +275,7 @@ class ReleaseDecisionRequest(ContractModel):
     expected_version: int = Field(ge=1)
     idempotency_key: str = Field(min_length=8, max_length=64)
     fix_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+    reason: str | None = Field(default=None, max_length=500)
 
 
 class Decision(ContractModel):
@@ -312,6 +321,17 @@ class RollbackResult(ContractModel):
     error: str | None
 
 
+class RevertTarget(ContractModel):
+    release_id: str
+    source: Literal["verify_failed", "rolled_back", "checks_failed"]
+    base_sha: str
+    head_sha: str
+    merges: list[str] | None = None
+    attempt: int | None = None
+    fixed_by: str | None = None
+    resumed: bool = False
+
+
 class RevertResult(ContractModel):
     status: Literal["pending", "active", "needs_attention", "merged"]
     source: Literal["auto", "resume"]
@@ -326,6 +346,7 @@ class RevertResult(ContractModel):
     reason: str | None
     attempt: int = Field(default=1, ge=1)
     tree: str | None = None
+    targets: list[RevertTarget] = Field(default_factory=list)
 
 
 class ReleaseCandidate(ContractModel):
@@ -352,6 +373,7 @@ class ReleaseCandidate(ContractModel):
     verify: VerifyResult | None
     rollback: RollbackResult | None
     revert: RevertResult | None
+    reason: str | None = None
 
 
 class ReleaseQueueState(ContractModel):

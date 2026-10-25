@@ -148,6 +148,7 @@ export function TaskCard({ task, participant, run, onRefresh }: TaskCardProps) {
         {task.status === 'failed' && task.failure_kind && (
           <p className="text-sm text-destructive">Причина ошибки: {failureLabel(task)}</p>
         )}
+        {(task.rework_count > 0 || task.rework_reason) && <ReworkPanel task={task} />}
         {(task.pr_url || task.checks || task.merge_sha) && <PullRequestPanel task={task} />}
         {task.pr_review && <ReviewPanel review={task.pr_review} />}
         {actions.length > 0 && (
@@ -290,6 +291,19 @@ function checkLabel(check: PullRequestCheck): string {
 function commitUrl(task: Task, sha: string): string | null {
   if (!task.pr_url || !/\/pull\/\d+$/.test(task.pr_url)) return null
   return task.pr_url.replace(/\/pull\/\d+$/, `/commit/${sha}`)
+}
+
+function ReworkPanel({ task }: { task: Task }) {
+  return (
+    <section aria-labelledby="task-rework-heading" className="grid gap-1 text-sm">
+      <h3 id="task-rework-heading" className="font-medium">
+        {task.rework_count > 0
+          ? `Доработка после отката: попытка ${task.rework_count} из ${task.rework_limit}`
+          : 'Выпуск задачи остановлен'}
+      </h3>
+      {task.rework_reason && <p>Причина: {task.rework_reason}</p>}
+    </section>
+  )
 }
 
 function PullRequestPanel({ task }: { task: Task }) {

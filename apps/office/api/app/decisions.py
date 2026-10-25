@@ -195,7 +195,7 @@ def decide_release(
             raise version_mismatch(
                 "Кандидат выпуска изменился. Проверьте новую версию и примите решение заново."
             )
-        check_release_decision(candidate, request.decision, request.fix_sha)
+        check_release_decision(candidate, request.decision, request.fix_sha, request.reason)
         if request.decision == ReleaseDecision.resume_releases and resume is None:
             raise not_allowed("Выпуск не настроен: исполнитель выпуска и Render не подключены.")
         if request.decision == ReleaseDecision.rollback:
@@ -223,16 +223,14 @@ def decide_release(
             expected_version=request.expected_version,
             key=request.idempotency_key,
         )
-        store.record_event(
-            conn,
-            candidate.task_id,
-            TaskEventType.decision_recorded,
-            {
-                "decision": decision.decision.value,
-                "decision_id": decision.decision_id,
-                "participant_id": participant.id,
-            },
-        )
+        payload = {
+            "decision": decision.decision.value,
+            "decision_id": decision.decision_id,
+            "participant_id": participant.id,
+        }
+        if request.reason is not None:
+            payload["reason"] = request.reason
+        store.record_event(conn, candidate.task_id, TaskEventType.decision_recorded, payload)
         store.signal(conn, SIGNAL_DECISION_RECORDED, candidate.task_id)
         if request.decision == ReleaseDecision.resume_releases:
             resume(conn, candidate, decision, request)
@@ -254,5 +252,6 @@ def decide_release(
                 pr_url=None,
                 origin=ReleaseOrigin.manual_rollback,
                 origin_decision_id=decision.decision_id,
+                reason=request.reason,
             )
     return decision

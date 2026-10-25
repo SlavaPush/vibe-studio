@@ -19,7 +19,7 @@ export type TaskStatus = (typeof TASK_STATUSES)[number]
 
 export const SLOT_STATUSES: readonly TaskStatus[] = ['awaiting_spec_approval', 'developing', 'reviewing']
 
-export const FAILURE_KINDS = ['checks_failed', 'pr_rejected', 'deploy_failed', 'verify_failed'] as const
+export const FAILURE_KINDS = ['checks_failed', 'pr_rejected', 'deploy_failed', 'verify_failed', 'rolled_back'] as const
 export type FailureKind = (typeof FAILURE_KINDS)[number]
 
 export const SLOTS_TOTAL = 3
@@ -54,6 +54,7 @@ export const TASK_EVENT_TYPES = [
   'release_blocked',
   'release_unblocked',
   'external_publish',
+  'rework_started',
 ] as const
 export type TaskEventType = (typeof TASK_EVENT_TYPES)[number]
 
@@ -173,6 +174,9 @@ export interface Task {
   changed_files: string[]
   fix_cycles: number
   usage: Usage
+  rework_count: number
+  rework_limit: number
+  rework_reason: string | null
 }
 
 export interface TaskEvent {
@@ -213,6 +217,7 @@ export interface ReleaseDecisionRequest {
   expected_version: number
   idempotency_key: string
   fix_sha?: string
+  reason?: string
 }
 
 export interface Decision {
@@ -272,6 +277,18 @@ export interface RevertResult {
   reason: string | null
   attempt: number
   tree: string | null
+  targets?: RevertTarget[]
+}
+
+export interface RevertTarget {
+  release_id: string
+  source: 'verify_failed' | 'rolled_back' | 'checks_failed'
+  base_sha: string
+  head_sha: string
+  merges: string[] | null
+  attempt: number | null
+  fixed_by: string | null
+  resumed: boolean
 }
 
 export interface ReleaseQueueState {
@@ -306,6 +323,7 @@ export interface ReleaseCandidate {
   verify: VerifyResult | null
   rollback: RollbackResult | null
   revert: RevertResult | null
+  reason?: string | null
 }
 
 export interface Slots {

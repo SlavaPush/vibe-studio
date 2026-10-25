@@ -16,6 +16,7 @@ from psycopg_pool import ConnectionPool
 from app.config import Settings
 from app.graph import GRAPH_STATUSES, Stopped, TaskGraph
 from app.models_gateway import InvalidModelResponse, ModelsGateway, ProviderError, TruncatedModelResponse
+from app.rework import ReworkMaterials
 from app.roles import ContextTooLarge
 from app.sandbox import Sandbox
 from app.schemas import SLOTS_TOTAL, TaskStatus
@@ -103,6 +104,7 @@ class Runner:
         self.gateway = gateway
         self.checkpoints = checkpoints
         self.fetch_options: dict[str, Any] = {}
+        self.materials = ReworkMaterials(settings, store, workspace)
         self.lock = threading.Lock()
         self.runs: dict[str, Run] = {}
         self.stopping = False

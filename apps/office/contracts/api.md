@@ -32,8 +32,8 @@
 | `TaskStatus` | `rejected`, `queued`, `awaiting_spec_approval`, `developing`, `reviewing`, `awaiting_integration`, `awaiting_release`, `deploying`, `released`, `failed`, `cancelled`, `needs_attention` |
 | `ModelProfile` | `local`, `cloud`, `hybrid` |
 | `AgentRole` | `supervisor`, `researcher`, `developer`, `qa`, `critic`, `pr_reviewer` |
-| `TaskEventType` | `task_created`, `task_rejected`, `status_changed`, `role_started`, `role_finished`, `tool_called`, `artifact_ready`, `decision_required`, `decision_recorded`, `check_result`, `release_candidate`, `deploy_status`, `pr_opened`, `checks_status`, `pr_closed`, `operation_unknown`, `pr_review`, `merge_started`, `pr_merged`, `rollback_status`, `release_blocked`, `release_unblocked`, `external_publish` |
-| `FailureKind` | `checks_failed`, `pr_rejected`, `deploy_failed`, `verify_failed` |
+| `TaskEventType` | `task_created`, `task_rejected`, `status_changed`, `role_started`, `role_finished`, `tool_called`, `artifact_ready`, `decision_required`, `decision_recorded`, `check_result`, `release_candidate`, `deploy_status`, `pr_opened`, `checks_status`, `pr_closed`, `operation_unknown`, `pr_review`, `merge_started`, `pr_merged`, `rollback_status`, `release_blocked`, `release_unblocked`, `external_publish`, `rework_started` |
+| `FailureKind` | `checks_failed`, `pr_rejected`, `deploy_failed`, `verify_failed`, `rolled_back` |
 | `TaskDecision` | `approve_spec`, `cancel`, `retry` |
 | `ReleaseDecision` | `rollback`, `resume_releases` |
 | `ReleaseKind` | `release`, `rollback` |
@@ -87,7 +87,8 @@
   "rollback_status",
   "release_blocked",
   "release_unblocked",
-  "external_publish"
+  "external_publish",
+  "rework_started"
 ]
 ```
 
@@ -170,7 +171,9 @@
 
 `retry` возвращает задачу в `queued`; задача заново проходит очередь слотов. `usage` и `fix_cycles` при этом сохраняются: пределы относятся к задаче, а не к попытке. Исключение: `retry` задачи в `needs_attention` с `integration_started = true` (есть операции выпуска — push ветки, создание, слияние или закрытие PR, обращение к агенту ревью — или заполнены `head_sha`, `pr_number` или `merge_sha`) возвращает её в `awaiting_integration`. Офис сначала сверяет незавершённые операции с GitHub и продолжает с места остановки; если исход по-прежнему не установлен, задача снова получает `needs_attention`. Для такого `retry` бюджет графа (`usage.model_calls_limit`) не проверяется: чтение проверок, слияние, сверка и E2E не обращаются к моделям. Если для текущего `head_sha` нет решения агента ревью и задача ещё не слита, нужен остаток предела обращений агента ревью (`OFFICE_PR_REVIEW_CALLS` на задачу, по умолчанию 2); исчерпанный предел — `409 decision_not_allowed`. Если для итогового commit задачи уже создан кандидат выпуска (не `revoked`), `retry` недоступен (`409 decision_not_allowed`): выпуск продолжает администратор решением `resume_releases`.
 
-Задача с `failure_kind` `checks_failed` (обязательные проверки PR не пройдены), `pr_rejected` (PR отклонён агентом ревью), `deploy_failed` (деплой Render завершился ошибкой) или `verify_failed` (проверка после деплоя не пройдена, выполнен откат) не повторяется: нужна новая задача.
+Задача с `failure_kind` `checks_failed` (обязательные проверки PR или итогового commit не пройдены), `pr_rejected` (PR отклонён агентом ревью), `deploy_failed` (деплой Render завершился ошибкой), `verify_failed` (проверка после деплоя не пройдена, выполнен откат) или `rolled_back` (выпуск откатан администратором) решением `retry` не повторяется. Задачи, чьё слияние отменено revert-PR офиса (`verify_failed`, `rolled_back`, `checks_failed` итогового commit), офис сам возвращает на доработку после публикации revert — раздел «Доработка после отката» в `integrations.md`; при исчерпанном лимите доработки нужна новая задача.
+
+Доработка: задача переходит `failed` → `queued` (событие `rework_started`) и занимает первый свободный слот раньше обычных задач `queued`, сразу в `developing` (`queued` → `developing`): требования не подтверждаются повторно. При этом переходе `branch`, `base_sha`, `head_sha`, `pr_number`, `pr_url`, `merge_sha`, `checks`, `failure_kind` очищаются, `changed_files` пуст, `fix_cycles` равен 0, предел обращений агента ревью PR начинается заново, `usage.model_calls_limit` увеличивается на 30 (расход `usage` сохраняется). Ветка доработки — `office/<task_id>-r<n>`. Предел времени `OFFICE_TASK_TIME_LIMIT_MINUTES` отсчитывается от перехода доработки в `developing`.
 
 `cancel` в `awaiting_integration` переводит задачу в `cancelled`; офис закрывает открытый PR задачи и записывает событие `pr_closed`. После слияния PR (`merge_sha` заполнен) и во время слияния `cancel` недоступен (`409 decision_not_allowed`): изменение уже в `main` или может там оказаться.
 
@@ -178,11 +181,11 @@
 
 | Решение | Условие |
 | --- | --- |
-| `rollback` | Кандидат вида `release` в статусе `released` и `is_published = true`; создаётся кандидат вида `rollback` (`origin = manual_rollback`) на версию `expected_previous_sha` этого выпуска. `fix_sha` не указывается |
+| `rollback` | Кандидат вида `release` в статусе `released` и `is_published = true`; создаётся кандидат вида `rollback` (`origin = manual_rollback`) на версию `expected_previous_sha` этого выпуска. `fix_sha` не указывается. Необязательный `reason` (до 500 символов) — причина отката: сохраняется в `reason` кандидата отката и откатанного выпуска, в событии `decision_recorded`, показывается автору задачи и передаётся разработчику доработки. После публикации отката задачи слияний офиса в составе выпуска получают `failed` с `failure_kind = rolled_back` |
 | `resume_releases` с `fix_sha` | Кандидат — `release_blocked_by` очереди (выпуск заблокирован после его отката). Офис проверяет, что `fix_sha` входит в `main` и является потомком откатанного commit, выполняет проверки итогового commit и критический E2E и создаёт кандидата исправления (`origin = resume`). Тот же `fix_sha` после создания кандидата исправления (`revert.status = merged`) — `409 decision_not_allowed`, состояние не меняется |
 | `resume_releases` без `fix_sha` | Кандидат остановлен (`blocked_reason` заполнен): активный кандидат очереди (`active_release_id`) или кандидат `pending`. Для активного кандидата офис сначала сверяет Render и сервис: идёт деплой или откат либо запрос деплоя ещё сверяется — `409 decision_not_allowed` с причиной; иначе БД согласуется с опубликованной версией и очередь освобождается. Кандидат `pending` возвращается в очередь. Кандидат `release_blocked_by` с `revert.status = needs_attention`: revert-PR повторяется с начала (новая попытка `revert.attempt`, прежний открытый revert-PR закрывается), блокировка сохраняется; есть операции кандидата в `started` или `unknown` либо revert-PR уже слит — `409 decision_not_allowed`. Для `release_blocked_by` в другом состоянии `revert` — `409 decision_not_allowed` |
 
-Решение в другом статусе или при невыполненном дополнительном условии получает `409 decision_not_allowed`. Без настроенного Render (`RENDER_API_KEY`, `RENDER_SERVICE_ID`) `resume_releases` недоступен. Подтверждения выпуска администратором нет: решение `approve_release` удалено, запрос с ним получает `422 validation_error`.
+Решение в другом статусе или при невыполненном дополнительном условии получает `409 decision_not_allowed`; `reason` в решении `resume_releases` — тоже `409 decision_not_allowed`. Без настроенного Render (`RENDER_API_KEY`, `RENDER_SERVICE_ID`) `resume_releases` недоступен. Подтверждения выпуска администратором нет: решение `approve_release` удалено, запрос с ним получает `422 validation_error`.
 
 ## Модели
 
@@ -210,12 +213,12 @@
 | `created_at`, `updated_at` | string (дата-время) | Время создания и последнего изменения |
 | `rejection_reason` | string или `null` | Причина отказа для статуса `rejected` |
 | `spec` | `Spec` или `null` | Требования, когда Supervisor их подготовил |
-| `branch` | string или `null` | Ветка `office/<task_id>` в `vibe-studio` |
+| `branch` | string или `null` | Ветка `office/<task_id>` в `vibe-studio`; для доработки — `office/<task_id>-r<n>` |
 | `base_sha` | string или `null` | Commit, от которого создан worktree |
 | `pr_url` | string или `null` | Адрес PR в `vibe-studio` |
 | `pr_number` | integer или `null` | Номер PR в `vibe-studio` |
 | `head_sha` | string или `null` | Commit ветки `office/<task_id>`, отправленный в `vibe-studio` |
-| `failure_kind` | `FailureKind` или `null` | Причина `failed` на этапе выпуска: `checks_failed` — обязательные проверки PR или итогового commit (в том числе критический E2E) не пройдены, `pr_rejected` — PR отклонён агентом ревью, `deploy_failed` — деплой Render завершился ошибкой или Render отклонил запрос (отката нет), `verify_failed` — проверка после деплоя не пройдена, выполнен откат (в том числе для выпуска, в составе которого было изменение задачи); `null` для остальных причин |
+| `failure_kind` | `FailureKind` или `null` | Причина `failed` на этапе выпуска: `checks_failed` — обязательные проверки PR или итогового commit (в том числе критический E2E) не пройдены, `pr_rejected` — PR отклонён агентом ревью, `deploy_failed` — деплой Render завершился ошибкой или Render отклонил запрос (отката нет), `verify_failed` — проверка после деплоя не пройдена, выполнен откат (в том числе для выпуска, в составе которого было изменение задачи), `rolled_back` — выпуск с изменением задачи откатан администратором; `null` для остальных причин |
 | `checks` | `PullRequestChecks` или `null` | Последняя сводка обязательных проверок: до слияния — проверки PR для `head_sha`, после слияния — проверки события `push` итогового commit `merge_sha` (поле `checks.head_sha` указывает проверенный commit); `null`, пока PR не проверялся и сразу после слияния |
 | `pr_review` | `PullRequestReview` или `null` | Последнее решение агента ревью PR; `null`, пока агент не вызывался. Решение действительно только для своего `head_sha` |
 | `merge_sha` | string или `null` | Итоговый commit squash-слияния PR в `main`; `null`, пока PR не слит |
@@ -224,6 +227,9 @@
 | `changed_files` | string[] | Изменённые файлы относительно `base_sha` |
 | `fix_cycles` | integer | Выполненные циклы исправления, 0–2 |
 | `usage` | `Usage` | Расход задачи |
+| `rework_count` | integer | Номер доработки после отката: 0 — первый проход, 1 — первая доработка |
+| `rework_limit` | integer | Лимит доработок `OFFICE_REWORK_LIMIT`, по умолчанию 1 |
+| `rework_reason` | string или `null` | Причина отката или непрошедших проверок итогового commit (с комментарием администратора при ручном откате); при исчерпанном лимите — с пометкой «Лимит доработки исчерпан» |
 
 `Spec`: `version` (integer), `spec_hash` (string), `summary` (string), `acceptance_criteria` (string[]), `sources` (массив `{title, url}`).
 
@@ -257,7 +263,7 @@
 | `tool_called` | `arguments` — краткое описание аргументов, `result` (`ok`, `denied`, `error`) |
 | `artifact_ready` | `name`, `size_bytes` |
 | `decision_required` | `decision`, `expected_version`, при выпуске также `release_id` |
-| `decision_recorded` | `decision`, `decision_id`, `participant_id` |
+| `decision_recorded` | `decision`, `decision_id`, `participant_id`; для `rollback` с причиной также `reason` |
 | `check_result` | `command`, `exit_code`, `duration_ms` |
 | `release_candidate` | `release_id`, `commit_sha` |
 | `deploy_status` | `release_id`, `render_deploy_id`, `render_status` — новый статус деплоя Render; после проверки после деплоя также `verified` (boolean) и `fault` (boolean — управляемый сбой `OFFICE_VERIFY_FAULT=1`, сервис не проверялся) |
@@ -269,9 +275,12 @@
 | `merge_started` | `pr_number`, `head_sha` — офис записал операцию слияния и отправляет запрос; с этого момента `merge_pending = true`, `cancel` недоступен |
 | `pr_merged` | `pr_number`, `merge_sha` — офис слил PR задачи в `main` |
 | `rollback_status` | `release_id`, `render_deploy_id`, `render_status` — статус отката Render (`requested` — запрос отправляется); при запросе и после проверки также `target_sha`, после проверки — `verified` |
-| `release_blocked` | `release_id`, `reason` — автоматический выпуск остановлен после отката этого кандидата (`release_blocked_by`) |
-| `release_unblocked` | `release_id`, `fixed_by` — опубликован кандидат исправления `fixed_by`, блокировка снята |
+| `release_blocked` | `release_id`, `blocked_by`, `reason` — выпуск `release_id` откатан или его итоговый commit не прошёл проверки; `blocked_by` — владелец блокировки (`release_blocked_by`): равен `release_id`, если блокировки не было, иначе слияния выпуска добавлены в набор отмены владельца |
+| `release_unblocked` | `release_id`, `fixed_by` — опубликован кандидат `fixed_by`, содержащий revert-commit всех попыток набора отмены (или `fix_sha`), блокировка снята |
 | `external_publish` | `published_sha` — опубликована версия без кандидата офиса (деплой вне офиса); пишется в задачи ожидающих кандидатов |
+| `rework_started` | `reason`, `attempt` (номер доработки), `limit`, `source` (`verify_failed`, `rolled_back`, `checks_failed`), `release_id` (выпуск, слияние которого отменено), `materials` — источники материалов разработчику (`reason`, `deploy_events`, `render_logs`, `actions_log`, `source_diff`) |
+
+При исчерпанном лимите доработки вместо `rework_started` пишется `role_finished` с `step = rework`, `outcome = error` и `summary`, начинающимся с «Лимит доработки исчерпан».
 
 События revert-PR (`tool_called` с `tool = git_revert` и `git_push`, `pr_opened`, `checks_status`, `pr_review`, `merge_started`, `pr_merged`, `pr_closed`, `role_finished`) пишутся в задачу откатанного выпуска с дополнительным полем `revert_of` — идентификатором откатанного кандидата. Статус задачи при этом не меняется.
 
@@ -328,7 +337,10 @@
 | `blocked_reason` | string или `null` | Почему кандидат остановлен: состав не подтверждён, версия сервиса недоступна, Render занят, исход операции не установлен, причина `revoked` или отката. Остановленный кандидат ждёт `resume_releases` |
 | `verify` | `VerifyResult` или `null` | Проверка после деплоя |
 | `rollback` | `RollbackResult` или `null` | Автоматический откат после неуспешной проверки |
-| `revert` | `RevertResult` или `null` | Исправление после отката: revert-PR или `fix_sha` |
+| `revert` | `RevertResult` или `null` | Исправление после отката: revert-PR или `fix_sha`; заполнено у владельца блокировки (`release_blocked_by`) |
+| `reason` | string или `null` | Причина ручного отката из решения `rollback`: у кандидата вида `rollback` и у откатанного им выпуска; иначе `null` |
+
+Кандидат вида `release` в статусе `failed` без `deploy` создаётся, когда обязательные проверки события `push` (`conclusion = failure`) или критический E2E итогового commit слияния офиса не пройдены: `commit_sha` — итоговый commit, `expected_previous_sha` — его родитель, `blocked_reason` — причина. Деплоя не было; кандидат блокирует выпуск до публикации revert.
 
 Статусы кандидата: `pending` — ждёт очереди; `deploying` — деплой Render; `verifying` — проверка после деплоя; `rolling_back` — автоматический откат и его проверка; `released` — опубликован и проверен; `failed` — деплой не удался или выпуск откатан; `superseded` — опубликован или будет опубликован в составе более нового кандидата; `revoked` — опубликованная версия сменилась до деплоя, создан новый кандидат того же commit (для отката — откат отменён); `rolled_back` — выпуск откатан решением `rollback`.
 
@@ -338,7 +350,11 @@
 
 `RollbackResult`: `target_sha` (string — прежняя версия), `target_deploy_id` (string — деплой Render, к которому выполняется откат), `render_deploy_id` (string или `null` — деплой отката), `render_status` (string или `null`), `started_at`, `finished_at` (дата-время или `null`), `verify` (`VerifyResult` или `null` — проверка после отката), `error` (string или `null`).
 
-`RevertResult`: `status` (`pending` — ждёт начала, `active` — revert-PR или проверки `fix_sha` выполняются, `needs_attention` — остановлено, `merged` — кандидат исправления создан), `source` (`auto` — revert-PR офиса, `resume` — `fix_sha` администратора), `base_sha` (string или `null` — `main`, от которого создана ветка `office/revert-<release_id>`), `head_sha` (string или `null`), `pr_number`, `pr_url` (revert-PR или `null`), `checks` (`PullRequestChecks` или `null`), `fix_sha` (string или `null` — итоговый commit revert-PR или `fix_sha`), `decision_id` (string или `null`), `candidate_id` (string или `null` — кандидат исправления), `reason` (string или `null` — причина остановки), `attempt` (integer ≥ 1 — номер попытки revert-PR; растёт при повторе решением `resume_releases` без `fix_sha`, сохраняется при `resume_releases` с `fix_sha`; в записях до появления поля — 1), `tree` (string или `null` — имя worktree и ветки `office/<tree>` попытки; `null` — `revert-<release_id>`).
+`RevertResult`: `status` (`pending` — ждёт начала, `active` — revert-PR или проверки `fix_sha` выполняются, `needs_attention` — остановлено, `merged` — кандидат исправления создан), `source` (`auto` — revert-PR офиса, `resume` — `fix_sha` администратора), `base_sha` (string или `null` — `main`, от которого создана ветка `office/revert-<release_id>`), `head_sha` (string или `null`), `pr_number`, `pr_url` (revert-PR или `null`), `checks` (`PullRequestChecks` или `null`), `fix_sha` (string или `null` — итоговый commit revert-PR или `fix_sha`), `decision_id` (string или `null`), `candidate_id` (string или `null` — кандидат исправления), `reason` (string или `null` — причина остановки), `attempt` (integer ≥ 1 — номер попытки revert-PR; растёт при повторе решением `resume_releases` без `fix_sha`, сохраняется при `resume_releases` с `fix_sha`; в записях до появления поля — 1), `tree` (string или `null` — имя worktree и ветки `office/<tree>` попытки; `null` — `revert-<release_id>`), `targets` (массив `RevertTarget` — набор отмены; пуст в записях до появления поля, тогда набор — сам кандидат).
+
+`RevertTarget`: `release_id` (string — выпуск, слияния которого отменяются), `source` (`verify_failed` — автоматический откат, `rolled_back` — ручной откат, `checks_failed` — непрошедшие проверки итогового commit), `base_sha`, `head_sha` (string — диапазон первой линии `main`), `merges` (string[] или `null` — найденные слияния PR офиса в диапазоне; `null`, пока revert не создан), `attempt` (integer или `null` — попытка `revert.attempt`, которая включила цель), `fixed_by` (string или `null` — итоговый commit слитого revert-PR этой попытки или принятый `fix_sha` администратора), `resumed` (boolean — цель исправлена `fix_sha` администратора: доработки по ней нет).
+
+Набор отмены один на блокировку. Новый откат или непрошедшие проверки при установленной блокировке добавляют цель в `targets` владельца, блокировка не заменяется. Если revert-PR владельца ещё не слит, офис закрывает его и начинает новую попытку со всеми несделанными целями (один PR, revert от новых слияний к старым); если уже слит (в том числе пока проверяется его итоговый commit или проверки не прошли) — следующая попытка от нового `main` только для добавленных целей. После принятого `fix_sha` администратора (`revert.status = merged`, `source = resume`) добавленная цель запускает попытку revert-PR офиса (`source = auto`) только для неё. Пока в наборе есть цели без `fixed_by`, кандидаты не деплоятся. Блокировка снимается только публикацией кандидата, который содержит revert-commit всех попыток набора (`fixed_by` всех целей) или `fix_sha` решения `resume_releases`; публикация выпуска, начатого до сбоя, блокировку не снимает.
 
 ### `ReleaseQueueState`
 
@@ -493,7 +509,10 @@
       "model_calls_limit": 30,
       "input_tokens": 640,
       "output_tokens": 85
-    }
+    },
+    "rework_count": 0,
+    "rework_limit": 1,
+    "rework_reason": null
   },
   {
     "id": "tsk_101",
@@ -544,7 +563,10 @@
       "model_calls_limit": 30,
       "input_tokens": 48210,
       "output_tokens": 9120
-    }
+    },
+    "rework_count": 0,
+    "rework_limit": 1,
+    "rework_reason": null
   },
   {
     "id": "tsk_102",
@@ -616,10 +638,15 @@
       "model_calls_limit": 30,
       "input_tokens": 132400,
       "output_tokens": 24310
-    }
+    },
+    "rework_count": 0,
+    "rework_limit": 1,
+    "rework_reason": null
   }
 ]
 ```
+
+Задача на доработке после ручного отката (фрагмент `GET /api/tasks/{id}`): `"status": "developing"`, `"branch": "office/tsk_104-r1"`, `"rework_count": 1`, `"rework_limit": 1`, `"rework_reason": "Ручной откат администратора: После выпуска кнопка «Выйти» не завершает сеанс. Опубликована прежняя версия 8beae56 вместо 389e553."`, `"usage": {"model_calls": 14, "model_calls_limit": 60, ...}`.
 
 Ошибки: `401 unauthorized`.
 
@@ -975,7 +1002,7 @@ data: {"event_id":211,"task_id":"tsk_101","seq":11,"type":"check_result", ...}
     "role": null,
     "tool": null,
     "artifact": null,
-    "payload": {"release_id": "rel_5", "reason": "Проверка после деплоя d4e5f6a не пройдена: /healthz не ответил status ok. Выполнен откат к 5e0c1a7."}
+    "payload": {"release_id": "rel_5", "blocked_by": "rel_5", "reason": "Проверка после деплоя d4e5f6a не пройдена: /healthz не ответил status ok. Выполнен откат к 5e0c1a7."}
   },
   {
     "event_id": 190,
@@ -987,6 +1014,17 @@ data: {"event_id":211,"task_id":"tsk_101","seq":11,"type":"check_result", ...}
     "tool": null,
     "artifact": null,
     "payload": {"release_id": "rel_5", "fixed_by": "rel_8"}
+  },
+  {
+    "event_id": 191,
+    "task_id": "tsk_095",
+    "seq": 51,
+    "type": "rework_started",
+    "timestamp": "2026-10-23T09:48:00Z",
+    "role": null,
+    "tool": null,
+    "artifact": null,
+    "payload": {"reason": "Проверка после деплоя d4e5f6a не пройдена: /healthz не ответил status ok. Выполнен откат к 5e0c1a7.", "attempt": 1, "limit": 1, "source": "verify_failed", "release_id": "rel_5", "materials": ["reason", "deploy_events", "render_logs", "actions_log", "source_diff"]}
   }
 ]
 ```
@@ -1408,7 +1446,7 @@ HTML-отчёт Playwright с этими заголовками не работ�
 
 ### `POST /api/releases/{id}/decisions`
 
-Записывает решение администратора. `rollback` для опубликованного выпуска создаёт кандидата вида `rollback` на версию `expected_previous_sha` выбранного выпуска; он ждёт свободной очереди с приоритетом перед обычными кандидатами. `resume_releases` с `fix_sha` (40 символов hex) запускает выпуск исправления после отката; без `fix_sha` — сверку остановленного выпуска или повтор revert-PR, требующего внимания, для заблокированного выпуска (раздел «Права»). Подтверждения выпуска нет: обычный кандидат деплоится автоматически.
+Записывает решение администратора. `rollback` для опубликованного выпуска создаёт кандидата вида `rollback` на версию `expected_previous_sha` выбранного выпуска (необязательная причина — `reason`); он ждёт свободной очереди с приоритетом перед обычными кандидатами. `resume_releases` с `fix_sha` (40 символов hex) запускает выпуск исправления после отката; без `fix_sha` — сверку остановленного выпуска или повтор revert-PR, требующего внимания, для заблокированного выпуска (раздел «Права»). Подтверждения выпуска нет: обычный кандидат деплоится автоматически.
 
 Запрос:
 
@@ -1419,6 +1457,18 @@ HTML-отчёт Playwright с этими заголовками не работ�
   "expected_version": 9,
   "idempotency_key": "4e5f6a7b-resume-rel5",
   "fix_sha": "0a1b2c3d4e5f60718293a4b5c6d7e8f901234567"
+}
+```
+
+Ручной откат с причиной (`reason` — до 500 символов, только для `rollback`):
+
+<!-- example: ReleaseDecisionRequest -->
+```json
+{
+  "decision": "rollback",
+  "expected_version": 4,
+  "idempotency_key": "9a8b7c6d-rollback-rel3",
+  "reason": "После выпуска кнопка «Выйти» не завершает сеанс."
 }
 ```
 

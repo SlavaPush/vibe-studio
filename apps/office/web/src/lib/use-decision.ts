@@ -6,6 +6,7 @@ export interface DecisionBody<D extends string> {
   expected_version: number
   idempotency_key: string
   fix_sha?: string
+  reason?: string
 }
 
 export interface DecisionNotice<D extends string> {

@@ -73,6 +73,29 @@ describe('TaskCard: PR задачи', () => {
     expect(FakeEventSource.all('/api/tasks/tsk_101/events')).toHaveLength(0)
   })
 
+  it('показывает доработку после отката с номером попытки и причиной', () => {
+    fakeApi()
+    const reason = 'Ручной откат администратора: Кнопка «Выйти» не завершает сеанс. Опубликована прежняя версия 8beae56.'
+    renderCard(maria, { ...developing, branch: 'office/tsk_101-r1', rework_count: 1, rework_limit: 1, rework_reason: reason })
+    expect(screen.getByRole('region', { name: 'Доработка после отката: попытка 1 из 1' })).toBeInTheDocument()
+    expect(screen.getByText(`Причина: ${reason}`)).toBeInTheDocument()
+  })
+
+  it('показывает причину отката задачи до доработки и подпись rolled_back', () => {
+    fakeApi()
+    renderCard(maria, {
+      ...integrating, status: 'failed', failure_kind: 'rolled_back', merge_sha: 'c'.repeat(40), rework_reason: 'Откат.',
+    })
+    expect(screen.getByRole('region', { name: 'Выпуск задачи остановлен' })).toBeInTheDocument()
+    expect(screen.getByText('Причина ошибки: Выпуск откатан администратором.')).toBeInTheDocument()
+  })
+
+  it('без доработки плашки нет', () => {
+    fakeApi()
+    renderCard(maria)
+    expect(screen.queryByRole('region', { name: /Доработка после отката/ })).not.toBeInTheDocument()
+  })
+
   it('показывает причину ошибки выпуска и запрещает повтор', () => {
     fakeApi()
     renderCard(maria, { ...integrating, status: 'failed', failure_kind: 'checks_failed' })
@@ -531,6 +554,28 @@ describe('ReleaseQueue', () => {
     expect(api.bodies(`POST /api/releases/${published.id}/decisions`)).toEqual([
       expect.objectContaining({ decision: 'rollback', expected_version: published.version }),
     ])
+  })
+
+  it('откат отправляет причину из поля формы и показывает причину у кандидата', async () => {
+    const api = fakeApi()
+    api.on(`POST /api/releases/${published.id}/decisions`, { decision_id: 'dec_14' })
+    const { rerender } = renderQueue(admin)
+    const field = screen.getByLabelText('Причина отката (необязательно, до 500 символов)')
+    expect(field).toHaveAttribute('maxLength', '500')
+    fireEvent.change(field, { target: { value: '  Кнопка «Выйти» не завершает сеанс.  ' } })
+    await confirmRollback()
+    await screen.findByText('Решение записано.')
+    expect(api.bodies(`POST /api/releases/${published.id}/decisions`)).toEqual([
+      expect.objectContaining({ decision: 'rollback', reason: 'Кнопка «Выйти» не завершает сеанс.' }),
+    ])
+    rerender([{ ...published, reason: 'Кнопка «Выйти» не завершает сеанс.' }])
+    expect(screen.getByText('Кнопка «Выйти» не завершает сеанс.', { selector: 'dd' })).toBeInTheDocument()
+  })
+
+  it('поле причины есть только у отката', () => {
+    fakeApi()
+    renderQueue(admin, [{ ...pending, blocked_reason: 'Остановлен.' }])
+    expect(screen.queryByLabelText(/Причина отката/)).not.toBeInTheDocument()
   })
 
   it('повтор после сетевой ошибки отправляет то же тело после обновления версии', async () => {

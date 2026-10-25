@@ -14,6 +14,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
 import {
   DECISION_LABELS,
   RELEASE_ORIGIN_LABELS,
@@ -25,6 +26,7 @@ import { newDecision, useDecision } from '@/lib/use-decision'
 
 const QUEUE_STATUSES: readonly ReleaseStatus[] = ['pending', 'deploying', 'verifying', 'rolling_back']
 const FIX_SHA = /^[0-9a-f]{40}$/
+const REASON_LIMIT = 500
 
 interface ReleaseQueueProps {
   releases: ReleaseCandidate[]
@@ -57,8 +59,14 @@ function verifyText(verify: VerifyResult): string {
 
 function ReleaseItem({ release, queue, participant, run, onRefresh }: ReleaseItemProps) {
   const decision = useReleaseDecision(release, run, onRefresh)
+  const reasonId = useId()
+  const [reason, setReason] = useState('')
   const action: ReleaseDecision = QUEUE_STATUSES.includes(release.status) ? 'resume_releases' : 'rollback'
-  const start = () => void decision.submit(newDecision(action, release.version))
+  const start = () => {
+    const body = newDecision(action, release.version)
+    const text = reason.trim()
+    void decision.submit(action === 'rollback' && text ? { ...body, reason: text } : body)
+  }
   const active = queue?.active_release_id === release.id
 
   return (
@@ -135,20 +143,40 @@ function ReleaseItem({ release, queue, participant, run, onRefresh }: ReleaseIte
             <dd className="text-destructive">{release.blocked_reason}</dd>
           </>
         )}
+        {release.reason && (
+          <>
+            <dt className="text-muted-foreground">Причина отката</dt>
+            <dd>{release.reason}</dd>
+          </>
+        )}
       </dl>
       {canAct(participant, release, action, queue).allowed && (
-        <div>
-          <ConfirmButton
-            label={DECISION_LABELS[action]}
-            title={action === 'rollback' ? `Откатить выпуск ${release.id}?` : `Возобновить выпуск ${release.id}?`}
-            description={
-              action === 'rollback'
-                ? `В очередь встанет кандидат отката на версию ${release.expected_previous_sha}.`
-                : 'Офис сверит Render и опубликованную версию и освободит очередь. Если деплой ещё идёт, решение будет отклонено.'
-            }
-            disabled={decision.pending}
-            onConfirm={start}
-          />
+        <div className="grid gap-2">
+          {action === 'rollback' && (
+            <>
+              <Label htmlFor={reasonId}>Причина отката (необязательно, до {REASON_LIMIT} символов)</Label>
+              <Textarea
+                id={reasonId}
+                className="max-w-md"
+                maxLength={REASON_LIMIT}
+                value={reason}
+                onChange={(event) => setReason(event.target.value)}
+              />
+            </>
+          )}
+          <div>
+            <ConfirmButton
+              label={DECISION_LABELS[action]}
+              title={action === 'rollback' ? `Откатить выпуск ${release.id}?` : `Возобновить выпуск ${release.id}?`}
+              description={
+                action === 'rollback'
+                  ? `В очередь встанет кандидат отката на версию ${release.expected_previous_sha}.`
+                  : 'Офис сверит Render и опубликованную версию и освободит очередь. Если деплой ещё идёт, решение будет отклонено.'
+              }
+              disabled={decision.pending}
+              onConfirm={start}
+            />
+          </div>
         </div>
       )}
       <DecisionMessage

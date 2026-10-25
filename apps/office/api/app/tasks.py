@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from app.db import Connection, Database, from_text, to_text, utcnow
 from app.errors import not_found, rate_limited
 from app.schemas import (
+    REWORK_SOURCES,
     SLOT_STATUSES,
     SLOTS_TOTAL,
     WORKTREE_STATUSES,
@@ -43,7 +44,7 @@ CLOSED_STATUSES = frozenset({TaskStatus.cancelled, TaskStatus.released})
 S = TaskStatus
 TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
     S.rejected: frozenset(),
-    S.queued: frozenset({S.awaiting_spec_approval, S.cancelled}),
+    S.queued: frozenset({S.awaiting_spec_approval, S.developing, S.cancelled}),
     S.awaiting_spec_approval: frozenset({S.developing, S.cancelled, S.failed, S.needs_attention}),
     S.developing: frozenset({S.reviewing, S.cancelled, S.failed, S.needs_attention}),
     S.reviewing: frozenset(
@@ -66,12 +67,21 @@ TASK_SELECT = (
     "r.checklist AS review_checklist, r.created_at AS review_created_at, "
     "EXISTS (SELECT 1 FROM operations o WHERE o.task_id = t.id AND o.kind = 'merge_pr' AND o.release_id IS NULL "
     "AND o.status IN ('started', 'unknown')) AS merge_pending, "
-    "EXISTS (SELECT 1 FROM operations o WHERE o.task_id = t.id) AS has_operations FROM tasks t "
+    "EXISTS (SELECT 1 FROM operations o WHERE o.task_id = t.id AND (t.rework_count = 0 "
+    "OR o.key LIKE ('%:' || t.id || '-r' || t.rework_count || ':%') "
+    "OR o.key LIKE ('%:' || t.id || '-r' || t.rework_count))) AS has_operations FROM tasks t "
     "JOIN participants p ON p.id = t.owner_id "
     "LEFT JOIN pr_reviews r ON r.id = (SELECT x.id FROM pr_reviews x WHERE x.task_id = t.id "
     "AND (t.head_sha IS NULL OR x.head_sha = t.head_sha) ORDER BY x.created_at DESC, x.id DESC LIMIT 1)"
 )
 PR_REVIEW_CALLS_LIMIT = 2
+REWORK_LIMIT = 1
+REWORK_MATERIALS = ("reason", "deploy_events", "render_logs", "actions_log", "source_diff")
+LIMIT_REACHED = "Лимит доработки исчерпан: повторной доработки не будет."
+REWORK_RESET = (
+    "rework_priority = :no, branch = NULL, base_sha = NULL, head_sha = NULL, pr_number = NULL, pr_url = NULL, "
+    "merge_sha = NULL, checks = NULL, failure_kind = NULL, changed_files = '[]', fix_cycles = 0, pr_review_calls = 0"
+)
 
 SignalHandler = Callable[[str, str], None]
 
@@ -97,6 +107,10 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{secrets.token_hex(6)}"
 
 
+def rework_tree(task_id: str, count: int) -> str:
+    return f"{task_id}-r{count}" if count else task_id
+
+
 def task_title(text: str) -> str:
     lines = text.strip().splitlines()
     return lines[0].strip()[:80] if lines else ""
@@ -106,7 +120,7 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def task_from_row(row: dict[str, Any]) -> Task:
+def task_from_row(row: dict[str, Any], rework_limit: int = REWORK_LIMIT) -> Task:
     return Task(
         id=row["id"],
         title=row["title"],
@@ -141,6 +155,9 @@ def task_from_row(row: dict[str, Any]) -> Task:
             "input_tokens": row["input_tokens"],
             "output_tokens": row["output_tokens"],
         },
+        rework_count=row["rework_count"],
+        rework_limit=rework_limit,
+        rework_reason=row["rework_reason"],
     )
 
 
@@ -195,16 +212,19 @@ def candidate_from_row(row: dict[str, Any]) -> ReleaseCandidate:
         verify=json.loads(row["verify"]) if row["verify"] else None,
         rollback=json.loads(row["rollback"]) if row["rollback"] else None,
         revert=json.loads(row["revert"]) if row["revert"] else None,
+        reason=row["reason"],
     )
 
 
 class TaskStore:
     def __init__(
-        self, db: Database, notify: Callable[[], None] = lambda: None, pr_review_calls: int = PR_REVIEW_CALLS_LIMIT
+        self, db: Database, notify: Callable[[], None] = lambda: None, pr_review_calls: int = PR_REVIEW_CALLS_LIMIT,
+        rework_limit: int = REWORK_LIMIT,
     ) -> None:
         self.db = db
         self.notify = notify
         self.pr_review_calls = pr_review_calls
+        self.rework_limit = rework_limit
         self.signal_handlers: list[SignalHandler] = []
 
     def signal(self, conn: Connection, name: str, task_id: str) -> None:
@@ -219,7 +239,7 @@ class TaskStore:
 
     def load_task(self, conn: Connection, task_id: str) -> Task | None:
         row = conn.fetchone(f"{TASK_SELECT} WHERE t.id = :id", {"id": task_id})
-        return None if row is None else task_from_row(row)
+        return None if row is None else task_from_row(row, self.rework_limit)
 
     def get_task(self, task_id: str) -> Task:
         with self.db.connection() as conn:
@@ -231,7 +251,7 @@ class TaskStore:
     def list_tasks(self) -> list[Task]:
         with self.db.connection() as conn:
             rows = conn.fetchall(f"{TASK_SELECT} ORDER BY t.created_at DESC, t.id DESC")
-        return [task_from_row(row) for row in rows]
+        return [task_from_row(row, self.rework_limit) for row in rows]
 
     def slots_used(self, conn: Connection | None = None) -> int:
         statuses = {f"s{index}": status.value for index, status in enumerate(SLOT_STATUSES)}
@@ -440,18 +460,20 @@ class TaskStore:
                 "AND object_id = :id AND decision = 'retry'",
                 {"id": task_id},
             )
-        return row["retries"]
+            task = conn.fetchone("SELECT rework_count FROM tasks WHERE id = :id", {"id": task_id})
+        return row["retries"] + (task["rework_count"] if task else 0)
 
-    def _attempt_events(self, conn: Connection, task_id: str) -> list[dict[str, Any]]:
+    def _attempt_events(self, conn: Connection, task_id: str, rework: bool = False) -> list[dict[str, Any]]:
         rows = conn.fetchall(
             "SELECT seq, type, occurred_at, payload FROM task_events WHERE task_id = :id "
-            "AND type IN ('decision_recorded', 'decision_required', 'status_changed') ORDER BY seq",
+            "AND type IN ('decision_recorded', 'decision_required', 'status_changed', 'rework_started') ORDER BY seq",
             {"id": task_id},
         )
         start = 0
         for row in rows:
             row["payload"] = json.loads(row["payload"])
-            if row["type"] == TaskEventType.decision_recorded and row["payload"].get("decision") == "retry":
+            retry = row["type"] == TaskEventType.decision_recorded and row["payload"].get("decision") == "retry"
+            if retry or (rework and row["type"] == TaskEventType.rework_started):
                 start = row["seq"]
         return [row for row in rows if row["seq"] > start]
 
@@ -483,7 +505,7 @@ class TaskStore:
 
     def attempt_started_at(self, task_id: str) -> datetime | None:
         with self.db.connection() as conn:
-            for row in self._attempt_events(conn, task_id):
+            for row in self._attempt_events(conn, task_id, rework=True):
                 if row["type"] == TaskEventType.status_changed and row["payload"].get("to") == "developing":
                     return from_text(row["occurred_at"])
         return None
@@ -600,19 +622,108 @@ class TaskStore:
         self.transition(conn, task_id, target, expected_from=task.status)
         return True
 
+    def set_rework_reason(self, conn: Connection, task: Task, reason: str) -> None:
+        text = reason if task.rework_count < self.rework_limit else f"{reason} {LIMIT_REACHED}"
+        conn.execute("UPDATE tasks SET rework_reason = :reason WHERE id = :id", {"reason": text, "id": task.id})
+
+    def fail_merged_in(self, conn: Connection, task_id: str, kind: FailureKind, reason: str) -> bool:
+        task = self.load_task(conn, task_id)
+        if task is None or (task.status == TaskStatus.failed and task.failure_kind == kind):
+            return False
+        movable = task.status in (TaskStatus.released, TaskStatus.failed) or TaskStatus.failed in TRANSITIONS[task.status]
+        if not movable:
+            return False
+        self.record_event(
+            conn, task_id, TaskEventType.role_finished, {"step": "release", "outcome": "error", "summary": reason[:300]}
+        )
+        conn.execute(
+            "UPDATE tasks SET failure_kind = :kind, version = version + 1, updated_at = :now WHERE id = :id",
+            {"kind": kind.value, "now": to_text(utcnow()), "id": task_id},
+        )
+        self.set_rework_reason(conn, task, reason)
+        if task.status == TaskStatus.failed:
+            return True
+        if task.status != TaskStatus.released:
+            self.transition(conn, task_id, TaskStatus.failed, expected_from=task.status)
+            return True
+        conn.execute(
+            "UPDATE tasks SET status = :status, version = version + 1, updated_at = :now WHERE id = :id",
+            {"status": TaskStatus.failed.value, "now": to_text(utcnow()), "id": task_id},
+        )
+        self.record_event(
+            conn, task_id, TaskEventType.status_changed, {"from": task.status.value, "to": TaskStatus.failed.value}
+        )
+        return True
+
+    def start_rework_in(self, conn: Connection, task_id: str, owner_id: str, context: dict[str, Any]) -> bool:
+        task = self.load_task(conn, task_id)
+        row = conn.fetchone("SELECT rework_of FROM tasks WHERE id = :id", {"id": task_id})
+        if task is None or task.status != TaskStatus.failed or task.failure_kind not in REWORK_SOURCES:
+            return False
+        if row["rework_of"] == owner_id:
+            return False
+        reason = task.rework_reason or "нет данных"
+        if task.rework_count >= self.rework_limit:
+            conn.execute("UPDATE tasks SET rework_of = :owner WHERE id = :id", {"owner": owner_id, "id": task_id})
+            self.record_event(
+                conn, task_id, TaskEventType.role_finished,
+                {"step": "rework", "outcome": "error", "summary": f"{LIMIT_REACHED} {reason}"[:300]},
+            )
+            return False
+        attempt = task.rework_count + 1
+        conn.execute(
+            "UPDATE tasks SET rework_of = :owner, rework_count = :count, rework_priority = :yes, rework_context = :context, "
+            "model_calls_limit = model_calls_limit + :calls WHERE id = :id",
+            {
+                "owner": owner_id, "count": attempt, "yes": True, "context": _json(context), "calls": MODEL_CALLS_LIMIT,
+                "id": task_id,
+            },
+        )
+        self.record_event(
+            conn, task_id, TaskEventType.rework_started,
+            {
+                "reason": reason[:500], "attempt": attempt, "limit": self.rework_limit, "source": context["source"],
+                "release_id": context["release_id"], "materials": list(REWORK_MATERIALS),
+            },
+        )
+        self.transition(conn, task_id, TaskStatus.queued, expected_from=TaskStatus.failed)
+        return True
+
+    def rework_context(self, task_id: str) -> dict[str, Any] | None:
+        with self.db.connection() as conn:
+            row = conn.fetchone("SELECT rework_context FROM tasks WHERE id = :id", {"id": task_id})
+        return json.loads(row["rework_context"]) if row and row["rework_context"] else None
+
+    def save_rework_context(self, task_id: str, context: dict[str, Any]) -> None:
+        with self.db.transaction() as conn:
+            conn.execute(
+                "UPDATE tasks SET rework_context = :context WHERE id = :id", {"context": _json(context), "id": task_id}
+            )
+
+    def merge_task(self, conn: Connection, sha: str) -> str | None:
+        row = conn.fetchone(
+            "SELECT task_id FROM operations WHERE kind = 'merge_pr' AND status = 'succeeded' AND external_ref = :sha "
+            "AND release_id IS NULL",
+            {"sha": sha},
+        )
+        return row["task_id"] if row else None
+
     def _promote(self, conn: Connection) -> list[str]:
         promoted: list[str] = []
         used = self.slots_used(conn)
         while used < SLOTS_TOTAL:
             row = conn.fetchone(
-                "SELECT id FROM tasks WHERE status = :queued ORDER BY updated_at, id LIMIT 1",
+                "SELECT id, rework_priority FROM tasks WHERE status = :queued "
+                "ORDER BY rework_priority DESC, updated_at, id LIMIT 1",
                 {"queued": TaskStatus.queued.value},
             )
             if row is None:
                 break
-            self.transition(
-                conn, row["id"], TaskStatus.awaiting_spec_approval, expected_from=TaskStatus.queued
-            )
+            target = TaskStatus.awaiting_spec_approval
+            if row["rework_priority"]:
+                conn.execute(f"UPDATE tasks SET {REWORK_RESET} WHERE id = :id", {"no": False, "id": row["id"]})
+                target = TaskStatus.developing
+            self.transition(conn, row["id"], target, expected_from=TaskStatus.queued)
             promoted.append(row["id"])
             used += 1
         return promoted
@@ -819,14 +930,15 @@ class TaskStore:
         e2e: CheckReport | None = None,
         origin: ReleaseOrigin = ReleaseOrigin.task,
         origin_decision_id: str | None = None,
+        reason: str | None = None,
     ) -> ReleaseCandidate:
         release_id = new_id("rel")
         conn.execute(
             "INSERT INTO release_candidates (id, task_id, kind, status, version, commit_sha, expected_previous_sha, "
             "spec_hash, suite_hash, ci_run_ids, pr_url, created_at, approved_by, approved_at, is_published, deploy, "
-            "pr_review_id, e2e, origin, origin_decision_id) "
+            "pr_review_id, e2e, origin, origin_decision_id, reason) "
             "VALUES (:id, :task_id, :kind, :status, 1, :commit_sha, :previous, :spec_hash, :suite_hash, :ci, "
-            ":pr_url, :now, NULL, NULL, :published, NULL, :review, :e2e, :origin, :decision)",
+            ":pr_url, :now, NULL, NULL, :published, NULL, :review, :e2e, :origin, :decision, :reason)",
             {
                 "id": release_id,
                 "task_id": task_id,
@@ -844,6 +956,7 @@ class TaskStore:
                 "e2e": _json(e2e.model_dump(mode="json")) if e2e is not None else None,
                 "origin": origin.value,
                 "decision": origin_decision_id,
+                "reason": reason,
             },
         )
         self.record_event(
