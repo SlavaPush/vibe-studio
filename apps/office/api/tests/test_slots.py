@@ -6,6 +6,8 @@ from app import fixtures
 from app.schemas import TaskStatus, count_slots
 from app.tasks import SIGNAL_SLOT_ACQUIRED
 
+pytestmark = pytest.mark.pg
+
 SLOT_STATUSES = {
     "awaiting_spec_approval",
     "developing",

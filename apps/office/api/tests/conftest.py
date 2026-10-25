@@ -876,7 +876,17 @@ def app_key(tmp_path_factory: pytest.TempPathFactory) -> SimpleNamespace:
     return SimpleNamespace(path=path, public=key.public_key())
 
 
-@pytest.fixture(params=["sqlite", "postgres"])
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line("markers", "pg: тест прогоняется и на PostgreSQL")
+
+
+def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
+    if "database_url" in metafunc.fixturenames:
+        params = ["sqlite", "postgres"] if metafunc.definition.get_closest_marker("pg") else ["sqlite"]
+        metafunc.parametrize("database_url", params, indirect=True)
+
+
+@pytest.fixture
 def database_url(request: pytest.FixtureRequest, tmp_path: Path):
     if request.param == "sqlite":
         yield f"sqlite:///{tmp_path / 'office.sqlite'}"

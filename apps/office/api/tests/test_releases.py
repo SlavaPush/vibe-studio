@@ -2,6 +2,8 @@ import pytest
 
 from app.schemas import ReleaseKind, ReleaseOrigin, ReleaseStatus
 
+pytestmark = pytest.mark.pg
+
 
 def decide(client, release_id, decision, version, key, **extra):
     return client.post(

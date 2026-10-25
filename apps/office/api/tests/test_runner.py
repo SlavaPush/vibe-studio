@@ -1,6 +1,7 @@
 import json
 from datetime import timedelta
 
+import pytest
 from conftest import UI_TASK, wait_for
 from fastapi.testclient import TestClient
 
@@ -9,6 +10,8 @@ from app.db import Database
 from app.runner import checkpoint_path
 from app.schemas import ModelProfile, TaskEventType, TaskStatus
 from app.tasks import IntakeOutcome, TaskStore
+
+pytestmark = pytest.mark.pg
 
 SPEC = {"version": 1, "spec_hash": "sha256:x", "summary": "s", "acceptance_criteria": ["c"], "sources": []}
 

@@ -11,6 +11,8 @@ from app.errors import OfficeError
 from app.sessions import COOKIE_NAME, token_hash
 from conftest import CODE_VECTORS
 
+pytestmark = pytest.mark.pg
+
 PROTECTED = [
     ("get", "/api/me"),
     ("get", "/api/tasks"),

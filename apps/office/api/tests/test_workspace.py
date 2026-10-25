@@ -85,6 +85,7 @@ def test_fetch_error_fails_task(office, app, origin, owner):
     assert not app.state.workspace.worktree_path(task_id).exists()
 
 
+@pytest.mark.pg
 def test_file_error_fails_task(office, app, owner, monkeypatch):
     def denied(*args, **kwargs):
         raise PermissionError(13, "Permission denied")
@@ -159,6 +160,7 @@ def test_foreign_directory_fails_task(office, app, owner):
     assert (foreign / "notes.txt").read_text() == "keep"
 
 
+@pytest.mark.pg
 def test_cancel_during_creation_removes_worktree(office, app, owner, monkeypatch):
     store = app.state.store
     workspace = app.state.workspace
