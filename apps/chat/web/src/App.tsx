@@ -1,4 +1,4 @@
-import { Menu, X } from 'lucide-react'
+import { LogOut, Menu, X } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { AboutDialog } from '@/components/chat/AboutDialog'
 import { ChatThread } from '@/components/chat/ChatThread'
@@ -136,7 +136,7 @@ export default function App({ store, controller, version = buildVersion() }: App
                   </SheetTrigger>
                   <h1 className="min-w-0 flex-1 truncate text-base font-semibold">{active?.title ?? 'vibe-chat'}</h1>
                 </div>
-                <div className="flex min-w-0 items-center gap-2 md:gap-3">
+                <div className="flex min-w-0 flex-wrap items-center gap-2 md:gap-3">
                   <ModelSelector
                     models={state.models}
                     value={state.selectedModel}
@@ -144,6 +144,10 @@ export default function App({ store, controller, version = buildVersion() }: App
                   />
                   <AboutDialog />
                   <ThemeToggle className="shrink-0" />
+                  <Button variant="outline" size="sm" className="shrink-0" onClick={() => store.signOut()}>
+                    <LogOut aria-hidden="true" />
+                    Выйти
+                  </Button>
                 </div>
               </header>
               <ChatThread
