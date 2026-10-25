@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { AboutDialog } from '@/components/chat/AboutDialog'
 import { ChatThread } from '@/components/chat/ChatThread'
 import { ConversationList } from '@/components/chat/ConversationList'
+import { ExportButton } from '@/components/chat/ExportButton'
 import { LoginScreen } from '@/components/chat/LoginScreen'
 import { MessageQueue } from '@/components/chat/MessageQueue'
 import { ModelSelector } from '@/components/chat/ModelSelector'
@@ -142,6 +143,7 @@ export default function App({ store, controller, version = buildVersion() }: App
                     value={state.selectedModel}
                     onChange={store.selectModel}
                   />
+                  <ExportButton store={store} />
                   <AboutDialog />
                   <ThemeToggle className="shrink-0" />
                 </div>
