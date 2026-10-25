@@ -118,7 +118,7 @@ Cookie сеанса по умолчанию имеет флаг `Secure`. Chrome
 
 ## Проверки
 
-Команды выполняются из корня монорепозитория. Те же проверки выполняют job `chat-api`, `chat-web` и `chat-containers` в `.github/workflows/ci.yml`.
+Команды выполняются из корня монорепозитория. Те же проверки выполняют job `chat-web` и `chat-containers` в `.github/workflows/ci.yml` (обязательные) и `chat-api` в `.github/workflows/full.yml` (только ручной запуск).
 
 ```bash
 docker compose -f apps/chat/infra/docker-compose.yml up -d

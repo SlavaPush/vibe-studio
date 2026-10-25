@@ -201,7 +201,7 @@ def test_task_reaches_open_pr_and_passed_checks(setup):
     assert drive(worker, setup.task_id) == 0
     task = setup.task()
     assert task.status == TaskStatus.needs_attention
-    assert [(check.status, check.conclusion) for check in task.checks.checks] == [("completed", "success")] * 7
+    assert [(check.status, check.conclusion) for check in task.checks.checks] == [("completed", "success")] * 3
     assert len(setup.events(TaskEventType.checks_status)) == 2
     assert setup.fake.mutations() == [("POST", "/repos/SlavaPush/vibe-studio/pulls")]
     assert len(setup.pushes) == 1
@@ -212,14 +212,14 @@ def test_task_reaches_open_pr_and_passed_checks(setup):
 
 def test_failed_check_closes_pr_and_fails_task(setup):
     worker = opened(setup)
-    setup.fake.add_pr_runs(setup.head, 1, office_web="failure")
+    setup.fake.add_pr_runs(setup.head, 1, chat_web="failure")
     drive(worker, setup.task_id)
     task = setup.task()
     assert (task.status, task.failure_kind) == (TaskStatus.failed, FailureKind.checks_failed)
     assert setup.fake.prs[1]["state"] == "closed"
     assert [event.payload for event in setup.events(TaskEventType.pr_closed)] == [{"pr_number": 1}]
     reason = [event for event in setup.events(TaskEventType.role_finished) if event.payload["step"] == "pr_checks"]
-    assert "office-web (failure)" in reason[-1].payload["summary"]
+    assert "chat-web (failure)" in reason[-1].payload["summary"]
     response = decide(setup, "retry", "retry-checks-failed")
     assert response.status_code == 409
     assert response.json()["code"] == "decision_not_allowed"
@@ -237,23 +237,20 @@ def test_non_success_conclusions_fail_checks(setup, conclusion):
 def test_runs_of_other_pr_head_attempt_or_app_are_not_counted(setup):
     worker = opened(setup)
     head = setup.head
-    setup.fake.add_run("ci.yml", "pull_request", head, [7], {name: "success" for name in ("chat-api",)})
-    setup.fake.add_run("ci.yml", "pull_request", head, [], {"chat-web": "success"})
-    setup.fake.add_run("ci.yml", "pull_request", "f" * 40, [1], {"chat-containers": "success"})
-    setup.fake.add_run("ci.yml", "push", head, [1], {"office-api": "success"})
-    setup.fake.add_run("ci.yml", "pull_request", head, [1], {"office-sandbox": "success"}, app_id=99)
+    setup.fake.add_run("ci.yml", "pull_request", head, [7], {"chat-web": "success"})
+    setup.fake.add_run("ci.yml", "pull_request", head, [], {"chat-containers": "success"})
+    setup.fake.add_run("ci.yml", "pull_request", "f" * 40, [1], {"chat-web": "success"})
+    setup.fake.add_run("ci.yml", "push", head, [1], {"chat-containers": "success"})
+    setup.fake.add_run("ci.yml", "pull_request", head, [1], {"chat-web": "success"}, app_id=99)
     setup.fake.add_run("office-paths.yml", "pull_request_target", head, [1], {"office-paths": "success"},
                        run_number=4, run_attempt=1)
     setup.fake.add_run("office-paths.yml", "pull_request_target", head, [1], {"office-paths": None},
                        run_number=4, run_attempt=2)
     summary = {check.name: check.status for check in worker.summary(setup.task()).checks}
-    assert summary == {
-        "chat-api": "missing", "chat-web": "missing", "chat-containers": "missing", "office-api": "missing",
-        "office-web": "missing", "office-sandbox": "missing", "office-paths": "in_progress",
-    }
-    setup.fake.add_run("ci.yml", "pull_request", head, [1], {"office-web": "success"}, run_number=2)
+    assert summary == {"chat-web": "missing", "chat-containers": "missing", "office-paths": "in_progress"}
+    setup.fake.add_run("ci.yml", "pull_request", head, [1], {"chat-web": "success"}, run_number=2)
     checks = {check.name: (check.status, check.conclusion) for check in worker.summary(setup.task()).checks}
-    assert checks["office-web"] == ("completed", "success")
+    assert checks["chat-web"] == ("completed", "success")
 
 
 def test_missing_runs_after_timeout_need_attention(setup):
@@ -437,7 +434,7 @@ def test_lost_create_then_cancel_and_restart_closes_found_pr(setup, monkeypatch)
 @pytest.mark.parametrize("moment", ["before", "after"])
 def test_close_crash_is_reconciled_after_restart(setup, monkeypatch, moment):
     worker = opened(setup)
-    setup.fake.add_pr_runs(setup.head, 1, office_web="failure")
+    setup.fake.add_pr_runs(setup.head, 1, chat_web="failure")
     if moment == "before":
         monkeypatch.setattr(worker.github, "close_pr", lambda *args: (_ for _ in ()).throw(Crash()))
     else:
@@ -627,7 +624,7 @@ def test_worker_starts_after_worktree_recovery(office, origin, tmp_path, app_key
 
 def test_foreign_push_to_pr_branch_needs_attention(setup):
     worker = opened(setup)
-    setup.fake.add_pr_runs(setup.head, 1, office_web="failure")
+    setup.fake.add_pr_runs(setup.head, 1, chat_web="failure")
     other = setup.origin.work
     git(other, "fetch", "-q", str(setup.origin.bare), f"office/{setup.task_id}")
     git(other, "checkout", "-q", "-B", "foreign", "FETCH_HEAD")
@@ -667,7 +664,7 @@ def test_unreadable_checks_need_attention_after_timeout(setup, failure):
 
 def test_cancel_after_unknown_close_closes_pr(setup):
     worker = opened(setup)
-    setup.fake.add_pr_runs(setup.head, 1, office_web="failure")
+    setup.fake.add_pr_runs(setup.head, 1, chat_web="failure")
     setup.fake.status[("PATCH", "/repos/SlavaPush/vibe-studio/pulls/1")] = 403
     drive(worker, setup.task_id)
     assert setup.task().status == TaskStatus.needs_attention
@@ -754,7 +751,7 @@ def test_approved_pr_is_merged_checked_and_becomes_candidate(setup):
     assert {check.status for check in task.checks.checks} == {"missing"}
     assert setup.suite.calls == []
     run_id = setup.fake.add_push_runs(sha)
-    setup.fake.add_run("ci.yml", "push", sha, [], {"chat-api": "failure"}, head_branch="office/other")
+    setup.fake.add_run("ci.yml", "push", sha, [], {"chat-web": "failure"}, head_branch="office/other")
     drive(worker, setup.task_id)
     task = setup.task()
     assert task.status == TaskStatus.awaiting_release
@@ -991,7 +988,7 @@ def test_cancel_racing_merge_keeps_pr_and_records_merge(setup, monkeypatch):
 @pytest.mark.parametrize("conclusion", ["failure", "cancelled", "skipped"])
 def test_failed_push_check_of_merge_commit_fails_without_candidate(setup, conclusion):
     worker = merged(setup)
-    setup.fake.add_push_runs(setup.task().merge_sha, office_web=conclusion)
+    setup.fake.add_push_runs(setup.task().merge_sha, chat_web=conclusion)
     drive(worker, setup.task_id)
     task = setup.task()
     assert (task.status, task.failure_kind) == (TaskStatus.failed, FailureKind.checks_failed)

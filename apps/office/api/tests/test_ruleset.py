@@ -3,6 +3,8 @@ from pathlib import Path
 
 import yaml
 
+from app.required_checks import PR_EVENTS, _events
+
 ROOT = Path(__file__).resolve().parents[4]
 RULESET = ROOT / ".github" / "rulesets" / "main.json"
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -25,7 +27,9 @@ def workflow_jobs() -> set[str]:
     files = sorted([*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml")])
     assert files
     for path in files:
-        jobs.update(yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"])
+        workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if any(event in PR_EVENTS for event in _events(workflow)):
+            jobs.update(workflow["jobs"])
     return jobs
 
 

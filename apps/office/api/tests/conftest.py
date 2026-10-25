@@ -518,7 +518,7 @@ class Office:
 
 
 REPO_PATH = "/repos/SlavaPush/vibe-studio"
-CI_JOBS = ("chat-api", "chat-web", "chat-containers", "office-api", "office-web", "office-sandbox")
+CI_JOBS = ("chat-web", "chat-containers")
 
 
 class FakeGitHub:

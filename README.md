@@ -163,16 +163,23 @@ Docker-тесты офиса клонируют `OFFICE_TEST_TARGET_REPO` и б�
 
 ## CI
 
-`.github/workflows/ci.yml` запускается при `push` в `main` и для каждого pull request, без фильтров путей. Job:
+`.github/workflows/ci.yml` запускается при `push` в `main` и для каждого pull request, без фильтров путей. В нём только проверки интерфейса чата: участники меняют через офис только его (решение владельца 25 октября 2026, CI ускорен с 7 мин до 1 мин). Job:
+
+| Job | Проверка |
+| --- | --- |
+| `chat-web` | `npm ci`, lint, тесты, сборка |
+| `chat-containers` | сборка образа, запуск с PostgreSQL, `/healthz`, версия в `<meta name="app-version">`, `404` для неизвестного `/api/...`, процесс не от root |
+
+`.github/workflows/full.yml` («Full CI») запускается только вручную (`workflow_dispatch`, кнопка «Run workflow» в разделе Actions) и не входит в обязательные проверки. Те же команды выполняются локально перед изменением сервера чата и офиса:
 
 | Job | Проверка |
 | --- | --- |
 | `chat-api` | `uv run pytest` на PostgreSQL 16 |
-| `chat-web` | `npm ci`, lint, тесты, сборка |
-| `chat-containers` | сборка образа, запуск с PostgreSQL, `/healthz`, версия в `<meta name="app-version">`, `404` для неизвестного `/api/...`, процесс не от root |
 | `office-api` | `uv run pytest` офиса на SQLite и PostgreSQL 17 |
 | `office-web` | `npm ci`, lint, тесты, сборка панели офиса |
 | `office-sandbox` | сборка образа sandbox, `sandbox-smoke` на `apps/chat/web` того же checkout, `pytest -m docker` с `OFFICE_TEST_TARGET_REPO`, указывающим на этот checkout; ветка `main` создаётся на проверяемом commit |
+
+Тесты QA, слитые в `main`, по-прежнему выполняет сам офис: критический E2E итогового commit перед выпуском. С серверным контуром (`P5.4`) `chat-api` возвращается в обязательные проверки.
 
 `.github/workflows/office-paths.yml` — проверка путей веток задач офиса. Событие `pull_request_target`, job `office-paths` выполняется только для веток `office/*`. Checkout базовой ветки без `ref` и с `persist-credentials: false`, объекты head PR получаются `git fetch` только как данные, код из head не выполняется. Скрипт офиса `apps/office/api/scripts/check_branch.py` из базовой ревизии проверяет каждый изменённый путь по политике `apps/office/policies/paths.yaml`, режимы файлов, двоичное содержимое и комментарии отключения lint и TypeScript. Права `contents: read`, секретов нет. Пути вне зоны интерфейса `apps/chat/web/` отклоняются.
 
@@ -188,7 +195,7 @@ Ruleset требует:
 
 - запрет удаления ветки (`deletion`) и force push (`non_fast_forward`);
 - изменения только через pull request: 0 обязательных одобрений, одобрение владельца кода по `.github/CODEOWNERS` для файлов с владельцем, снятие прежних одобрений после нового push;
-- успешные обязательные проверки `chat-api`, `chat-web`, `chat-containers`, `office-api`, `office-web`, `office-sandbox` и `office-paths` от GitHub Actions (`integration_id: 15368`), без требования актуальной базы. Статус с тем же именем от другого приложения или пользователя не засчитывается. Для веток не `office/*` job `office-paths` пропускается, GitHub считает пропуск успехом.
+- успешные обязательные проверки `chat-web`, `chat-containers` и `office-paths` от GitHub Actions (`integration_id: 15368`), без требования актуальной базы. Статус с тем же именем от другого приложения или пользователя не засчитывается. Для веток не `office/*` job `office-paths` пропускается, GitHub считает пропуск успехом.
 
 Обходит ruleset только роль администратора репозитория (`RepositoryRole`, `actor_id: 5`, `bypass_mode: always`): владелец может выполнять push в `main` напрямую. GitHub App офиса в списке обхода нет: офис не может отправить commit в `main` и слить PR в обход правил.
 

@@ -314,7 +314,7 @@ cd web && npm ci && npm run dev
 
 Открывать панель нужно по `http://localhost:5173`, а не по `http://127.0.0.1:5173`. Cookie сеанса имеет атрибут `Secure`; Chrome принимает такие cookie по HTTP только для `localhost`.
 
-Проверки из корня монорепозитория (те же команды выполняют job `office-api`, `office-web` и `office-sandbox` корневого `.github/workflows/ci.yml`):
+Проверки из корня монорепозитория (те же команды выполняют job `office-api`, `office-web` и `office-sandbox` корневого `.github/workflows/full.yml`, который запускается только вручную):
 
 ```bash
 (cd apps/office/api && uv sync --locked && uv run pytest)
