@@ -264,12 +264,12 @@
 
 | `type` | `payload` |
 | --- | --- |
-| `task_created` | `title`, `profile`, `change_class` (в событиях до появления поля отсутствует) |
+| `task_created` | `title`, `profile`, `change_class` (в событиях до появления поля отсутствует); если классификатор фильтра приёма ответил — также `provider`, `model`, `effort` модели, которая дала ответ (основная или резерв) |
 | `task_rejected` | `reason` |
 | `status_changed` | `from`, `to` — статусы задачи |
 | `role_started` | `step` — шаг роли |
 | `role_finished` | `step`, `outcome` (`ok`, `blocked`, `error`), `summary`; итог шага очереди выпуска (`step = release`: публикация, остановка, ошибка деплоя, откат) — также `release_id` |
-| `tool_called` | `arguments` — краткое описание аргументов, `result` (`ok`, `denied`, `error`) |
+| `tool_called` | `arguments` — краткое описание аргументов, `result` (`ok`, `denied`, `error`); для `tool = model` (обращение к модели) также `provider`, `model`, `effort` — провайдер, модель и уровень усилий вызова |
 | `artifact_ready` | `name`, `size_bytes` |
 | `decision_required` | `decision`, `expected_version`, при выпуске также `release_id` |
 | `decision_recorded` | `decision`, `decision_id`, `participant_id`; для `rollback` с причиной также `reason` |

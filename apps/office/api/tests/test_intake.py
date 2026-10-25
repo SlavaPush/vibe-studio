@@ -35,7 +35,12 @@ def test_accepted_task_uses_primary_classifier(office):
     assert call["output_config"]["format"]["type"] == "json_schema"
     assert office.openai.moderation_calls[0]["model"] == "omni-moderation-latest"
     assert office.openai.calls == []
-    assert [event.type for event in events_of(office, task["id"])][:1] == ["task_created"]
+    events = events_of(office, task["id"])
+    assert [event.type for event in events][:1] == ["task_created"]
+    assert events[0].payload == {
+        "title": task["title"], "profile": "hybrid", "change_class": "frontend_ui",
+        "provider": "anthropic", "model": "claude-haiku-5-5", "effort": "low",
+    }
 
 
 @pytest.mark.parametrize("change_class", ["out_of_scope", "internal_probe", "other"])
@@ -171,6 +176,7 @@ def test_moderation_rejects_flagged_text(office):
     assert task["status"] == "rejected"
     assert task["rejection_reason"] == REASON_MODERATION
     assert office.anthropic.calls == []
+    assert "model" not in events_of(office, task["id"])[0].payload
 
 
 @pytest.mark.parametrize(
@@ -217,6 +223,8 @@ def test_fallback_to_openai_on_primary_error(office):
     assert call["model"] == "gpt-6-luna"
     assert call["reasoning"] == {"effort": "low"}
     assert call["text"]["format"]["strict"] is True
+    created = events_of(office, task["id"])[0].payload
+    assert (created["provider"], created["model"], created["effort"]) == ("openai", "gpt-6-luna", "low")
 
 
 def test_fallback_answer_is_also_validated(office):

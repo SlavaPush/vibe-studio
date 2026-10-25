@@ -163,6 +163,7 @@ class IntakeFilter:
         if accepted and any(pattern.search(text) for pattern in self.server_patterns):
             change_class = ChangeClass.backend_api
         logger.info("intake %s: %s -> %s (%s)", model, result.change_class, change_class, result.reason)
+        provider, name = model.split("/", 1)
         return IntakeOutcome(
             accepted=accepted,
             reason=None if accepted else CLASS_REASONS.get(result.change_class, CLASS_REASONS["other"]),
@@ -170,4 +171,7 @@ class IntakeFilter:
             input_tokens=reply.input_tokens,
             output_tokens=reply.output_tokens,
             change_class=change_class,
+            provider=provider,
+            model=name,
+            effort=self._effort(model, route["effort"]),
         )

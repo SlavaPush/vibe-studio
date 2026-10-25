@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import type { Run } from '@/api/client'
-import type { CheckReport, Participant, ReleaseCandidate, ReleaseQueueState, Task } from '@/api/types'
+import type { CheckReport, Participant, ReleaseCandidate, ReleaseQueueState, Task, TaskEvent } from '@/api/types'
 import { ReleaseQueue } from '@/components/office/ReleaseQueue'
 import { TaskCard } from '@/components/office/TaskCard'
 import { blockedRelease, participants, releaseQueue, releases, tasks } from '@/mocks/data'
@@ -462,9 +462,122 @@ describe('TaskCard: вкладки', () => {
     const items = within(screen.getByRole('list', { name: 'События задачи' })).getAllByRole('listitem')
     expect(items).toHaveLength(2)
     expect(items[0]).toHaveTextContent('Задача создана')
-    expect(items[1]).toHaveTextContent('Роль начала работу')
+    expect(items[1]).toHaveTextContent('начал работу')
     openTab('Требования')
     expect(source.closed).toBe(true)
+  })
+
+  const roleEvent = (
+    type: string,
+    role: TaskEvent['role'],
+    payload: Record<string, unknown>,
+    tool: string | null = null,
+  ): TaskEvent => ({ ...taskEvent('tsk_101', type, payload), role, tool })
+
+  function openJournal(events: TaskEvent[], task: Task = developing) {
+    installEventSource()
+    fakeApi()
+    const view = renderCard(maria, task)
+    openTab('Ход работы')
+    const source = FakeEventSource.last('/api/tasks/tsk_101/events')
+    act(() => {
+      source.open()
+      for (const event of events) source.emit(event)
+    })
+    return view
+  }
+
+  it('схема конвейера: семь агентов, работающий выделен, передача озвучена', () => {
+    openJournal([
+      taskEvent('tsk_101', 'task_created', { title: 'x', provider: 'anthropic', model: 'claude-haiku-5-5', effort: 'low' }),
+      roleEvent('role_started', 'supervisor', { step: 'spec' }),
+      roleEvent('role_finished', 'supervisor', { step: 'spec', outcome: 'ok', summary: 'Требования: 3 критерия приёмки.' }),
+      roleEvent('role_started', 'developer', { step: 'implement' }),
+      roleEvent(
+        'tool_called',
+        'developer',
+        {
+          arguments: 'developer/implement anthropic/claude-sonnet-5-5',
+          result: 'ok',
+          provider: 'anthropic',
+          model: 'claude-sonnet-5-5',
+          effort: 'high',
+        },
+        'model',
+      ),
+      roleEvent('tool_called', 'developer', { arguments: 'apps/chat/web/src/ChatThread.tsx', result: 'ok' }, 'read_file'),
+    ])
+    const board = screen.getByRole('list', { name: 'Схема конвейера' })
+    for (const name of ['Фильтр приёма', 'Supervisor', 'Исследователь', 'Разработчик', 'QA', 'Критик', 'Агент ревью PR']) {
+      expect(within(board).getByRole('heading', { name })).toBeInTheDocument()
+    }
+    const developer = within(board).getByRole('heading', { name: 'Разработчик' }).closest('div.rounded-md') as HTMLElement
+    expect(developer).toHaveClass('ring-2')
+    expect(developer).toHaveTextContent('работает')
+    expect(developer).toHaveTextContent('Модель: anthropic/claude-sonnet-5-5, усилие high')
+    expect(developer).toHaveTextContent('читает ChatThread.tsx')
+    expect(within(board).getByText('Supervisor передаёт требования → Разработчик, сейчас')).toHaveClass('sr-only')
+    expect(within(board).getByText('не понадобился')).toBeInTheDocument()
+    expect(board.querySelector('.animate-handoff')).toHaveClass('motion-reduce:animate-none')
+    expect(screen.getByRole('region', { name: 'GitHub' })).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'Выпуск' })).toHaveTextContent('Выпуск начнётся после слияния PR.')
+  })
+
+  it('лента: описание по-русски, вложенный payload в подробностях, неизвестный тип', () => {
+    openJournal([
+      taskEvent('tsk_101', 'checks_status', {
+        head_sha: 'b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f80',
+        checks: [{ name: 'chat-web', status: 'completed', conclusion: 'success', url: 'https://github.com/run/1' }],
+      }),
+      taskEvent('tsk_101', 'owner_review_requested', { pr_number: 12, reviewers: ['SlavaPush'] }),
+    ])
+    const feed = screen.getByRole('list', { name: 'События задачи' })
+    const items = within(feed).getAllByRole('listitem')
+    expect(items[0]).toHaveTextContent('Обязательные проверки: 1 из 1 успешно для b7c8d9e')
+    expect(items[1]).toHaveTextContent('Событие owner_review_requested')
+    expect(feed.textContent).not.toContain('[object Object]')
+    const details = within(items[0]).getByText('Подробности').closest('details') as HTMLElement
+    expect(details.querySelector('pre')?.textContent).toContain('"url": "https://github.com/run/1"')
+    expect(screen.getByRole('list', { name: 'Схема конвейера' })).toBeInTheDocument()
+  })
+
+  it('индикатор новых событий на закрытой вкладке снимается открытием', () => {
+    installEventSource()
+    fakeApi()
+    const view = render(<TaskCard task={developing} participant={maria} run={direct} onRefresh={vi.fn()} lastEventId={10} />)
+    const card = (lastEventId: number, task: Task = developing) =>
+      view.rerender(<TaskCard task={task} participant={maria} run={direct} onRefresh={vi.fn()} lastEventId={lastEventId} />)
+    expect(screen.getByRole('tab', { name: 'Ход работы' })).toBeInTheDocument()
+    card(11)
+    const tab = screen.getByRole('tab', { name: 'Ход работы, есть новые события' })
+    const dot = tab.querySelector('[aria-hidden="true"]')
+    expect(dot).toHaveClass('bg-destructive', 'animate-pulse', 'motion-reduce:animate-none')
+    openTab('Ход работы, есть новые события')
+    expect(screen.getByRole('tab', { name: 'Ход работы' })).toBeInTheDocument()
+    card(12)
+    expect(screen.getByRole('tab', { name: 'Ход работы' })).toBeInTheDocument()
+    openTab('Требования')
+    expect(screen.getByRole('tab', { name: 'Ход работы' })).toBeInTheDocument()
+    card(13)
+    expect(screen.getByRole('tab', { name: 'Ход работы, есть новые события' })).toBeInTheDocument()
+    openTab('Изменения')
+    openTab('Проверки')
+    expect(screen.getByRole('tab', { name: 'Ход работы, есть новые события' })).toBeInTheDocument()
+  })
+
+  it.each([
+    { status: 'developing' as const, spec: true, pulse: true },
+    { status: 'awaiting_spec_approval' as const, spec: false, pulse: true },
+    { status: 'awaiting_spec_approval' as const, spec: true, pulse: false },
+    { status: 'released' as const, spec: true, pulse: false },
+  ])('индикатор пульсирует только на активном этапе: $status, требования $spec', ({ status, spec, pulse }) => {
+    fakeApi()
+    const task = { ...developing, status, spec: spec ? developing.spec : null }
+    const view = render(<TaskCard task={task} participant={maria} run={direct} onRefresh={vi.fn()} lastEventId={1} />)
+    view.rerender(<TaskCard task={task} participant={maria} run={direct} onRefresh={vi.fn()} lastEventId={2} />)
+    const dot = screen.getByRole('tab', { name: 'Ход работы, есть новые события' }).querySelector('[aria-hidden="true"]')
+    if (pulse) expect(dot).toHaveClass('animate-pulse')
+    else expect(dot).not.toHaveClass('animate-pulse')
   })
 
   it('журнал показывает состояние подключения и пустой журнал после open', () => {

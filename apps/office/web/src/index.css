@@ -6,6 +6,16 @@
 @theme {
   --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --animate-handoff: handoff 1.4s linear infinite;
+
+  @keyframes handoff {
+    from {
+      top: 0;
+    }
+    to {
+      top: calc(100% - 0.5rem);
+    }
+  }
 }
 
 @theme inline {

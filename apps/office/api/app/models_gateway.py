@@ -195,7 +195,7 @@ class ModelsGateway:
         schema = provider_schema(reply_type)
         targets = self.targets(profile, role)
         for index, target in enumerate(targets):
-            store.reserve_model_call(task_id, role, step, target.name)
+            store.reserve_model_call(task_id, role, step, target)
             call = ModelCall(task_id, role, step, target, system, user, schema, self.timeout(target.provider))
             try:
                 reply = self.call_provider(call)

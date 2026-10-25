@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   asApiError,
   decideTask,
@@ -15,23 +15,24 @@ import {
   type Participant,
   type PullRequestCheck,
   type PullRequestReview,
+  type ReleaseCandidate,
   type Task,
   type TaskDecision,
   type TaskEvent,
+  type TaskStatus,
 } from '@/api/types'
 import { ConfirmButton, DecisionMessage } from '@/components/office/DecisionControls'
+import { EventFeed, PipelineBoard } from '@/components/office/PipelineBoard'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { openTaskEvents, type StreamState } from '@/lib/events'
 import {
-  AGENT_ROLE_LABELS,
   CHECKLIST_LABELS,
   CHECK_STATUS_LABELS,
   CONTOUR_LABELS,
   DECISION_LABELS,
-  EVENT_TYPE_LABELS,
   PROFILE_LABELS,
   REVIEW_VERDICT_LABELS,
   STATUS_LABELS,
@@ -39,6 +40,7 @@ import {
   formatDateTime,
 } from '@/lib/labels'
 import { TASK_DECISION_STATUSES, canAct } from '@/lib/permissions'
+import { buildPipeline } from '@/lib/pipeline'
 import { newDecision, useDecision } from '@/lib/use-decision'
 
 interface TaskCardProps {
@@ -46,6 +48,22 @@ interface TaskCardProps {
   participant: Participant
   run: Run
   onRefresh: () => void
+  lastEventId?: number
+  releases?: ReleaseCandidate[]
+}
+
+const ACTIVE_STATUSES: readonly TaskStatus[] = [
+  'developing',
+  'reviewing',
+  'awaiting_integration',
+  'awaiting_release',
+  'deploying',
+]
+
+const NO_RELEASES: ReleaseCandidate[] = []
+
+function isActive(task: Task): boolean {
+  return ACTIVE_STATUSES.includes(task.status) || (task.status === 'awaiting_spec_approval' && task.spec === null)
 }
 
 type Loadable<T> =
@@ -68,8 +86,16 @@ function failed<T>(error: unknown): Loadable<T> | null {
   return { state: 'error', error: asApiError(error) }
 }
 
-export function TaskCard({ task, participant, run, onRefresh }: TaskCardProps) {
+export function TaskCard({
+  task,
+  participant,
+  run,
+  onRefresh,
+  lastEventId = 0,
+  releases = NO_RELEASES,
+}: TaskCardProps) {
   const [tab, setTab] = useState('spec')
+  const [seen, setSeen] = useState(lastEventId)
   const [events, setEvents] = useState<TaskEvent[]>([])
   const [journal, setJournal] = useState<StreamState>('connecting')
   const [diff, setDiff] = useState<Loadable<string>>({ state: 'loading' })
@@ -127,6 +153,15 @@ export function TaskCard({ task, participant, run, onRefresh }: TaskCardProps) {
     .map((action) => canAct(participant, task, action))
     .find((permission) => !permission.allowed)
   const start = (action: TaskDecision) => void decision.submit(newDecision(action, task.version))
+  const pipeline = useMemo(
+    () => (tab === 'events' && events.length > 0 ? buildPipeline(events, task, releases) : null),
+    [tab, events, task, releases],
+  )
+  const fresh = tab !== 'events' && lastEventId > seen
+  const changeTab = (value: string) => {
+    if (value === 'events' || tab === 'events') setSeen(lastEventId)
+    setTab(value)
+  }
 
   return (
     <Card>
@@ -203,10 +238,23 @@ export function TaskCard({ task, participant, run, onRefresh }: TaskCardProps) {
           pending={decision.pending}
           onRetry={(body) => void decision.submit(body)}
         />
-        <Tabs value={tab} onValueChange={setTab}>
+        <Tabs value={tab} onValueChange={changeTab}>
           <TabsList className="flex h-auto w-full flex-wrap">
             <TabsTrigger value="spec">Требования</TabsTrigger>
-            <TabsTrigger value="events">Ход работы</TabsTrigger>
+            <TabsTrigger value="events">
+              Ход работы
+              {fresh && (
+                <>
+                  <span
+                    aria-hidden="true"
+                    className={`size-2 rounded-full bg-destructive ${
+                      isActive(task) ? 'animate-pulse motion-reduce:animate-none' : ''
+                    }`}
+                  />
+                  <span className="sr-only">, есть новые события</span>
+                </>
+              )}
+            </TabsTrigger>
             <TabsTrigger value="diff">Изменения</TabsTrigger>
             <TabsTrigger value="checks">Проверки</TabsTrigger>
             <TabsTrigger value="usage">Расход</TabsTrigger>
@@ -220,29 +268,14 @@ export function TaskCard({ task, participant, run, onRefresh }: TaskCardProps) {
             <p role="status" className="text-sm text-muted-foreground empty:hidden">
               {JOURNAL_LABELS[journal]}
             </p>
-            {events.length === 0 ? (
+            {pipeline === null ? (
               journal === 'open' && <p className="text-sm text-muted-foreground">Событий пока нет.</p>
             ) : (
-              <ol className="grid gap-2" aria-label="События задачи">
-                {events.map((event) => (
-                  <li key={event.event_id} className="grid gap-1 rounded-md border p-3 text-sm">
-                    <span className="flex flex-wrap gap-x-3 gap-y-1">
-                      <span className="text-muted-foreground">
-                        <time dateTime={event.timestamp}>{formatDateTime(event.timestamp)}</time>
-                      </span>
-                      <span className="font-medium">{EVENT_TYPE_LABELS[event.type]}</span>
-                      {event.role && <span>{AGENT_ROLE_LABELS[event.role]}</span>}
-                      {event.tool && <code className="font-mono">{event.tool}</code>}
-                      {event.artifact && <code className="font-mono">{event.artifact}</code>}
-                    </span>
-                    <span className="font-mono text-xs break-all text-muted-foreground">
-                      {Object.entries(event.payload)
-                        .map(([key, value]) => `${key}: ${String(value)}`)
-                        .join('; ')}
-                    </span>
-                  </li>
-                ))}
-              </ol>
+              <>
+                <PipelineBoard pipeline={pipeline} />
+                <h3 className="font-medium">Лента событий</h3>
+                <EventFeed events={events} />
+              </>
             )}
           </TabsContent>
 

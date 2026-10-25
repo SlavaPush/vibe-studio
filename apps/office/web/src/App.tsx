@@ -83,6 +83,7 @@ function App() {
   const [leaving, setLeaving] = useState(false)
   const [logoutError, setLogoutError] = useState<string | null>(null)
   const [headingFocus, setHeadingFocus] = useState(0)
+  const [lastEvents, setLastEvents] = useState<Record<string, number>>({})
   const generation = useRef(0)
   const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>())
   const slotsSeq = useRef(0)
@@ -121,6 +122,7 @@ function App() {
     for (const timer of timers.current.values()) clearTimeout(timer)
     timers.current.clear()
     dispatch({ type: 'reset' })
+    setLastEvents({})
     setParticipant(null)
     setGateNotice(notice)
     setLeaving(false)
@@ -207,6 +209,9 @@ function App() {
 
   const onEvent = useCallback(
     (event: TaskEvent) => {
+      setLastEvents((current) =>
+        (current[event.task_id] ?? 0) >= event.event_id ? current : { ...current, [event.task_id]: event.event_id },
+      )
       schedule(`task:${event.task_id}`, () => loadTask(event.task_id))
       if (event.type === 'status_changed') schedule('slots', loadSlots)
       if (touchesReleases(event)) schedule('releases', loadReleases)
@@ -362,6 +367,8 @@ function App() {
               participant={participant}
               run={run}
               onRefresh={() => refresh(() => loadTask(task.id))}
+              lastEventId={lastEvents[task.id] ?? 0}
+              releases={state.releases.filter((release) => release.task_id === task.id)}
             />
           )}
         </div>

@@ -426,6 +426,19 @@ describe('обновление через SSE', () => {
     expect(api.count('GET /api/releases')).toBe(before)
   })
 
+  it('событие выбранной задачи зажигает индикатор вкладки «Ход работы», событие другой задачи — нет', async () => {
+    backend()
+    render(<App />)
+    await ready()
+    const source = openStream()
+    fireEvent.click(within(stack()).getByRole('button', { name: new RegExp(developing.title) }))
+    expect(await screen.findByRole('tab', { name: 'Ход работы' })).toBeInTheDocument()
+    act(() => source.emit(taskEvent('tsk_102', 'role_started', { step: 'qa' })))
+    expect(screen.getByRole('tab', { name: 'Ход работы' })).toBeInTheDocument()
+    act(() => source.emit(taskEvent('tsk_101', 'role_started', { step: 'qa' })))
+    expect(screen.getByRole('tab', { name: 'Ход работы, есть новые события' })).toBeInTheDocument()
+  })
+
   it('после разрыва перечитывает списки до подключения и повторно после open', async () => {
     const api = backend()
     render(<App />)
