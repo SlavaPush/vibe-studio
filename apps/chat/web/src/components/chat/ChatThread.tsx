@@ -46,6 +46,8 @@ const COMPOSER_BUTTON = 'rounded-full md:h-9 md:w-auto md:rounded-md md:px-4'
 
 const COMPOSER_HINT_ID = 'composer-hint'
 
+const MAX_MESSAGE_LENGTH = 4000
+
 const THINKING_DOT_DELAYS = ['[animation-delay:0ms]', '[animation-delay:200ms]', '[animation-delay:400ms]']
 
 export type LoadAssetUrl = (id: string) => Promise<AssetUrl>
@@ -171,6 +173,7 @@ export function ChatThread({ store, actions, loadAssetUrl, queue }: ChatThreadPr
               </ComposerPrimitive.Cancel>
             </AuiIf>
           </ComposerPrimitive.Root>
+          <ComposerCounter />
           {!noConversation && (
             <p id={COMPOSER_HINT_ID} className="mt-2 text-xs text-muted-foreground">
               Enter — отправить, Shift+Enter — новая строка
@@ -179,6 +182,19 @@ export function ChatThread({ store, actions, loadAssetUrl, queue }: ChatThreadPr
         </div>
       </ThreadPrimitive.Root>
     </AssistantRuntimeProvider>
+  )
+}
+
+function ComposerCounter() {
+  const length = useAuiState((state) => state.composer.text.length)
+  return (
+    <p
+      data-testid="composer-counter"
+      aria-live="polite"
+      className="mt-1 text-right text-xs text-muted-foreground"
+    >
+      {`${length} / ${MAX_MESSAGE_LENGTH}`}
+    </p>
   )
 }
 
