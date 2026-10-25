@@ -2,7 +2,6 @@ import type {
   AgentRole,
   Contour,
   FailureKind,
-  ModelProfile,
   ReleaseDecision,
   ReleaseOrigin,
   ReleaseStatus,
@@ -151,12 +150,6 @@ export const CHECK_STATUS_LABELS: Record<string, string> = {
   queued: 'В очереди',
   in_progress: 'Выполняется',
   completed: 'Завершена',
-}
-
-export const PROFILE_LABELS: Record<ModelProfile, string> = {
-  local: 'Локальный',
-  cloud: 'Облачный',
-  hybrid: 'Гибридный',
 }
 
 const dateTime = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'short', timeStyle: 'short' })

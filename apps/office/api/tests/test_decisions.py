@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from app.schemas import ChangeClass, ModelProfile, TaskStatus
+from app.schemas import ChangeClass, TaskStatus
 from app.tasks import SIGNAL_DECISION_RECORDED, IntakeOutcome
 
 pytestmark = pytest.mark.pg
@@ -111,7 +111,7 @@ def test_retry_with_exhausted_budget_is_not_allowed(office, owner):
 def test_retry_of_backend_task_uses_its_limit(office):
     client, me = office.login("Мария")
     outcome = IntakeOutcome(True, None, change_class=ChangeClass.backend_api)
-    task_id = office.store.create_task(me["id"], "Поле в ответе API.", ModelProfile.hybrid, outcome).id
+    task_id = office.store.create_task(me["id"], "Поле в ответе API.", outcome).id
     assert office.store.get_task(task_id).usage.model_calls_limit == 60
     office.set_task(task_id, status="needs_attention", model_calls=30)
     assert decide(client, task_id, "retry", version_of(office, task_id), "retry-backend").status_code == 200

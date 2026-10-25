@@ -4,15 +4,16 @@ import secrets
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
+from dataclasses import replace
+from functools import partial
 from pathlib import Path
-from typing import Any
 
 import yaml
 
 from app.config import Settings
-from app.models_gateway import ClassifierReply, ModelsGateway, ProviderError
-from app.schemas import ChangeClass, ModelProfile
-from app.tasks import IntakeOutcome
+from app.models_gateway import INTAKE_ROLE, ClassifierReply, ModelsGateway, ProviderError, UsageMeter
+from app.schemas import ChangeClass
+from app.tasks import IntakeOutcome, TaskStore
 
 logger = logging.getLogger("office.intake")
 
@@ -61,10 +62,6 @@ def load_patterns(path: Path, key: str = "forbidden_patterns") -> list[re.Patter
     return [re.compile(pattern, re.IGNORECASE) for pattern in data[key]]
 
 
-def load_models(path: Path) -> dict[str, Any]:
-    return yaml.safe_load(path.read_text(encoding="utf-8"))
-
-
 class DeadlineExceeded(Exception):
     pass
 
@@ -77,7 +74,7 @@ class IntakeFilter:
         self.server_patterns = load_patterns(settings.intake_policy, "server_patterns") + load_patterns(
             settings.intake_policy, "model_patterns"
         )
-        self.models = load_models(settings.models_policy)
+        self.models = gateway.models
         self._executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="intake")
 
     def _effort(self, provider_model: str, wanted: str) -> str:
@@ -86,15 +83,17 @@ class IntakeFilter:
             return wanted
         return capability["reasoning_default"]
 
-    def _classify(self, provider_model: str, effort: str, user: str, timeout: float) -> ClassifierReply:
+    def _classify(
+        self, provider_model: str, effort: str, user: str, timeout: float, meter: UsageMeter
+    ) -> ClassifierReply:
         provider, model = provider_model.split("/", 1)
         call = {
             "anthropic": self.gateway.classify_anthropic,
             "openai": self.gateway.classify_openai,
         }[provider]
-        return call(model, self._effort(provider_model, effort), SYSTEM_PROMPT, user, timeout)
+        return call(model, self._effort(provider_model, effort), SYSTEM_PROMPT, user, timeout, meter)
 
-    def run(self, text: str, profile: ModelProfile) -> IntakeOutcome:
+    def run(self, text: str) -> IntakeOutcome:
         if not LETTERS.search(text):
             return IntakeOutcome(accepted=False, reason=REASON_NO_LETTERS)
         if any(pattern.search(text) for pattern in self.patterns):
@@ -102,20 +101,30 @@ class IntakeFilter:
 
         deadline = time.monotonic() + self.timeout
         calls = [0]
-        future = self._executor.submit(self._check_models, text, profile, deadline, calls)
+        meter = UsageMeter()
+        future = self._executor.submit(self._check_models, text, deadline, calls, meter)
         try:
             outcome = future.result(timeout=max(0.0, deadline - time.monotonic()))
         except FutureTimeout:
             logger.warning("intake deadline exceeded after %s model calls", calls[0])
-            return IntakeOutcome(accepted=False, reason=UNAVAILABLE, model_calls=calls[0])
-        if time.monotonic() > deadline:
-            logger.warning("intake result arrived after deadline")
-            return IntakeOutcome(accepted=False, reason=UNAVAILABLE, model_calls=outcome.model_calls)
-        return outcome
+            outcome = IntakeOutcome(accepted=False, reason=UNAVAILABLE, model_calls=calls[0])
+        else:
+            if time.monotonic() > deadline:
+                logger.warning("intake result arrived after deadline")
+                outcome = IntakeOutcome(accepted=False, reason=UNAVAILABLE, model_calls=outcome.model_calls)
+        input_tokens, output_tokens, cost_usd = meter.snapshot()
+        return replace(
+            outcome, input_tokens=input_tokens, output_tokens=output_tokens, cost_usd=cost_usd, meter=meter
+        )
 
-    def _check_models(
-        self, text: str, profile: ModelProfile, deadline: float, calls: list[int]
-    ) -> IntakeOutcome:
+    def attach(self, outcome: IntakeOutcome, store: TaskStore, task_id: str) -> None:
+        if outcome.meter is None:
+            return
+        outcome.meter.attach(
+            partial(store.record_usage, task_id), (outcome.input_tokens, outcome.output_tokens, outcome.cost_usd)
+        )
+
+    def _check_models(self, text: str, deadline: float, calls: list[int], meter: UsageMeter) -> IntakeOutcome:
         def remaining() -> float:
             left = deadline - time.monotonic()
             if left <= 0:
@@ -134,14 +143,14 @@ class IntakeFilter:
         if flagged:
             return IntakeOutcome(accepted=False, reason=REASON_MODERATION, model_calls=calls[0])
 
-        route = self.models["profiles"][profile.value]["intake_filter"]
+        route = self.models["roles"][INTAKE_ROLE]
         primary = f"{route['provider']}/{route['model']}"
         user = classifier_input(text)
         model = primary
         reply: ClassifierReply | None = None
         try:
             calls[0] += 1
-            reply = self._classify(primary, route["effort"], user, remaining())
+            reply = self._classify(primary, route["effort"], user, remaining(), meter)
         except ProviderError as error:
             logger.warning("intake classifier %s failed: %s", primary, error)
             fallback = route.get("fallback")
@@ -149,7 +158,7 @@ class IntakeFilter:
                 model = fallback
                 try:
                     calls[0] += 1
-                    reply = self._classify(fallback, route["effort"], user, remaining())
+                    reply = self._classify(fallback, route["effort"], user, remaining(), meter)
                 except Exception as fallback_error:
                     logger.warning("intake classifier %s failed: %s", fallback, fallback_error)
         except Exception as error:
@@ -168,8 +177,6 @@ class IntakeFilter:
             accepted=accepted,
             reason=None if accepted else CLASS_REASONS.get(result.change_class, CLASS_REASONS["other"]),
             model_calls=calls[0],
-            input_tokens=reply.input_tokens,
-            output_tokens=reply.output_tokens,
             change_class=change_class,
             provider=provider,
             model=name,

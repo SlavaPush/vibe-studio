@@ -9,7 +9,7 @@ from app.branch_check import git_env
 from app.config import REPO_ROOT
 from app.main import create_app
 from app.paths import PathDenied
-from app.schemas import Contour, ModelProfile, TaskStatus
+from app.schemas import Contour, TaskStatus
 from app.tasks import IntakeOutcome
 from app.workspace import Workspace, push_env
 
@@ -129,7 +129,7 @@ def test_branch_without_base_sha_uses_merge_base(office, app, origin, owner):
     store = app.state.store
     workspace = app.state.workspace
     start = origin.main()
-    task_id = store.create_task(owner, "Добавить подсказку к полю ввода сообщения в чате.", ModelProfile.hybrid,
+    task_id = store.create_task(owner, "Добавить подсказку к полю ввода сообщения в чате.",
                                 IntakeOutcome(True, None)).id
     git(workspace.clone, "branch", f"office/{task_id}", "origin/main")
     origin.push("apps/chat/web/src/Other.tsx", "export {}\n")
@@ -146,7 +146,7 @@ def test_foreign_directory_fails_task(office, app, owner):
     office.start_tasks(app, owner)
     store = app.state.store
     workspace = app.state.workspace
-    task_id = store.create_task(owner, "Добавить подсказку к полю ввода сообщения в чате.", ModelProfile.hybrid,
+    task_id = store.create_task(owner, "Добавить подсказку к полю ввода сообщения в чате.",
                                 IntakeOutcome(True, None)).id
     foreign = workspace.worktree_path(task_id)
     foreign.mkdir(parents=True)
@@ -234,7 +234,7 @@ def test_default_factory_reads_environment(origin, tmp_path, monkeypatch):
                 "VALUES ('prt_env', 'Env', 'participant', '2026-10-23T00:00:00.000000Z')"
             )
         task_id = store.create_task("prt_env", "Добавить подсказку к полю ввода сообщения в чате.",
-                                    ModelProfile.hybrid, IntakeOutcome(True, None)).id
+                                    IntakeOutcome(True, None)).id
         store.promote_queue()
         apps[0].state.workspace.wait_idle()
         path = tmp_path / "env-workspace" / "wt" / task_id

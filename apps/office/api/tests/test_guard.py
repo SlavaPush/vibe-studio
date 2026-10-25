@@ -27,7 +27,7 @@ def test_mutating_request_with_bad_origin_is_rejected(office, origin):
     login = {"access_code": office.add_code("Ира")}
     assert_forbidden_origin(client.post("/api/office-session", json=login, headers=headers))
     assert office.code_row("Ира")["office_used_at"] is None
-    assert_forbidden_origin(client.post("/api/tasks", json={"text": UI_TASK, "profile": "hybrid"}, headers=headers))
+    assert_forbidden_origin(client.post("/api/tasks", json={"text": UI_TASK}, headers=headers))
     assert office.openai.moderation_calls == []
 
 

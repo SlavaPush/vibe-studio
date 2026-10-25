@@ -3,7 +3,7 @@ import logging
 import math
 import secrets
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -22,7 +22,6 @@ from app.schemas import (
     CheckReport,
     Contour,
     FailureKind,
-    ModelProfile,
     PullRequestReview,
     ReleaseCandidate,
     ReleaseKind,
@@ -39,6 +38,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("office.tasks")
 
+LEGACY_PROFILE = "cloud"
 MODEL_CALLS_LIMITS = {ChangeClass.frontend_ui: 30, ChangeClass.backend_api: 60}
 SIGNAL_SLOT_ACQUIRED = "slot_acquired"
 SIGNAL_DECISION_RECORDED = "decision_recorded"
@@ -111,6 +111,8 @@ class IntakeOutcome:
     provider: str | None = None
     model: str | None = None
     effort: str | None = None
+    cost_usd: float = 0.0
+    meter: Any = field(default=None, compare=False, repr=False)
 
 
 def new_id(prefix: str) -> str:
@@ -136,7 +138,6 @@ def task_from_row(row: dict[str, Any], rework_limit: int = REWORK_LIMIT) -> Task
         title=row["title"],
         text=row["text"],
         status=row["status"],
-        profile=row["profile"],
         owner_id=row["owner_id"],
         owner_name=row["owner_name"],
         version=row["version"],
@@ -164,6 +165,7 @@ def task_from_row(row: dict[str, Any], rework_limit: int = REWORK_LIMIT) -> Task
             "model_calls_limit": row["model_calls_limit"],
             "input_tokens": row["input_tokens"],
             "output_tokens": row["output_tokens"],
+            "cost_usd": round(max(0.0, row["cost_usd"]), 4),
         },
         rework_count=row["rework_count"],
         rework_limit=rework_limit,
@@ -463,14 +465,15 @@ class TaskStore:
     def has_review(self, conn: Connection, task_id: str, head_sha: str | None) -> bool:
         return self.load_review(conn, task_id, head_sha) is not None
 
-    def record_usage(self, task_id: str, input_tokens: int, output_tokens: int) -> None:
+    def record_usage(self, task_id: str, input_tokens: int, output_tokens: int, cost_usd: float) -> None:
         with self.db.locked_transaction() as conn:
             conn.execute(
                 "UPDATE tasks SET input_tokens = input_tokens + :input, output_tokens = output_tokens + :output, "
-                "version = version + 1, updated_at = :now WHERE id = :id",
+                "cost_usd = cost_usd + :cost, version = version + 1, updated_at = :now WHERE id = :id",
                 {
                     "input": max(0, int(input_tokens)),
                     "output": max(0, int(output_tokens)),
+                    "cost": max(0.0, float(cost_usd)),
                     "now": to_text(utcnow()),
                     "id": task_id,
                 },
@@ -788,7 +791,6 @@ class TaskStore:
         self,
         owner_id: str,
         text: str,
-        profile: ModelProfile,
         outcome: IntakeOutcome,
         reservation_id: str | None = None,
     ) -> Task:
@@ -802,16 +804,16 @@ class TaskStore:
             conn.execute(
                 "INSERT INTO tasks (id, owner_id, title, text, status, profile, version, created_at, updated_at, "
                 "rejection_reason, spec, branch, base_sha, pr_url, changed_files, fix_cycles, model_calls, "
-                "model_calls_limit, input_tokens, output_tokens, event_seq, change_class) VALUES (:id, :owner, :title, "
-                ":text, :status, :profile, :version, :now, :now, :reason, NULL, NULL, NULL, NULL, :files, 0, :calls, "
-                ":limit, :input_tokens, :output_tokens, 0, :change_class)",
+                "model_calls_limit, input_tokens, output_tokens, cost_usd, event_seq, change_class) VALUES (:id, "
+                ":owner, :title, :text, :status, :profile, :version, :now, :now, :reason, NULL, NULL, NULL, NULL, "
+                ":files, 0, :calls, :limit, :input_tokens, :output_tokens, :cost_usd, 0, :change_class)",
                 {
                     "id": task_id,
                     "owner": owner_id,
                     "title": title,
                     "text": text,
                     "status": status.value,
-                    "profile": profile.value,
+                    "profile": LEGACY_PROFILE,
                     "version": 1 if outcome.accepted else 2,
                     "now": now,
                     "reason": None if outcome.accepted else outcome.reason,
@@ -820,12 +822,11 @@ class TaskStore:
                     "limit": MODEL_CALLS_LIMITS[outcome.change_class if outcome.accepted else ChangeClass.frontend_ui],
                     "input_tokens": outcome.input_tokens,
                     "output_tokens": outcome.output_tokens,
+                    "cost_usd": max(0.0, outcome.cost_usd),
                     "change_class": outcome.change_class.value,
                 },
             )
-            created: dict[str, Any] = {
-                "title": title, "profile": profile.value, "change_class": outcome.change_class.value
-            }
+            created: dict[str, Any] = {"title": title, "change_class": outcome.change_class.value}
             if outcome.model is not None:
                 created |= {"provider": outcome.provider, "model": outcome.model, "effort": outcome.effort}
             self.record_event(conn, task_id, TaskEventType.task_created, created)

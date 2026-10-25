@@ -49,7 +49,7 @@ describe('клиент API', () => {
     api.on('POST /api/tasks', () =>
       apiError(429, 'rate_limited', 'Можно поставить не больше пяти задач за час.', { 'Retry-After': '42' }),
     )
-    const error = await failure(createTask({ text: 'x'.repeat(30), profile: 'hybrid' }))
+    const error = await failure(createTask({ text: 'x'.repeat(30) }))
     expect(error).toMatchObject({
       status: 429,
       code: 'rate_limited',

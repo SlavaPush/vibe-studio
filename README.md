@@ -25,7 +25,6 @@
 - Python 3.12 и [uv](https://docs.astral.sh/uv/), Node 24, Docker;
 - ключи Anthropic и OpenAI;
 - для чата — проект Supabase с приватным bucket Storage для изображений;
-- для офиса — [Ollama](https://ollama.com) с моделью `qwen3:8b`, если задачи ставятся в профиле `local` или `hybrid`;
 - для выпуска из офиса — GitHub App офиса и ключ Render API. Без них офис принимает и выполняет задачи, но не открывает PR и не деплоит.
 
 Клон:
@@ -92,27 +91,21 @@ cd vibe-studio
    docker build -t back-office-sandbox:p4 apps/office/docker/sandbox
    ```
 
-4. Для профилей `local` и `hybrid` загрузить локальную модель:
-
-   ```bash
-   ollama pull qwen3:8b
-   ```
-
-5. Запустить API офиса на `127.0.0.1:8001`. Состояние офиса хранится в SQLite (`OFFICE_DATABASE_URL`, по умолчанию `apps/office/api/office.sqlite`).
+4. Запустить API офиса на `127.0.0.1:8001`. Состояние офиса хранится в SQLite (`OFFICE_DATABASE_URL`, по умолчанию `apps/office/api/office.sqlite`).
 
    ```bash
    uv --directory apps/office/api sync
    uv --directory apps/office/api run --env-file ../.env uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8001
    ```
 
-6. В другом терминале запустить панель:
+5. В другом терминале запустить панель:
 
    ```bash
    npm --prefix apps/office/web ci --noproxy registry.npmjs.org
    npm --prefix apps/office/web run dev
    ```
 
-7. Открыть `http://localhost:5173`, а не `http://127.0.0.1:5173`: cookie сеанса имеет атрибут `Secure`, Chrome принимает такую cookie по HTTP только для `localhost`.
+6. Открыть `http://localhost:5173`, а не `http://127.0.0.1:5173`: cookie сеанса имеет атрибут `Secure`, Chrome принимает такую cookie по HTTP только для `localhost`.
 
 Настройки GitHub App и Render для выпуска — раздел «PR офиса» и «Очередь выпуска» в `apps/office/README.md`.
 

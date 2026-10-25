@@ -8,7 +8,7 @@ from app import release as release_module
 from app.models_gateway import ProviderError, ProviderReply
 from app.operations import OperationLog
 from app.roles import CHECKLIST, PR_REVIEWER, PrReview
-from app.schemas import AgentRole, FailureKind, ModelProfile, TaskEventType, TaskStatus
+from app.schemas import AgentRole, FailureKind, TaskEventType, TaskStatus
 from conftest import pr_review_answer
 from test_release_worker import SPEC, Crash, decide, drive, opened, setup  # noqa: F401
 
@@ -27,11 +27,9 @@ def reviews(setup):
 
 def test_pr_reviewer_routes(setup):
     gateway = setup.gateway
-    assert [target.name for target in gateway.targets(ModelProfile.local, AgentRole.pr_reviewer)] == ["ollama/qwen3:8b"]
-    for profile in (ModelProfile.cloud, ModelProfile.hybrid):
-        targets = gateway.targets(profile, AgentRole.pr_reviewer)
-        assert [target.name for target in targets] == ["anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol"]
-        assert (targets[0].effort, targets[0].max_output_tokens) == ("high", 16000)
+    targets = gateway.targets(AgentRole.pr_reviewer)
+    assert [target.name for target in targets] == ["anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol"]
+    assert (targets[0].effort, targets[0].max_output_tokens) == ("high", 16000)
 
 
 def test_review_reply_is_checked_by_code():

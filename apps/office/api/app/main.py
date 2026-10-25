@@ -213,14 +213,18 @@ def create_app(
         reservation = store.reserve_intake(participant.id, settings.tasks_per_hour)
         try:
             try:
-                outcome = intake.run(body.text, body.profile)
+                outcome = intake.run(body.text)
             except Exception:
                 logger.exception("intake filter crashed")
                 outcome = IntakeOutcome(accepted=False, reason=UNAVAILABLE)
-            task = store.create_task(participant.id, body.text, body.profile, outcome, reservation)
+            task = store.create_task(participant.id, body.text, outcome, reservation)
         except Exception:
             store.drop_reservation(reservation)
             raise
+        try:
+            intake.attach(outcome, store, task.id)
+        except Exception:
+            logger.exception("intake usage is not recorded")
         if outcome.accepted:
             background.add_task(store.promote_queue)
         return task

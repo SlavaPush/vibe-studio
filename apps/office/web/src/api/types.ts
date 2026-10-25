@@ -37,9 +37,6 @@ export type Contour = (typeof CONTOURS)[number]
 
 export const SLOTS_TOTAL = 3
 
-export const MODEL_PROFILES = ['local', 'cloud', 'hybrid'] as const
-export type ModelProfile = (typeof MODEL_PROFILES)[number]
-
 export const AGENT_ROLES = ['supervisor', 'researcher', 'developer', 'qa', 'critic', 'pr_reviewer'] as const
 export type AgentRole = (typeof AGENT_ROLES)[number]
 
@@ -120,6 +117,7 @@ export interface Spec {
   summary: string
   acceptance_criteria: string[]
   sources: SpecSource[]
+  plan: string[]
 }
 
 export interface Usage {
@@ -127,11 +125,11 @@ export interface Usage {
   model_calls_limit: number
   input_tokens: number
   output_tokens: number
+  cost_usd: number
 }
 
 export interface TaskCreate {
   text: string
-  profile: ModelProfile
 }
 
 export interface PullRequestCheck {
@@ -175,7 +173,6 @@ export interface Task {
   title: string
   text: string
   status: TaskStatus
-  profile: ModelProfile
   owner_id: string
   owner_name: string
   version: number

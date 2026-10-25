@@ -3,7 +3,7 @@ import pytest
 from conftest import UI_TASK, wait_for
 
 from app.research import MAX_BYTES, FetchError, fetch_public
-from app.schemas import ModelProfile, TaskStatus
+from app.schemas import TaskStatus
 from app.tasks import IntakeOutcome
 
 PUBLIC = "93.184.216.34"
@@ -146,6 +146,7 @@ def test_research_sources_reach_spec(office, origin, tmp_path):
     gateway.handlers["supervisor"] = lambda call: {
         "summary": "Кнопка копирования.",
         "acceptance_criteria": ["Кнопка видна."],
+        "plan": ["apps/chat/web/src/App.tsx: добавить кнопку."],
         "needs_research": True,
         "research_questions": ["Как работает Clipboard API?"],
     }
@@ -161,7 +162,7 @@ def test_research_sources_reach_spec(office, origin, tmp_path):
         "resolver": Resolver({"docs.example": [PUBLIC], "internal.example": ["10.0.0.7"]}),
         "connector": Connector({PUBLIC: http()}),
     }
-    task_id = app.state.store.create_task(me["id"], UI_TASK, ModelProfile.hybrid, IntakeOutcome(True, None)).id
+    task_id = app.state.store.create_task(me["id"], UI_TASK, IntakeOutcome(True, None)).id
     app.state.store.promote_queue()
     wait_for(lambda: app.state.store.get_task(task_id).spec, 30, "spec")
     spec = app.state.store.get_task(task_id).spec

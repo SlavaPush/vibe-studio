@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
   AGENT_ROLES,
-  MODEL_PROFILES,
   RELEASE_KINDS,
   RELEASE_STATUSES,
   TASK_EVENT_TYPES,
@@ -22,7 +21,9 @@ describe('типы панели и contracts/api.md', () => {
   it('тестовые данные используют значения перечислений', () => {
     for (const task of tasks) {
       expect(TASK_STATUSES).toContain(task.status)
-      expect(MODEL_PROFILES).toContain(task.profile)
+      expect(task).not.toHaveProperty('profile')
+      expect(task.usage.cost_usd).toBeGreaterThanOrEqual(0)
+      if (task.spec) expect(Array.isArray(task.spec.plan)).toBe(true)
     }
     for (const event of events) {
       expect(TASK_EVENT_TYPES).toContain(event.type)

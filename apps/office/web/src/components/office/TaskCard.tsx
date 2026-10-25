@@ -33,7 +33,6 @@ import {
   CHECK_STATUS_LABELS,
   CONTOUR_LABELS,
   DECISION_LABELS,
-  PROFILE_LABELS,
   REVIEW_VERDICT_LABELS,
   STATUS_LABELS,
   failureLabel,
@@ -177,7 +176,6 @@ export function TaskCard({
           </Badge>
           {task.contour && <Badge variant="outline">Контур: {CONTOUR_LABELS[task.contour]}</Badge>}
           <span>Владелец: {task.owner_name}</span>
-          <span>Профиль: {PROFILE_LABELS[task.profile]}</span>
           <span>Версия: {task.version}</span>
         </CardDescription>
       </CardHeader>
@@ -300,6 +298,8 @@ export function TaskCard({
               <dd>
                 {task.usage.model_calls} из {task.usage.model_calls_limit}
               </dd>
+              <dt className="text-muted-foreground">Оценка стоимости</dt>
+              <dd>${task.usage.cost_usd.toFixed(4)}</dd>
               <dt className="text-muted-foreground">Входные токены</dt>
               <dd>{task.usage.input_tokens.toLocaleString('ru-RU')}</dd>
               <dt className="text-muted-foreground">Выходные токены</dt>
@@ -617,6 +617,16 @@ function SpecPanel({ task }: { task: Task }) {
           ))}
         </ul>
       </div>
+      {task.spec.plan.length > 0 && (
+        <div className="grid gap-1">
+          <h3 className="font-medium">План реализации</h3>
+          <ol className="list-decimal pl-5">
+            {task.spec.plan.map((step, index) => (
+              <li key={index}>{step}</li>
+            ))}
+          </ol>
+        </div>
+      )}
       {task.spec.sources.length > 0 && (
         <div className="grid gap-1">
           <h3 className="font-medium">Источники</h3>

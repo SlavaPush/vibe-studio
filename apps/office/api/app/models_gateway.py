@@ -1,26 +1,31 @@
 import json
+import logging
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 import anthropic
-import httpx
 import openai
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.config import Settings
 from app.roles import input_budget, provider_schema
-from app.schemas import AgentRole, ModelProfile
+from app.schemas import AgentRole
 
 if TYPE_CHECKING:
     from app.tasks import TaskStore
 
+logger = logging.getLogger("office.models")
+
 MODERATION_MODEL = "omni-moderation-latest"
 CLASSIFIER_MAX_TOKENS = 1024
 CLOUD_TIMEOUT = 300.0
-OLLAMA_TIMEOUT = 600.0
-OLLAMA_ERROR_CHARS = 300
+INTAKE_ROLE = "intake_filter"
+ROUTED_ROLES = (*(role.value for role in AgentRole), INTAKE_ROLE)
+
+UsageSink = Callable[[int, int, float], None]
 
 ReplyT = TypeVar("ReplyT", bound=BaseModel)
 
@@ -106,25 +111,51 @@ class ProviderReply:
     output_tokens: int
     complete: bool
     truncated: bool = False
-    done_reason: str | None = None
-    eval_duration_ns: int | None = None
-    prompt_eval_duration_ns: int | None = None
-    load_duration_ns: int | None = None
 
 
-def _nanoseconds(value: Any) -> int | None:
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
+class UsageMeter:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._sink: UsageSink | None = None
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.cost_usd = 0.0
+
+    def add(self, input_tokens: int, output_tokens: int, cost_usd: float) -> None:
+        with self._lock:
+            if self._sink is not None:
+                self._sink(input_tokens, output_tokens, cost_usd)
+                return
+            self.input_tokens += input_tokens
+            self.output_tokens += output_tokens
+            self.cost_usd += cost_usd
+
+    def snapshot(self) -> tuple[int, int, float]:
+        with self._lock:
+            return self.input_tokens, self.output_tokens, self.cost_usd
+
+    def attach(self, sink: UsageSink, recorded: tuple[int, int, float]) -> None:
+        with self._lock:
+            self._sink = sink
+            rest = (
+                self.input_tokens - recorded[0],
+                self.output_tokens - recorded[1],
+                self.cost_usd - recorded[2],
+            )
+            if rest[0] or rest[1]:
+                sink(*rest)
 
 
-def _ollama_error(response: httpx.Response) -> str:
-    try:
-        data = response.json()
-    except ValueError:
-        return ""
-    error = data.get("error") if isinstance(data, dict) else None
-    if not isinstance(error, str) or not error.strip():
-        return ""
-    return ": " + " ".join(error.split())[:OLLAMA_ERROR_CHARS]
+def check_policy(models: dict[str, Any]) -> None:
+    capabilities = models.get("capabilities") or {}
+    roles = models.get("roles") or {}
+    for role in ROUTED_ROLES:
+        route = roles.get(role)
+        if route is None:
+            raise ValueError(f"models.yaml: no route for role {role}")
+        for name in (f"{route['provider']}/{route['model']}", route.get("fallback")):
+            if name and name not in capabilities:
+                raise ValueError(f"models.yaml: {name} of role {role} has no capabilities")
 
 
 class ModelsGateway:
@@ -134,24 +165,24 @@ class ModelsGateway:
         *,
         anthropic_client: Any | None = None,
         openai_client: Any | None = None,
-        http_client: httpx.Client | None = None,
     ) -> None:
         self.settings = settings
         self._anthropic = anthropic_client
         self._openai = openai_client
-        self._http = http_client
         self.models = yaml.safe_load(settings.models_policy.read_text(encoding="utf-8"))
-        self.ollama_lock = threading.BoundedSemaphore(1)
+        check_policy(self.models)
 
-    def http_client(self) -> httpx.Client:
-        if self._http is None:
-            self._http = httpx.Client(trust_env=False)
-        return self._http
+    def cost(self, name: str, input_tokens: int, output_tokens: int) -> float:
+        price = self.models["capabilities"].get(name, {}).get("price_usd_per_mtok")
+        if not price:
+            logger.warning("model %s has no price, cost is not counted", name)
+            return 0.0
+        return (max(0, input_tokens) * price["input"] + max(0, output_tokens) * price["output"]) / 1_000_000
 
     def _target(self, name: str, effort: Any, wanted_tokens: int) -> Target:
         capability = self.models["capabilities"][name]
         provider, model = name.split("/", 1)
-        if provider != "ollama" and effort not in capability["reasoning_values"]:
+        if effort not in capability["reasoning_values"]:
             effort = capability["reasoning_default"]
         return Target(
             provider=provider,
@@ -162,30 +193,29 @@ class ModelsGateway:
             max_input_tokens=capability.get("max_input_tokens"),
         )
 
-    def targets(self, profile: ModelProfile, role: AgentRole) -> list[Target]:
-        route = self.models["profiles"][profile.value][role.value]
+    def targets(self, role: AgentRole) -> list[Target]:
+        route = self.models["roles"][role.value]
         wanted = route["max_output_tokens"]
         found = [self._target(f"{route['provider']}/{route['model']}", route["effort"], wanted)]
-        if route.get("fallback") and route["provider"] != "ollama":
+        if route.get("fallback"):
             found.append(self._target(route["fallback"], route["effort"], wanted))
         return found
 
-    def input_budget(self, profile: ModelProfile, role: AgentRole) -> int:
+    def input_budget(self, role: AgentRole) -> int:
         return min(
             input_budget(target.context_tokens, target.max_output_tokens, target.max_input_tokens)
-            for target in self.targets(profile, role)
+            for target in self.targets(role)
         )
 
     def timeout(self, provider: str) -> float:
         if self.settings.model_timeout_seconds is not None:
             return self.settings.model_timeout_seconds
-        return OLLAMA_TIMEOUT if provider == "ollama" else CLOUD_TIMEOUT
+        return CLOUD_TIMEOUT
 
     def structured(
         self,
         store: "TaskStore",
         task_id: str,
-        profile: ModelProfile,
         role: AgentRole,
         step: str,
         system: str,
@@ -193,7 +223,7 @@ class ModelsGateway:
         reply_type: type[ReplyT],
     ) -> ReplyT:
         schema = provider_schema(reply_type)
-        targets = self.targets(profile, role)
+        targets = self.targets(role)
         for index, target in enumerate(targets):
             store.reserve_model_call(task_id, role, step, target)
             call = ModelCall(task_id, role, step, target, system, user, schema, self.timeout(target.provider))
@@ -203,7 +233,12 @@ class ModelsGateway:
                 if index == len(targets) - 1:
                     raise
                 continue
-            store.record_usage(task_id, reply.input_tokens, reply.output_tokens)
+            store.record_usage(
+                task_id,
+                reply.input_tokens,
+                reply.output_tokens,
+                self.cost(target.name, reply.input_tokens, reply.output_tokens),
+            )
             if reply.truncated:
                 raise TruncatedModelResponse(
                     f"{target.name}: answer cut at {target.max_output_tokens} output tokens"
@@ -220,7 +255,6 @@ class ModelsGateway:
         handler = {
             "anthropic": self.call_anthropic,
             "openai": self.call_openai,
-            "ollama": self.call_ollama,
         }.get(call.target.provider)
         if handler is None:
             raise ProviderError(f"unknown provider {call.target.provider}")
@@ -281,43 +315,6 @@ class ModelsGateway:
             truncated=getattr(response.incomplete_details, "reason", None) == "max_output_tokens",
         )
 
-    def call_ollama(self, call: ModelCall) -> ProviderReply:
-        body = {
-            "model": call.target.model,
-            "messages": [
-                {"role": "system", "content": call.system},
-                {"role": "user", "content": call.user},
-            ],
-            "format": call.schema,
-            "think": bool(call.target.effort),
-            "stream": False,
-            "options": {"num_predict": call.target.max_output_tokens, "num_ctx": call.target.context_tokens},
-        }
-        with self.ollama_lock:
-            try:
-                response = self.http_client().post(
-                    f"{self.settings.ollama_url.rstrip('/')}/api/chat", json=body, timeout=call.timeout
-                )
-            except httpx.HTTPError as error:
-                raise ProviderError(f"ollama failed: {type(error).__name__}") from error
-        if response.status_code != 200:
-            raise ProviderError(f"ollama status {response.status_code}{_ollama_error(response)}")
-        try:
-            data = response.json()
-        except ValueError as error:
-            raise ProviderError("ollama answer is not JSON") from error
-        return ProviderReply(
-            text=(data.get("message") or {}).get("content") or "",
-            input_tokens=int(data.get("prompt_eval_count") or 0),
-            output_tokens=int(data.get("eval_count") or 0),
-            complete=data.get("done") is True and data.get("done_reason") == "stop",
-            truncated=data.get("done_reason") == "length",
-            done_reason=data["done_reason"] if isinstance(data.get("done_reason"), str) else None,
-            eval_duration_ns=_nanoseconds(data.get("eval_duration")),
-            prompt_eval_duration_ns=_nanoseconds(data.get("prompt_eval_duration")),
-            load_duration_ns=_nanoseconds(data.get("load_duration")),
-        )
-
     def anthropic_client(self) -> Any:
         if self._anthropic is None:
             if not self.settings.anthropic_api_key:
@@ -349,8 +346,12 @@ class ModelsGateway:
             raise ProviderError(f"moderation failed: {type(error).__name__}") from error
         return bool(response.results[0].flagged)
 
+    def _meter(self, meter: UsageMeter | None, name: str, input_tokens: int, output_tokens: int) -> None:
+        if meter is not None:
+            meter.add(input_tokens, output_tokens, self.cost(name, input_tokens, output_tokens))
+
     def classify_anthropic(
-        self, model: str, effort: str, system: str, user: str, timeout: float
+        self, model: str, effort: str, system: str, user: str, timeout: float, meter: UsageMeter | None = None
     ) -> ClassifierReply:
         client = self.anthropic_client()
         try:
@@ -367,6 +368,7 @@ class ModelsGateway:
             )
         except anthropic.APIError as error:
             raise ProviderError(f"anthropic failed: {type(error).__name__}") from error
+        self._meter(meter, f"anthropic/{model}", response.usage.input_tokens, response.usage.output_tokens)
         if response.stop_reason != "end_turn":
             raise InvalidModelResponse(f"anthropic stop_reason {response.stop_reason}")
         text = "".join(block.text for block in response.content if block.type == "text")
@@ -377,7 +379,7 @@ class ModelsGateway:
         )
 
     def classify_openai(
-        self, model: str, effort: str, system: str, user: str, timeout: float
+        self, model: str, effort: str, system: str, user: str, timeout: float, meter: UsageMeter | None = None
     ) -> ClassifierReply:
         client = self.openai_client()
         try:
@@ -399,9 +401,10 @@ class ModelsGateway:
             )
         except openai.APIError as error:
             raise ProviderError(f"openai failed: {type(error).__name__}") from error
+        usage = response.usage
+        self._meter(meter, f"openai/{model}", usage.input_tokens if usage else 0, usage.output_tokens if usage else 0)
         if response.status != "completed":
             raise InvalidModelResponse(f"openai status {response.status}")
-        usage = response.usage
         return ClassifierReply(
             classification=parse_classification(response.output_text),
             input_tokens=usage.input_tokens if usage else 0,

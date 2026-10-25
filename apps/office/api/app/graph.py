@@ -210,11 +210,9 @@ class TaskGraph:
         reply_type: type,
         status: TaskStatus,
     ) -> Any:
-        task = self.guard(status)
-        user = assemble(system, fixed, turns, self.gateway.input_budget(task.profile, role))
-        reply = self.gateway.structured(
-            self.store, self.task_id, task.profile, role, step, system, user, reply_type
-        )
+        self.guard(status)
+        user = assemble(system, fixed, turns, self.gateway.input_budget(role))
+        reply = self.gateway.structured(self.store, self.task_id, role, step, system, user, reply_type)
         self.guard(status)
         return reply
 
@@ -255,6 +253,13 @@ class TaskGraph:
             Entry("Текст задачи участника", task.text, required=True),
             Entry("Требования", f"{task.spec.summary}\n\nКритерии приёмки:\n{criteria}", required=True),
         ]
+
+    def plan_entries(self, task: Task) -> list[Entry]:
+        assert task.spec is not None
+        if not task.spec.plan:
+            return []
+        plan = "\n".join(f"{index}. {item}" for index, item in enumerate(task.spec.plan, 1))
+        return [Entry("План реализации", plan, required=True)]
 
     def rework_materials(self, task: Task, collect: bool) -> list[dict[str, str]]:
         if not task.rework_count:
@@ -452,6 +457,8 @@ class TaskGraph:
                 "acceptance_criteria": draft["acceptance_criteria"],
                 "sources": research.get("sources", []),
             }
+            if draft.get("plan"):
+                body["plan"] = draft["plan"]
             spec = {"version": 1, "spec_hash": spec_hash(body)} | body
             name = "spec-1.json"
             data = json.dumps(spec | {"research_notes": research.get("notes", "")}, ensure_ascii=False, indent=2)
@@ -530,7 +537,7 @@ class TaskGraph:
         ):
             return self.lock_files(task, marker)
         self.started(AgentRole.developer, "implement")
-        fixed = self.spec_entries(task) + self.rework_entries(task)
+        fixed = self.spec_entries(task) + self.plan_entries(task) + self.rework_entries(task)
         findings = state.get("findings") or []
         if findings:
             fixed.append(Entry("Замечания QA и критика", json.dumps(findings, ensure_ascii=False, indent=1), required=True))

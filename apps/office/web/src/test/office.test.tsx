@@ -361,6 +361,27 @@ describe('TaskCard: действия', () => {
 })
 
 describe('TaskCard: вкладки', () => {
+  it('требования показывают план реализации, а карточка — оценку стоимости без профиля', () => {
+    fakeApi()
+    renderCard(maria)
+    expect(screen.queryByText(/Профиль/)).not.toBeInTheDocument()
+    openTab('Требования')
+    const heading = screen.getByRole('heading', { name: 'План реализации', level: 3 })
+    const steps = within(heading.parentElement as HTMLElement).getAllByRole('listitem')
+    expect(steps.map((step) => step.textContent)).toEqual(developing.spec?.plan)
+    openTab('Расход')
+    expect(screen.getByText('Оценка стоимости')).toBeInTheDocument()
+    expect(screen.getByText('$0.1876')).toBeInTheDocument()
+  })
+
+  it('требования без плана не показывают блок плана', () => {
+    fakeApi()
+    renderCard(maria, tasks.find((task) => task.id === 'tsk_102') as Task)
+    openTab('Требования')
+    expect(screen.getByRole('heading', { name: 'Критерии приёмки', level: 3 })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'План реализации' })).not.toBeInTheDocument()
+  })
+
   it('показывает diff', async () => {
     const api = fakeApi()
     api.on('GET /api/tasks/tsk_101/diff', () => new Response('diff --git a/x b/x\n+new\n'))

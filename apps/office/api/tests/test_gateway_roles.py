@@ -1,7 +1,7 @@
+import copy
 import json
+import logging
 import random
-import threading
-import time
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -9,9 +9,16 @@ import anthropic
 import httpx
 import openai
 import pytest
+import yaml
 from conftest import FakeAnthropic, FakeOpenAI
 
-from app.models_gateway import InvalidModelResponse, ModelCall, ModelsGateway, ProviderError, TruncatedModelResponse
+from app.models_gateway import (
+    InvalidModelResponse,
+    ModelsGateway,
+    ProviderError,
+    TruncatedModelResponse,
+    check_policy,
+)
 from app.roles import (
     CLIPPED,
     ContextTooLarge,
@@ -29,7 +36,7 @@ from app.roles import (
 )
 from app.config import Settings
 from app.sandbox import CommandsPolicy
-from app.schemas import AgentRole, ModelProfile
+from app.schemas import AgentRole
 from app.tasks import BudgetExceeded
 
 TURN = {
@@ -37,41 +44,19 @@ TURN = {
     "done": False,
     "summary": "Читаю файл",
 }
-SPEC = {"summary": "s", "acceptance_criteria": ["c"], "needs_research": False, "research_questions": []}
-
-
-class Ollama:
-    def __init__(self, answer=None, delay=0.0, error=None):
-        self.answer = answer or {
-            "message": {"role": "assistant", "content": json.dumps(SPEC)},
-            "done": True,
-            "done_reason": "stop",
-            "prompt_eval_count": 70,
-            "eval_count": 9,
-        }
-        self.delay = delay
-        self.error = error
-        self.response = None
-        self.requests = []
-        self.running = 0
-        self.max_running = 0
-        self.lock = threading.Lock()
-
-    def __call__(self, request):
-        with self.lock:
-            self.requests.append(request)
-            self.running += 1
-            self.max_running = max(self.max_running, self.running)
-        try:
-            time.sleep(self.delay)
-            if self.error is not None:
-                raise self.error
-            if self.response is not None:
-                return self.response
-            return httpx.Response(200, json=self.answer)
-        finally:
-            with self.lock:
-                self.running -= 1
+SPEC = {
+    "summary": "s", "acceptance_criteria": ["c"], "plan": ["p"], "needs_research": False, "research_questions": []
+}
+ROUTES = {
+    AgentRole.researcher: ("anthropic/claude-haiku-5-5", "openai/gpt-6-luna", "low", 8192),
+    AgentRole.supervisor: ("anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol", "medium", 8192),
+    AgentRole.developer: ("anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol", "high", 32000),
+    AgentRole.qa: ("anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol", "medium", 16000),
+    AgentRole.critic: ("anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol", "medium", 16000),
+    AgentRole.pr_reviewer: ("anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol", "high", 16000),
+}
+SONNET_COST = (120 * 2.00 + 30 * 10.00) / 1_000_000
+SOL_COST = (200 * 2.00 + 40 * 10.00) / 1_000_000
 
 
 @pytest.fixture
@@ -80,14 +65,21 @@ def setup(office):
     task_id = office.queued_task(me["id"])
     claude = FakeAnthropic()
     gpt = FakeOpenAI()
-    ollama = Ollama()
 
     def make(**overrides):
         settings = replace(office.settings, **overrides)
-        client = httpx.Client(transport=httpx.MockTransport(ollama))
-        return ModelsGateway(settings, anthropic_client=claude, openai_client=gpt, http_client=client)
+        return ModelsGateway(settings, anthropic_client=claude, openai_client=gpt)
 
-    return office.store, task_id, claude, gpt, ollama, make
+    return office.store, task_id, claude, gpt, make
+
+
+def raw_cost(store, task_id):
+    with store.db.connection() as conn:
+        return conn.fetchone("SELECT cost_usd FROM tasks WHERE id = :id", {"id": task_id})["cost_usd"]
+
+
+def broken_claude(claude):
+    claude.error = anthropic.APIConnectionError(request=httpx.Request("POST", "https://api.anthropic.com"))
 
 
 def model_events(store, task_id):
@@ -99,11 +91,9 @@ def model_events(store, task_id):
 
 
 def test_anthropic_call_uses_effort_schema_and_accounting(setup):
-    store, task_id, claude, _, _, make = setup
+    store, task_id, claude, _, make = setup
     claude.answer = json.dumps(TURN)
-    reply = make().structured(
-        store, task_id, ModelProfile.cloud, AgentRole.developer, "implement", "SYSTEM", "USER", Turn
-    )
+    reply = make().structured(store, task_id, AgentRole.developer, "implement", "SYSTEM", "USER", Turn)
     assert reply.actions[0].path == "web/src/App.tsx"
     [call] = claude.calls
     assert call["model"] == "claude-sonnet-5-5"
@@ -113,6 +103,8 @@ def test_anthropic_call_uses_effort_schema_and_accounting(setup):
     assert call["timeout"] == 300
     task = store.get_task(task_id)
     assert (task.usage.model_calls, task.usage.input_tokens, task.usage.output_tokens) == (1, 120, 30)
+    assert raw_cost(store, task_id) == pytest.approx(SONNET_COST)
+    assert task.usage.cost_usd == round(SONNET_COST, 4)
     assert model_events(store, task_id) == ["developer/implement anthropic/claude-sonnet-5-5"]
     [event] = [item for item in store.events_after(task_id, 0, 1000) if item.tool == "model"]
     assert event.payload == {
@@ -125,36 +117,105 @@ def test_anthropic_call_uses_effort_schema_and_accounting(setup):
 
 
 def test_fallback_is_counted_as_separate_call(setup):
-    store, task_id, claude, gpt, _, make = setup
-    claude.error = anthropic.APIConnectionError(request=httpx.Request("POST", "https://api.anthropic.com"))
+    store, task_id, claude, gpt, make = setup
+    broken_claude(claude)
     gpt.answer = json.dumps(TURN)
-    make().structured(store, task_id, ModelProfile.hybrid, AgentRole.critic, "review", "S", "U", Turn)
+    make().structured(store, task_id, AgentRole.critic, "review", "S", "U", Turn)
     [call] = gpt.calls
     assert call["model"] == "gpt-6.1-sol"
-    assert call["reasoning"] == {"effort": "high"}
+    assert call["reasoning"] == {"effort": "medium"}
     assert call["max_output_tokens"] == 16000
     assert call["text"]["format"]["strict"] is True
     assert call["text"]["format"]["schema"] == provider_schema(Turn)
     assert store.get_task(task_id).usage.model_calls == 2
+    assert raw_cost(store, task_id) == pytest.approx(SOL_COST)
     assert model_events(store, task_id) == [
         "critic/review anthropic/claude-sonnet-5-5",
         "critic/review openai/gpt-6.1-sol",
     ]
     fallback = [item.payload for item in store.events_after(task_id, 0, 1000) if item.tool == "model"][-1]
-    assert (fallback["provider"], fallback["model"], fallback["effort"]) == ("openai", "gpt-6.1-sol", "high")
+    assert (fallback["provider"], fallback["model"], fallback["effort"]) == ("openai", "gpt-6.1-sol", "medium")
 
 
-def test_qa_routes(setup):
-    gateway = setup[-1]()
-    assert [target.name for target in gateway.targets(ModelProfile.local, AgentRole.qa)] == ["ollama/qwen3:8b"]
-    expected = {
-        ModelProfile.cloud: (["anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol"], "high"),
-        ModelProfile.hybrid: (["anthropic/claude-haiku-5-5", "openai/gpt-6-luna"], "low"),
+@pytest.mark.parametrize("role", list(ROUTES))
+def test_every_role_routes_to_table_and_fallback(setup, role):
+    store, task_id, claude, gpt, make = setup
+    primary, fallback, effort, tokens = ROUTES[role]
+    gateway = make()
+    targets = gateway.targets(role)
+    assert [target.name for target in targets] == [primary, fallback]
+    assert [(target.effort, target.max_output_tokens) for target in targets] == [(effort, tokens)] * 2
+    broken_claude(claude)
+    gpt.answer = json.dumps(TURN)
+    gateway.structured(store, task_id, role, "step", "S", "U", Turn)
+    [first] = claude.calls
+    [second] = gpt.calls
+    assert (first["model"], first["output_config"]["effort"], first["max_tokens"]) == (
+        primary.split("/")[1], effort, tokens
+    )
+    assert (second["model"], second["reasoning"], second["max_output_tokens"]) == (
+        fallback.split("/")[1], {"effort": effort}, tokens
+    )
+
+
+def test_policy_has_one_role_table_without_profiles_and_ollama():
+    models = yaml.safe_load(Settings().models_policy.read_text(encoding="utf-8"))
+    assert set(models) == {"status", "capabilities", "roles"}
+    assert set(models["roles"]) == {role.value for role in AgentRole} | {"intake_filter"}
+    assert models["roles"]["intake_filter"] == {
+        "provider": "anthropic", "model": "claude-haiku-5-5", "effort": "low", "fallback": "openai/gpt-6-luna"
     }
-    for profile, (names, effort) in expected.items():
-        targets = gateway.targets(profile, AgentRole.qa)
-        assert [target.name for target in targets] == names
-        assert [(target.effort, target.max_output_tokens) for target in targets] == [(effort, 16000)] * 2
+    assert "ollama" not in Settings().models_policy.read_text(encoding="utf-8")
+    prices = {name: capability["price_usd_per_mtok"] for name, capability in models["capabilities"].items()}
+    assert prices == {
+        "anthropic/claude-haiku-5-5": {"input": 0.10, "output": 0.50},
+        "anthropic/claude-sonnet-5-5": {"input": 2.00, "output": 10.00},
+        "openai/gpt-6-luna": {"input": 0.10, "output": 0.50},
+        "openai/gpt-6.1-sol": {"input": 2.00, "output": 10.00},
+    }
+    assert all(capability["price_source"] for capability in models["capabilities"].values())
+
+
+def test_policy_without_role_or_capability_fails_at_start(tmp_path, office):
+    models = yaml.safe_load(Settings().models_policy.read_text(encoding="utf-8"))
+    check_policy(models)
+    without_role = copy.deepcopy(models)
+    del without_role["roles"]["qa"]
+    with pytest.raises(ValueError, match="no route for role qa"):
+        check_policy(without_role)
+    unknown = copy.deepcopy(models)
+    unknown["roles"]["critic"]["fallback"] = "openai/gpt-unknown"
+    with pytest.raises(ValueError, match="openai/gpt-unknown of role critic"):
+        check_policy(unknown)
+    path = tmp_path / "models.yaml"
+    path.write_text(yaml.safe_dump(without_role), encoding="utf-8")
+    with pytest.raises(ValueError):
+        ModelsGateway(replace(office.settings, models_policy=path))
+
+
+def test_cost_counts_input_and_output_separately(setup, caplog):
+    gateway = setup[-1]()
+    assert gateway.cost("anthropic/claude-sonnet-5-5", 1_000_000, 0) == pytest.approx(2.00)
+    assert gateway.cost("anthropic/claude-sonnet-5-5", 0, 1_000_000) == pytest.approx(10.00)
+    assert gateway.cost("anthropic/claude-haiku-5-5", 1_000_000, 0) == pytest.approx(0.10)
+    assert gateway.cost("anthropic/claude-haiku-5-5", 0, 1_000_000) == pytest.approx(0.50)
+    assert gateway.cost("openai/gpt-6-luna", 500_000, 2_000_000) == pytest.approx(0.05 + 1.00)
+    assert gateway.cost("openai/gpt-6.1-sol", 250_000, 100_000) == pytest.approx(0.50 + 1.00)
+    with caplog.at_level(logging.WARNING, logger="office.models"):
+        assert gateway.cost("openai/gpt-free", 1000, 1000) == 0.0
+    assert "openai/gpt-free has no price" in caplog.text
+
+
+def test_model_without_price_adds_tokens_but_not_cost(setup, caplog):
+    store, task_id, claude, _, make = setup
+    gateway = make()
+    del gateway.models["capabilities"]["anthropic/claude-sonnet-5-5"]["price_usd_per_mtok"]
+    claude.answer = json.dumps(TURN)
+    with caplog.at_level(logging.WARNING, logger="office.models"):
+        gateway.structured(store, task_id, AgentRole.developer, "implement", "S", "U", Turn)
+    task = store.get_task(task_id)
+    assert (task.usage.input_tokens, task.usage.output_tokens, raw_cost(store, task_id)) == (120, 30, 0)
+    assert "anthropic/claude-sonnet-5-5 has no price" in caplog.text
 
 
 def test_qa_prompt_requires_mock_module_and_exact_locators():
@@ -175,128 +236,52 @@ def test_qa_prompt_requires_mock_module_and_exact_locators():
 
 
 def test_both_providers_failing_is_provider_error(setup):
-    store, task_id, claude, gpt, _, make = setup
-    claude.error = anthropic.APIConnectionError(request=httpx.Request("POST", "https://api.anthropic.com"))
+    store, task_id, claude, gpt, make = setup
+    broken_claude(claude)
     gpt.error = openai.APIConnectionError(request=httpx.Request("POST", "https://api.openai.com"))
     with pytest.raises(ProviderError):
-        make().structured(store, task_id, ModelProfile.cloud, AgentRole.qa, "qa", "S", "U", Turn)
+        make().structured(store, task_id, AgentRole.qa, "qa", "S", "U", Turn)
     assert store.get_task(task_id).usage.model_calls == 2
+    assert raw_cost(store, task_id) == 0
 
 
-def test_ollama_request_and_no_fallback(setup):
-    store, task_id, _, gpt, ollama, make = setup
-    gateway = make(ollama_url="http://127.0.0.1:11999/")
-    reply = gateway.structured(store, task_id, ModelProfile.hybrid, AgentRole.supervisor, "spec", "S", "U", SpecDraft)
-    assert reply.summary == "s"
-    [request] = ollama.requests
-    assert str(request.url) == "http://127.0.0.1:11999/api/chat"
-    body = json.loads(request.content)
-    assert body["model"] == "qwen3:8b"
-    assert body["format"] == provider_schema(SpecDraft)
-    assert body["think"] is False and body["stream"] is False
-    assert body["options"] == {"num_predict": 4096, "num_ctx": 32768}
-    assert body["messages"] == [{"role": "system", "content": "S"}, {"role": "user", "content": "U"}]
-    task = store.get_task(task_id)
-    assert (task.usage.input_tokens, task.usage.output_tokens) == (70, 9)
-
-    ollama.error = httpx.ConnectError("refused")
-    with pytest.raises(ProviderError):
-        gateway.structured(store, task_id, ModelProfile.local, AgentRole.developer, "implement", "S", "U", Turn)
-    assert json.loads(ollama.requests[-1].content)["think"] is True
-    assert gpt.calls == []
-    assert store.get_task(task_id).usage.model_calls == 2
-
-
-def test_ollama_error_status_carries_short_error_field(setup):
-    store, task_id, _, _, ollama, make = setup
-    gateway = make()
-    reason = "model requires more system memory\n(10.2 GiB) than is available " + "x" * 1000
-    ollama.response = httpx.Response(500, json={"error": reason, "detail": "SYSTEM PROMPT"})
-    with pytest.raises(ProviderError) as error:
-        gateway.structured(store, task_id, ModelProfile.local, AgentRole.qa, "qa", "SYSTEM PROMPT", "USER", QaTurn)
-    message = str(error.value)
-    assert message.startswith("ollama status 500: model requires more system memory (10.2 GiB) than is available xxx")
-    assert len(message) == len("ollama status 500: ") + 300
-    assert "SYSTEM PROMPT" not in message and "USER" not in message
-
-    for response in (httpx.Response(502, text="<html>bad gateway</html>"), httpx.Response(500, json={"error": " "})):
-        ollama.response = response
-        with pytest.raises(ProviderError) as error:
-            gateway.structured(store, task_id, ModelProfile.local, AgentRole.qa, "qa", "S", "U", QaTurn)
-        assert str(error.value) == f"ollama status {response.status_code}"
-
-
-def test_ollama_reply_carries_metrics_and_cloud_reply_does_not(setup):
-    _, _, claude, _, ollama, make = setup
-    gateway = make()
-
-    def call(profile):
-        target = gateway.targets(profile, AgentRole.supervisor)[0]
-        return gateway.call_provider(
-            ModelCall("t", AgentRole.supervisor, "spec", target, "S", "U", provider_schema(SpecDraft), 5.0)
-        )
-
-    ollama.answer |= {"eval_duration": 3_000_000_000, "prompt_eval_duration": 500_000_000, "load_duration": 70_000_000}
-    reply = call(ModelProfile.local)
-    assert (reply.done_reason, reply.eval_duration_ns, reply.prompt_eval_duration_ns, reply.load_duration_ns) == (
-        "stop", 3_000_000_000, 500_000_000, 70_000_000
-    )
-    assert reply.complete and (reply.input_tokens, reply.output_tokens) == (70, 9)
-
-    ollama.answer = {"message": {"content": "{}"}, "done": True, "done_reason": "stop", "eval_duration": "3"}
-    reply = call(ModelProfile.local)
-    assert (reply.done_reason, reply.eval_duration_ns, reply.prompt_eval_duration_ns, reply.load_duration_ns) == (
-        "stop", None, None, None
-    )
-
-    claude.answer = json.dumps(SPEC)
-    reply = call(ModelProfile.cloud)
-    assert (reply.done_reason, reply.eval_duration_ns, reply.load_duration_ns) == (None, None, None)
-
-
-def test_ollama_calls_are_serialized(setup):
-    store, task_id, _, _, ollama, make = setup
-    ollama.delay = 0.2
-    gateway = make()
-    threads = [
-        threading.Thread(
-            target=gateway.structured,
-            args=(store, task_id, ModelProfile.local, AgentRole.supervisor, "spec", "S", "U", SpecDraft),
-        )
-        for _ in range(3)
-    ]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-    assert len(ollama.requests) == 3
-    assert ollama.max_running == 1
+def test_supervisor_reply_requires_short_plan():
+    assert SpecDraft.model_validate(SPEC).plan == ["p"]
+    schema = provider_schema(SpecDraft)
+    assert "plan" in schema["required"] and schema["properties"]["plan"]["type"] == "array"
+    for broken in ({"plan": []}, {"plan": ["p"] * 9}, {"plan": [" "]}, {"plan": ["п" * 301]}):
+        with pytest.raises(ValueError):
+            SpecDraft.model_validate(SPEC | broken)
+    without = dict(SPEC)
+    del without["plan"]
+    with pytest.raises(ValueError):
+        SpecDraft.model_validate(without)
 
 
 def test_budget_is_checked_before_each_call(setup, office):
-    store, task_id, claude, gpt, _, make = setup
+    store, task_id, claude, gpt, make = setup
     office.set_task(task_id, model_calls=30)
     with pytest.raises(BudgetExceeded):
-        make().structured(store, task_id, ModelProfile.cloud, AgentRole.qa, "qa", "S", "U", Turn)
+        make().structured(store, task_id, AgentRole.qa, "qa", "S", "U", Turn)
     assert claude.calls == []
 
     office.set_task(task_id, model_calls=29)
-    claude.error = anthropic.APIConnectionError(request=httpx.Request("POST", "https://api.anthropic.com"))
+    broken_claude(claude)
     with pytest.raises(BudgetExceeded):
-        make().structured(store, task_id, ModelProfile.cloud, AgentRole.qa, "qa", "S", "U", Turn)
+        make().structured(store, task_id, AgentRole.qa, "qa", "S", "U", Turn)
     assert len(claude.calls) == 1 and gpt.calls == []
     assert store.get_task(task_id).usage.model_calls == 30
 
 
 def test_budget_uses_limit_of_the_task(setup, office):
-    store, task_id, claude, _, _, make = setup
+    store, task_id, claude, _, make = setup
     office.set_task(task_id, model_calls=30, model_calls_limit=60)
     claude.answer = json.dumps(TURN)
-    make().structured(store, task_id, ModelProfile.cloud, AgentRole.qa, "qa", "S", "U", Turn)
+    make().structured(store, task_id, AgentRole.qa, "qa", "S", "U", Turn)
     assert store.get_task(task_id).usage.model_calls == 31
     office.set_task(task_id, model_calls=60)
     with pytest.raises(BudgetExceeded):
-        make().structured(store, task_id, ModelProfile.cloud, AgentRole.qa, "qa", "S", "U", Turn)
+        make().structured(store, task_id, AgentRole.qa, "qa", "S", "U", Turn)
     assert len(claude.calls) == 1
 
 
@@ -310,59 +295,62 @@ def test_budget_uses_limit_of_the_task(setup, office):
     ],
 )
 def test_answer_outside_schema_is_rejected(setup, answer):
-    store, task_id, claude, _, _, make = setup
+    store, task_id, claude, _, make = setup
     claude.answer = answer
     with pytest.raises(InvalidModelResponse):
-        make().structured(store, task_id, ModelProfile.cloud, AgentRole.developer, "implement", "S", "U", Turn)
+        make().structured(store, task_id, AgentRole.developer, "implement", "S", "U", Turn)
     assert store.get_task(task_id).usage.output_tokens == 30
+    assert raw_cost(store, task_id) == pytest.approx(SONNET_COST)
+
+
+def test_openai_answer_outside_schema_is_counted(setup):
+    store, task_id, claude, gpt, make = setup
+    broken_claude(claude)
+    gpt.answer = "not json"
+    with pytest.raises(InvalidModelResponse):
+        make().structured(store, task_id, AgentRole.developer, "implement", "S", "U", Turn)
+    task = store.get_task(task_id)
+    assert (task.usage.input_tokens, task.usage.output_tokens) == (200, 40)
+    assert raw_cost(store, task_id) == pytest.approx(SOL_COST)
 
 
 def test_incomplete_anthropic_answer_is_rejected(setup):
-    store, task_id, claude, _, _, make = setup
+    store, task_id, claude, _, make = setup
     claude.answer = json.dumps(TURN)
     claude.stop_reason = "max_tokens"
     with pytest.raises(InvalidModelResponse):
-        make().structured(store, task_id, ModelProfile.cloud, AgentRole.developer, "implement", "S", "U", Turn)
+        make().structured(store, task_id, AgentRole.developer, "implement", "S", "U", Turn)
 
 
-@pytest.mark.parametrize("provider", ["anthropic", "openai", "ollama"])
+@pytest.mark.parametrize("provider", ["anthropic", "openai"])
 def test_answer_cut_by_output_limit_is_truncated_error(setup, provider):
-    store, task_id, claude, gpt, ollama, make = setup
-    profile = ModelProfile.local if provider == "ollama" else ModelProfile.cloud
+    store, task_id, claude, gpt, make = setup
     if provider == "anthropic":
         claude.answer = '{"actions": ['
         claude.stop_reason = "max_tokens"
-    elif provider == "openai":
-        claude.error = anthropic.APIConnectionError(request=httpx.Request("POST", "https://api.anthropic.com"))
+    else:
+        broken_claude(claude)
         gpt.answer = '{"actions": ['
         gpt.status = "incomplete"
         gpt.incomplete_details = SimpleNamespace(reason="max_output_tokens")
-    else:
-        ollama.answer = {
-            "message": {"role": "assistant", "content": '{"actions": ['},
-            "done": True,
-            "done_reason": "length",
-            "prompt_eval_count": 70,
-            "eval_count": 4096,
-        }
     with pytest.raises(TruncatedModelResponse, match="output tokens"):
-        make().structured(store, task_id, profile, AgentRole.qa, "qa", "S", "U", Turn)
+        make().structured(store, task_id, AgentRole.qa, "qa", "S", "U", Turn)
+    assert raw_cost(store, task_id) == pytest.approx(SONNET_COST if provider == "anthropic" else SOL_COST)
 
     if provider == "openai":
         gpt.incomplete_details = SimpleNamespace(reason="content_filter")
         with pytest.raises(InvalidModelResponse) as error:
-            make().structured(store, task_id, profile, AgentRole.qa, "qa", "S", "U", Turn)
+            make().structured(store, task_id, AgentRole.qa, "qa", "S", "U", Turn)
         assert not isinstance(error.value, TruncatedModelResponse)
 
 
 def test_input_budget_and_timeouts(setup):
-    _, _, _, _, _, make = setup
+    make = setup[-1]
     gateway = make()
-    assert gateway.input_budget(ModelProfile.local, AgentRole.developer) == int((32768 - 4096) * 0.9)
-    assert gateway.input_budget(ModelProfile.cloud, AgentRole.developer) == int(922000 * 0.9)
-    assert gateway.input_budget(ModelProfile.cloud, AgentRole.supervisor) == int(922000 * 0.9)
-    assert (gateway.timeout("anthropic"), gateway.timeout("ollama")) == (300, 600)
-    assert make(model_timeout_seconds=42.0).timeout("ollama") == 42.0
+    assert gateway.input_budget(AgentRole.developer) == int(922000 * 0.9)
+    assert gateway.input_budget(AgentRole.supervisor) == int(922000 * 0.9)
+    assert gateway.timeout("anthropic") == 300
+    assert make(model_timeout_seconds=42.0).timeout("openai") == 42.0
 
 
 def test_provider_schema_is_inline_and_keeps_title_property():
@@ -376,10 +364,10 @@ def test_provider_schema_is_inline_and_keeps_title_property():
 
 @pytest.mark.parametrize("line", [0, -3])
 def test_finding_line_below_one_means_unknown(setup, line):
-    store, task_id, claude, _, _, make = setup
+    store, task_id, claude, _, make = setup
     finding = {"blocking": True, "criterion": None, "file": "web/src/App.tsx", "line": line, "text": "Нет кнопки."}
     claude.answer = json.dumps({"verdict": "changes_requested", "findings": [finding]})
-    review = make().structured(store, task_id, ModelProfile.cloud, AgentRole.critic, "review", "S", "U", CriticReview)
+    review = make().structured(store, task_id, AgentRole.critic, "review", "S", "U", CriticReview)
     assert review.findings[0].line is None
     qa = QaTurn.model_validate(
         {"summary": "s", "criteria_covered": [1], "findings": [finding], "done": True, "actions": []}
@@ -403,12 +391,10 @@ def test_long_text_fields_come_last_in_turn_schema(reply_type):
 
 
 def test_long_descriptive_text_is_clipped_and_strict_fields_stay_strict(setup):
-    store, task_id, claude, _, _, make = setup
+    store, task_id, claude, _, make = setup
     long = "Заголовок вкладки " * 100
     claude.answer = json.dumps(TURN | {"summary": long})
-    reply = make().structured(
-        store, task_id, ModelProfile.cloud, AgentRole.developer, "implement", "S", "U", Turn
-    )
+    reply = make().structured(store, task_id, AgentRole.developer, "implement", "S", "U", Turn)
     assert len(reply.summary) == 500 and reply.summary == long[: 500 - len(CLIPPED)] + CLIPPED
     assert reply.actions[0].path == "web/src/App.tsx"
     assert Turn.model_validate(TURN | {"summary": "x" * 500}).summary == "x" * 500

@@ -30,7 +30,6 @@
 | --- | --- |
 | `Role` | `participant`, `admin` |
 | `TaskStatus` | `rejected`, `queued`, `awaiting_spec_approval`, `developing`, `reviewing`, `awaiting_integration`, `awaiting_release`, `deploying`, `released`, `failed`, `cancelled`, `needs_attention` |
-| `ModelProfile` | `local`, `cloud`, `hybrid` |
 | `AgentRole` | `supervisor`, `researcher`, `developer`, `qa`, `critic`, `pr_reviewer` |
 | `TaskEventType` | `task_created`, `task_rejected`, `status_changed`, `role_started`, `role_finished`, `tool_called`, `artifact_ready`, `decision_required`, `decision_recorded`, `check_result`, `release_candidate`, `deploy_status`, `pr_opened`, `checks_status`, `pr_closed`, `operation_unknown`, `pr_review`, `merge_started`, `pr_merged`, `rollback_status`, `release_blocked`, `release_unblocked`, `external_publish`, `rework_started`, `owner_review_requested`, `owner_review` |
 | `FailureKind` | `checks_failed`, `pr_rejected`, `deploy_failed`, `verify_failed`, `rolled_back`, `owner_rejected` |
@@ -210,7 +209,6 @@
 | `title` | string | Заголовок: первая строка текста, до 80 символов |
 | `text` | string | Текст задачи участника |
 | `status` | `TaskStatus` | Текущий статус |
-| `profile` | `ModelProfile` | Профиль моделей, выбранный при постановке |
 | `owner_id` | string | Идентификатор владельца |
 | `owner_name` | string | Отображаемое имя владельца |
 | `version` | integer | Версия объекта для `expected_version` |
@@ -240,9 +238,9 @@
 
 `OwnerReview`: `state` (`requested` — сводка записана в описание PR, офис ждёт отзыв владельца; `approved` — отзыв `APPROVED` владельца для `head_sha`; `changes_requested` — отзыв `CHANGES_REQUESTED`, PR закрыт), `head_sha` (string — head PR, к которому относится состояние), `login` (string или `null` — логин владельца `OFFICE_OWNER_LOGIN`), `comment` (string или `null` — текст отзыва владельца). Учитывается последний отзыв владельца с `commit_id = head_sha`; отзывы других пользователей, `COMMENTED`, `DISMISSED` и отзывы на другой head не учитываются.
 
-`Spec`: `version` (integer), `spec_hash` (string), `summary` (string), `acceptance_criteria` (string[]), `sources` (массив `{title, url}`).
+`Spec`: `version` (integer), `spec_hash` (string), `summary` (string), `acceptance_criteria` (string[]), `sources` (массив `{title, url}`), `plan` (string[] — короткий план реализации Supervisor: файлы и шаги в порядке выполнения, от 1 до 8 пунктов; передаётся разработчику; у требований, подготовленных до `P5.7`, — пустой список). Непустой `plan` входит в тело `spec_hash`; у требований без плана хеш считается как раньше.
 
-`Usage`: `model_calls` (integer), `model_calls_limit` (integer; при создании задачи 30 для `frontend_ui` и отклонённой задачи, 60 для `backend_api`), `input_tokens` (integer), `output_tokens` (integer).
+`Usage`: `model_calls` (integer), `model_calls_limit` (integer; при создании задачи 30 для `frontend_ui` и отклонённой задачи, 60 для `backend_api`), `input_tokens` (integer), `output_tokens` (integer), `cost_usd` (number ≥ 0, округление до 4 знаков — оценка стоимости задачи в долларах США). `cost_usd` — сумма по всем ответам моделей задачи, включая фильтр приёма, резервного провайдера и ответы вне схемы или обрезанные: входные и выходные токены умножаются на цены ответившей модели из `policies/models.yaml` (`price_usd_per_mtok`, за 1 млн токенов). Кэш промптов и пороги длинного контекста не учитываются. Для модели без цены стоимость не прибавляется, сервер пишет предупреждение в журнал. У задач до `P5.7` — стоимость только вызовов после обновления.
 
 `PullRequestReview`: `id` (string), `head_sha` (string — head PR, для которого принято решение), `verdict` (`approve` или `reject`), `reasons` (string — обоснование), `required_changes` (string[] — что изменить; при `reject` не пуст), `checklist` (массив `{item, ok, note}`: `item` — пункт чек-листа `paths`, `network`, `external_navigation`, `inputs`, `system_messages`, `sent_text`, `third_party_code`, `models`; `ok` — boolean; `note` — string), `created_at` (дата-время), `owner_summary` (string или `null` — сводка для владельца: зависимости, схема БД, промпты и проверки входа, маршрутизация и выбор моделей, квоты и авторизация, внешние API, рекомендация агента и факты офиса — изменённые манифесты и lock-файлы, изменение `schema.sql` с предупреждением об откате; для контура `ui` — `null`).
 
@@ -264,7 +262,7 @@
 
 | `type` | `payload` |
 | --- | --- |
-| `task_created` | `title`, `profile`, `change_class` (в событиях до появления поля отсутствует); если классификатор фильтра приёма ответил — также `provider`, `model`, `effort` модели, которая дала ответ (основная или резерв) |
+| `task_created` | `title`, `change_class` (в событиях до появления поля отсутствует); в событиях до `P5.7` также `profile`; если классификатор фильтра приёма ответил — также `provider`, `model`, `effort` модели, которая дала ответ (основная или резерв) |
 | `task_rejected` | `reason` |
 | `status_changed` | `from`, `to` — статусы задачи |
 | `role_started` | `step` — шаг роли |
@@ -496,7 +494,6 @@ Revert изменения со схемой БД: после `git revert` офи
     "title": "Перевести backend vibe-chat на другую базу данных",
     "text": "Перевести backend vibe-chat на другую базу данных и обновить миграции.",
     "status": "rejected",
-    "profile": "cloud",
     "owner_id": "prt_ivan",
     "owner_name": "Иван",
     "version": 2,
@@ -521,7 +518,8 @@ Revert изменения со схемой БД: после `git revert` офи
       "model_calls": 1,
       "model_calls_limit": 30,
       "input_tokens": 640,
-      "output_tokens": 85
+      "output_tokens": 85,
+      "cost_usd": 0.0001
     },
     "rework_count": 0,
     "rework_limit": 1,
@@ -535,7 +533,6 @@ Revert изменения со схемой БД: после `git revert` офи
     "title": "Кнопка копирования ответа ассистента",
     "text": "Добавить под каждым ответом ассистента кнопку копирования текста ответа в буфер обмена с подтверждением «Скопировано».",
     "status": "developing",
-    "profile": "hybrid",
     "owner_id": "prt_maria",
     "owner_name": "Мария",
     "version": 5,
@@ -556,6 +553,11 @@ Revert изменения со схемой БД: после `git revert` офи
           "title": "MDN: Clipboard.writeText()",
           "url": "https://developer.mozilla.org/en-US/docs/Web/API/Clipboard/writeText"
         }
+      ],
+      "plan": [
+        "apps/chat/web/src/components/chat/MessageActions.tsx: добавить кнопку «Копировать» с подписью для экранного диктора.",
+        "apps/chat/web/src/components/chat/AssistantMessage.tsx: показывать MessageActions только у завершённого ответа.",
+        "MessageActions.tsx: вызвать navigator.clipboard.writeText, на 2 секунды показать «Скопировано», при ошибке — «Не удалось скопировать»."
       ]
     },
     "branch": "office/tsk_101",
@@ -578,7 +580,8 @@ Revert изменения со схемой БД: после `git revert` офи
       "model_calls": 9,
       "model_calls_limit": 30,
       "input_tokens": 48210,
-      "output_tokens": 9120
+      "output_tokens": 9120,
+      "cost_usd": 0.1876
     },
     "rework_count": 0,
     "rework_limit": 1,
@@ -592,7 +595,6 @@ Revert изменения со схемой БД: после `git revert` офи
     "title": "Переключатель тёмной темы в настройках",
     "text": "Добавить в настройки чата переключатель светлой и тёмной темы с сохранением выбора в браузере.",
     "status": "awaiting_release",
-    "profile": "cloud",
     "owner_id": "prt_admin",
     "owner_name": "Вячеслав",
     "version": 14,
@@ -608,7 +610,8 @@ Revert изменения со схемой БД: после `git revert` офи
         "Выбранная тема сохраняется после перезагрузки страницы.",
         "Без сохранённого выбора используется системная тема."
       ],
-      "sources": []
+      "sources": [],
+      "plan": []
     },
     "branch": "office/tsk_102",
     "base_sha": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
@@ -658,7 +661,8 @@ Revert изменения со схемой БД: после `git revert` офи
       "model_calls": 21,
       "model_calls_limit": 30,
       "input_tokens": 132400,
-      "output_tokens": 24310
+      "output_tokens": 24310,
+      "cost_usd": 0.5079
     },
     "rework_count": 0,
     "rework_limit": 1,
@@ -685,14 +689,15 @@ Revert изменения со схемой БД: после `git revert` офи
 <!-- example: TaskCreate -->
 ```json
 {
-  "text": "Добавить под каждым ответом ассистента кнопку копирования текста ответа в буфер обмена с подтверждением «Скопировано».",
-  "profile": "hybrid"
+  "text": "Добавить под каждым ответом ассистента кнопку копирования текста ответа в буфер обмена с подтверждением «Скопировано»."
 }
 ```
 
+Модели выбираются по роли из одной таблицы `policies/models.yaml`. Поле `profile` удалено в `P5.7`: запрос с ним, как и с любым другим неизвестным полем, получает `422 validation_error`.
+
 Ответ `201`: модель `Task` в статусе `queued`, поля `spec`, `branch`, `base_sha`, `pr_url`, `pr_number`, `head_sha`, `failure_kind`, `checks`, `pr_review`, `merge_sha` равны `null`, `merge_pending` и `integration_started` равны `false`, `changed_files` пуст. Пример отклонённой задачи — первая задача в ответе `GET /api/tasks`.
 
-Ошибки: `401 unauthorized`; `422 validation_error`, если `text` короче 20 или длиннее 4000 символов; `429 rate_limited`, если у участника уже пять задач за последний час.
+Ошибки: `401 unauthorized`; `422 validation_error`, если `text` короче 20 или длиннее 4000 символов или тело содержит другие поля; `429 rate_limited`, если у участника уже пять задач за последний час.
 
 <!-- example: ApiError -->
 ```json
@@ -744,7 +749,7 @@ data: {"event_id":211,"task_id":"tsk_101","seq":11,"type":"check_result", ...}
     "role": null,
     "tool": null,
     "artifact": null,
-    "payload": {"title": "Кнопка копирования ответа ассистента", "profile": "hybrid"}
+    "payload": {"title": "Кнопка копирования ответа ассистента", "change_class": "frontend_ui", "provider": "anthropic", "model": "claude-haiku-5-5", "effort": "low"}
   },
   {
     "event_id": 202,
@@ -1069,7 +1074,7 @@ data: {"event_id":211,"task_id":"tsk_101","seq":11,"type":"check_result", ...}
     "role": null,
     "tool": null,
     "artifact": null,
-    "payload": {"title": "Перевести backend vibe-chat на другую базу данных", "profile": "cloud"}
+    "payload": {"title": "Перевести backend vibe-chat на другую базу данных", "change_class": "frontend_ui", "provider": "anthropic", "model": "claude-haiku-5-5", "effort": "low"}
   },
   {
     "event_id": 231,
@@ -1099,7 +1104,7 @@ data: {"event_id":211,"task_id":"tsk_101","seq":11,"type":"check_result", ...}
     "role": null,
     "tool": null,
     "artifact": null,
-    "payload": {"title": "Добавить в ответ списка диалогов число сообщений", "profile": "cloud", "change_class": "backend_api"}
+    "payload": {"title": "Добавить в ответ списка диалогов число сообщений", "change_class": "backend_api"}
   },
   {
     "event_id": 340,

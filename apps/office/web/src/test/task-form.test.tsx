@@ -41,15 +41,14 @@ describe('TaskForm', () => {
     api.on('POST /api/tasks', () => response.promise)
     const { textarea, submit, onCreated } = renderForm()
     fireEvent.change(textarea, { target: { value: TEXT } })
-    fireEvent.change(screen.getByRole('combobox', { name: 'Профиль моделей' }), {
-      target: { value: 'local' },
-    })
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Профиль/)).not.toBeInTheDocument()
     submit()
     const busy = await screen.findByRole('button', { name: 'Проверяем задачу…' })
     expect(busy).toBeDisabled()
     expect(busy.closest('form')).toHaveAttribute('aria-busy', 'true')
     expect(screen.getByRole('status')).toHaveTextContent('Фильтр приёма проверяет задачу')
-    expect(api.bodies('POST /api/tasks')).toEqual([{ text: TEXT, profile: 'local' }])
+    expect(api.bodies('POST /api/tasks')).toEqual([{ text: TEXT }])
     response.resolve(json(201, queuedTask))
     expect(await screen.findByText('Задача принята и ждёт свободного слота.')).toBeInTheDocument()
     expect(onCreated).toHaveBeenCalledWith(queuedTask)

@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from app.config import Settings
 from app.db import Database
 from app.runner import checkpoint_path
-from app.schemas import ModelProfile, TaskEventType, TaskStatus
+from app.schemas import TaskEventType, TaskStatus
 from app.tasks import IntakeOutcome, TaskStore
 
 pytestmark = pytest.mark.pg
@@ -96,13 +96,10 @@ def test_default_app_creates_runner_with_checkpoints(office, origin, tmp_path):
 
 
 def test_settings_read_graph_environment(monkeypatch):
-    monkeypatch.setenv("OLLAMA_URL", "http://127.0.0.1:11500")
     monkeypatch.setenv("OFFICE_MODEL_TIMEOUT_SECONDS", "45")
     monkeypatch.setenv("OFFICE_TASK_TIME_LIMIT_MINUTES", "15")
     settings = Settings.from_env()
-    assert (settings.ollama_url, settings.model_timeout_seconds, settings.task_time_limit_minutes) == (
-        "http://127.0.0.1:11500", 45.0, 15.0
-    )
+    assert (settings.model_timeout_seconds, settings.task_time_limit_minutes) == (45.0, 15.0)
     monkeypatch.delenv("OFFICE_MODEL_TIMEOUT_SECONDS")
     monkeypatch.delenv("OFFICE_TASK_TIME_LIMIT_MINUTES")
     assert (Settings.from_env().model_timeout_seconds, Settings.from_env().task_time_limit_minutes) == (None, 60.0)
@@ -113,7 +110,7 @@ def test_worktree_removal_waits_for_stopped_run(office, origin, tmp_path):
     client, me = office.login(app=app)
     store = app.state.store
     app.state.workspace.wait_stopped = lambda task_id: False
-    task_id = store.create_task(me["id"], UI_TASK, ModelProfile.hybrid, IntakeOutcome(True, None)).id
+    task_id = store.create_task(me["id"], UI_TASK, IntakeOutcome(True, None)).id
     store.promote_queue()
     wait_for(lambda: store.get_task(task_id).spec, 30, "spec")
     path = app.state.workspace.worktree_path(task_id)

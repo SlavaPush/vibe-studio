@@ -8,7 +8,7 @@ from conftest import UI_TASK, Office, ScriptedGateway, developer_answer, wait_fo
 
 from app.runner import Checkpoints, Runner
 from app.sandbox import Sandbox
-from app.schemas import ModelProfile, TaskStatus
+from app.schemas import TaskStatus
 from app.tasks import IntakeOutcome
 
 TARGET = os.environ.get("OFFICE_TEST_TARGET_REPO", "https://github.com/SlavaPush/vibe-studio.git")
@@ -95,7 +95,7 @@ def test_graph_with_real_sandbox_produces_qa_evidence(real):
     gateway.handlers["developer"] = developer
     gateway.handlers["qa"] = qa
     client, me = office.login(app=app)
-    task_id = store.create_task(me["id"], UI_TASK, ModelProfile.hybrid, IntakeOutcome(True, None)).id
+    task_id = store.create_task(me["id"], UI_TASK, IntakeOutcome(True, None)).id
     store.promote_queue()
     expected = wait_for(
         lambda: [event for event in store.events_after(task_id, 0, 1000) if event.type == "decision_required"], 120, "spec"

@@ -29,7 +29,7 @@ PROTECTED = [
 ]
 
 BODIES = {
-    "/api/tasks": {"text": "Добавить кнопку копирования ответа в чате vibe-chat.", "profile": "hybrid"},
+    "/api/tasks": {"text": "Добавить кнопку копирования ответа в чате vibe-chat."},
     "/api/tasks/tsk_x/decisions": {"decision": "cancel", "expected_version": 1, "idempotency_key": "key-0001"},
     "/api/releases/rel_x/decisions": {
         "decision": "approve_release",

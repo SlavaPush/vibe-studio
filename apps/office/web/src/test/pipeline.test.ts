@@ -65,7 +65,6 @@ class Log {
   intake(): this {
     return this.add('task_created', {
       title: 'Кнопка копирования',
-      profile: 'hybrid',
       provider: 'anthropic',
       model: 'claude-haiku-5-5',
       effort: 'low',
@@ -191,7 +190,7 @@ describe('buildPipeline: агенты', () => {
   })
 
   it('старые события модели без новых полей: модель из arguments, без уровня усилий', () => {
-    const log = new Log().add('task_created', { title: 'x', profile: 'hybrid' }).started('supervisor', 'spec')
+    const log = new Log().add('task_created', { title: 'x' }).started('supervisor', 'spec')
     log.model('supervisor', 'spec', 'anthropic/claude-sonnet-5-5', null)
     const { agents } = build(log)
     expect(agents.supervisor.model).toEqual({ provider: 'anthropic', model: 'claude-sonnet-5-5', effort: null })

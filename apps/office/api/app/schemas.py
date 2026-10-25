@@ -68,12 +68,6 @@ class Contour(StrEnum):
 REWORK_SOURCES = frozenset({FailureKind.verify_failed, FailureKind.rolled_back, FailureKind.checks_failed})
 
 
-class ModelProfile(StrEnum):
-    local = "local"
-    cloud = "cloud"
-    hybrid = "hybrid"
-
-
 class AgentRole(StrEnum):
     supervisor = "supervisor"
     researcher = "researcher"
@@ -176,6 +170,7 @@ class Spec(ContractModel):
     summary: str
     acceptance_criteria: list[str]
     sources: list[SpecSource]
+    plan: list[str] = []
 
 
 class Usage(ContractModel):
@@ -183,11 +178,11 @@ class Usage(ContractModel):
     model_calls_limit: int = Field(ge=0)
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
+    cost_usd: float = Field(ge=0)
 
 
 class TaskCreate(ContractModel):
     text: str = Field(min_length=20, max_length=4000)
-    profile: ModelProfile
 
 
 class PullRequestCheck(ContractModel):
@@ -231,7 +226,6 @@ class Task(ContractModel):
     title: str = Field(max_length=80)
     text: str
     status: TaskStatus
-    profile: ModelProfile
     owner_id: str
     owner_name: str
     version: int = Field(ge=1)

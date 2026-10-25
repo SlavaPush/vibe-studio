@@ -1,14 +1,6 @@
 status: p0-smoke-verified
 
 capabilities:
-  ollama/qwen3:8b:
-    reasoning_parameter: think
-    reasoning_values: [false, true]
-    context_tokens: 32768
-    max_output_tokens: 4096
-    verified: true
-    verified_on: 2026-10-23
-    verified_values: [false, true]
   anthropic/claude-haiku-5-5:
     reasoning_parameter: output_config.effort
     reasoning_values: [low, medium, high, xhigh, max]
@@ -18,6 +10,8 @@ capabilities:
     verified: true
     verified_on: 2026-10-23
     verified_values: [low]
+    price_usd_per_mtok: {input: 0.10, output: 0.50}
+    price_source: "справка Claude API, 6 октября 2026; запрос до 100K токенов"
   anthropic/claude-sonnet-5-5:
     reasoning_parameter: output_config.effort
     reasoning_values: [low, medium, high, xhigh, max]
@@ -27,6 +21,8 @@ capabilities:
     verified: true
     verified_on: 2026-10-23
     verified_values: [high]
+    price_usd_per_mtok: {input: 2.00, output: 10.00}
+    price_source: "справка Claude API, 6 октября 2026"
   openai/gpt-6-luna:
     reasoning_parameter: reasoning.effort
     reasoning_values: [none, low, medium, high, xhigh, max]
@@ -37,6 +33,8 @@ capabilities:
     verified: true
     verified_on: 2026-10-23
     verified_values: [low]
+    price_usd_per_mtok: {input: 0.10, output: 0.50}
+    price_source: "сторонние обзоры цен OpenAI, 25 октября 2026; оценка, один источник даёт 0.20/1.20"
   openai/gpt-6.1-sol:
     reasoning_parameter: reasoning.effort
     reasoning_values: [low, medium, high, xhigh, max]
@@ -47,33 +45,14 @@ capabilities:
     verified: true
     verified_on: 2026-10-23
     verified_values: [medium]
+    price_usd_per_mtok: {input: 2.00, output: 10.00}
+    price_source: "сторонние обзоры цен OpenAI, 25 октября 2026"
 
-profiles:
-  local:
-    supervisor: {provider: ollama, model: qwen3:8b, effort: off, max_output_tokens: 4096}
-    researcher: {provider: ollama, model: qwen3:8b, effort: off, max_output_tokens: 4096}
-    developer: {provider: ollama, model: qwen3:8b, effort: on, max_output_tokens: 4096}
-    qa: {provider: ollama, model: qwen3:8b, effort: off, max_output_tokens: 4096}
-    critic: {provider: ollama, model: qwen3:8b, effort: on, max_output_tokens: 4096}
-    pr_reviewer: {provider: ollama, model: qwen3:8b, effort: on, max_output_tokens: 4096}
-    intake_filter: {provider: anthropic, model: claude-haiku-5-5, effort: low, fallback: openai/gpt-6-luna}
-  cloud:
-    supervisor: {provider: anthropic, model: claude-haiku-5-5, effort: low, fallback: openai/gpt-6-luna, max_output_tokens: 8192}
-    researcher: {provider: anthropic, model: claude-haiku-5-5, effort: low, fallback: openai/gpt-6-luna, max_output_tokens: 8192}
-    developer: {provider: anthropic, model: claude-sonnet-5-5, effort: high, fallback: openai/gpt-6.1-sol, max_output_tokens: 32000}
-    qa: {provider: anthropic, model: claude-sonnet-5-5, effort: high, fallback: openai/gpt-6.1-sol, max_output_tokens: 16000}
-    critic: {provider: anthropic, model: claude-sonnet-5-5, effort: high, fallback: openai/gpt-6.1-sol, max_output_tokens: 16000}
-    pr_reviewer: {provider: anthropic, model: claude-sonnet-5-5, effort: high, fallback: openai/gpt-6.1-sol, max_output_tokens: 16000}
-    intake_filter: {provider: anthropic, model: claude-haiku-5-5, effort: low, fallback: openai/gpt-6-luna}
-  hybrid:
-    supervisor: {provider: ollama, model: qwen3:8b, effort: off, max_output_tokens: 4096}
-    researcher: {provider: ollama, model: qwen3:8b, effort: off, max_output_tokens: 4096}
-    developer: {provider: anthropic, model: claude-sonnet-5-5, effort: high, fallback: openai/gpt-6.1-sol, max_output_tokens: 32000}
-    qa: {provider: anthropic, model: claude-haiku-5-5, effort: low, fallback: openai/gpt-6-luna, max_output_tokens: 16000}
-    critic: {provider: anthropic, model: claude-sonnet-5-5, effort: high, fallback: openai/gpt-6.1-sol, max_output_tokens: 16000}
-    pr_reviewer: {provider: anthropic, model: claude-sonnet-5-5, effort: high, fallback: openai/gpt-6.1-sol, max_output_tokens: 16000}
-    intake_filter: {provider: anthropic, model: claude-haiku-5-5, effort: low, fallback: openai/gpt-6-luna}
-
-local_limits:
-  ollama_max_loaded_models: 1
-  ollama_num_parallel: 1
+roles:
+  intake_filter: {provider: anthropic, model: claude-haiku-5-5, effort: low, fallback: openai/gpt-6-luna}
+  researcher: {provider: anthropic, model: claude-haiku-5-5, effort: low, fallback: openai/gpt-6-luna, max_output_tokens: 8192}
+  supervisor: {provider: anthropic, model: claude-sonnet-5-5, effort: medium, fallback: openai/gpt-6.1-sol, max_output_tokens: 8192}
+  developer: {provider: anthropic, model: claude-sonnet-5-5, effort: high, fallback: openai/gpt-6.1-sol, max_output_tokens: 32000}
+  qa: {provider: anthropic, model: claude-sonnet-5-5, effort: medium, fallback: openai/gpt-6.1-sol, max_output_tokens: 16000}
+  critic: {provider: anthropic, model: claude-sonnet-5-5, effort: medium, fallback: openai/gpt-6.1-sol, max_output_tokens: 16000}
+  pr_reviewer: {provider: anthropic, model: claude-sonnet-5-5, effort: high, fallback: openai/gpt-6.1-sol, max_output_tokens: 16000}

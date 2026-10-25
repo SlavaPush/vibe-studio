@@ -1,6 +1,6 @@
 def test_unknown_field_is_validation_error(office):
     client, _ = office.login()
-    response = client.post("/api/tasks", json={"text": "x" * 30, "profile": "hybrid", "role": "admin"})
+    response = client.post("/api/tasks", json={"text": "x" * 30, "role": "admin"})
     assert response.status_code == 422
     assert response.json()["code"] == "validation_error"
     assert response.json()["retryable"] is False
@@ -9,7 +9,7 @@ def test_unknown_field_is_validation_error(office):
 def test_text_length_is_validated(office):
     client, _ = office.login()
     for text in ("коротко", "я" * 4001):
-        response = client.post("/api/tasks", json={"text": text, "profile": "hybrid"})
+        response = client.post("/api/tasks", json={"text": text})
         assert response.status_code == 422
         assert response.json()["message"] == "Текст задачи должен содержать от 20 до 4000 символов."
 

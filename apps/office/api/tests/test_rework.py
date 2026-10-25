@@ -12,6 +12,7 @@ from app.branch_check import WorkspaceError
 from app.config import CHECKOUT_ROOT, Settings
 from app.db import to_text, utcnow
 from app.github import github_client
+from app.graph import spec_hash
 from app.operations import OperationLog, OpStatus
 from app.release import ReleaseWorker
 from app.render import render_client
@@ -20,7 +21,6 @@ from app.rework import HIDDEN, SOURCE_LIMIT, ReworkMaterials, clip, sanitize, se
 from app.schemas import (
     ChangeClass,
     DeployResult,
-    ModelProfile,
     ReleaseKind,
     ReleaseStatus,
     RollbackResult,
@@ -301,7 +301,7 @@ def test_attempt_counts_retries_and_rework_without_offset(office):
 def test_rework_adds_limit_of_task_class(office):
     _, me = office.login()
     outcome = IntakeOutcome(True, None, change_class=ChangeClass.backend_api)
-    task_id = office.store.create_task(me["id"], "Поле в ответе API.", ModelProfile.hybrid, outcome).id
+    task_id = office.store.create_task(me["id"], "Поле в ответе API.", outcome).id
     office.set_task(task_id, status="failed", failure_kind="verify_failed")
     context = {"source": "verify_failed", "release_id": "rel_x", "owner_id": "rel_x", "merge_sha": "c" * 40}
     with office.store.db.locked_transaction() as conn:
@@ -351,7 +351,7 @@ def rework_task(office, origin, tmp_path):
     app = office.workspace_app(origin, tmp_path)
     _, me = office.login(app=app)
     store = app.state.store
-    task_id = store.create_task(me["id"], UI_TASK, ModelProfile.hybrid, IntakeOutcome(True, None)).id
+    task_id = store.create_task(me["id"], UI_TASK, IntakeOutcome(True, None)).id
     office.set_task(task_id, status="developing")
     app.state.workspace.ensure_worktree(task_id)
     first = app.state.workspace.worktree_path(task_id)
@@ -578,6 +578,39 @@ def test_rework_runs_developer_qa_and_critic_with_materials(office, origin, tmp_
     saved = store.rework_context(task_id)["materials"]
     assert saved["attempt"] == 1 and len(saved["items"]) == 5
     assert (app.state.settings.artifacts_dir / task_id / "qa-state-1-1.json").is_file()
+
+
+def test_rework_of_spec_without_plan_keeps_hash_and_approval(office, origin, tmp_path):
+    app = office.graph_app(origin, tmp_path)
+    client, me = office.login(app=app)
+    store = app.state.store
+    task_id = create(app, me["id"])
+    approve(client, app, task_id)
+    wait_status(app, task_id, TaskStatus.awaiting_integration)
+    task = store.get_task(task_id)
+    body = {"summary": task.spec.summary, "acceptance_criteria": task.spec.acceptance_criteria, "sources": []}
+    legacy = {"version": 1, "spec_hash": spec_hash(body)} | body
+    first = app.state.workspace.worktree_path(task_id)
+    parent, merged, _ = squash_and_revert(origin, app.state.workspace.clone, git(first, "rev-parse", "HEAD"), task.title)
+    office.set_task(task_id, status="failed", failure_kind="verify_failed", merge_sha=merged,
+                    rework_reason="Проверка после деплоя не пройдена.", spec=json.dumps(legacy, ensure_ascii=False))
+    release = office.add_candidate(task_id, commit_sha=merged, expected_previous_sha=parent, status=ReleaseStatus.failed)
+    context = {"source": "verify_failed", "release_id": release.id, "owner_id": release.id, "merge_sha": merged,
+               "comment": None, "materials": None}
+    with store.db.locked_transaction() as conn:
+        assert store.start_rework_in(conn, task_id, release.id, context)
+        store._promote(conn)
+    wait_status(app, task_id, TaskStatus.awaiting_integration, TaskStatus.failed, TaskStatus.needs_attention)
+    task = store.get_task(task_id)
+    assert task.status == TaskStatus.awaiting_integration, events(app, task_id)[-3:]
+    assert transitions(app, task_id)[-4:] == [
+        ("failed", "queued"), ("queued", "developing"), ("developing", "reviewing"), ("reviewing", "awaiting_integration"),
+    ]
+    assert (task.spec.plan, task.spec.spec_hash) == ([], legacy["spec_hash"])
+    assert len(events(app, task_id, "decision_required")) == 1
+    gateway = app.state.gateway
+    assert len(gateway.role_calls("supervisor", task_id)) == 1
+    assert "План реализации" not in gateway.role_calls("developer", task_id)[-1].user
 
 
 @pytest.mark.pg

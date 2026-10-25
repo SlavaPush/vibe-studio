@@ -27,7 +27,7 @@ from app.main import create_app
 from app.models_gateway import ModelCall, ModelsGateway, ProviderReply
 from app.runner import Checkpoints, Runner
 from app.sandbox import COMPAT_COMMANDS, E2EResult, SandboxCancelled, suite_steps
-from app.schemas import ApiError, CheckReport, CheckResult, ModelProfile, ReleaseCandidate, ReleaseKind
+from app.schemas import ApiError, CheckReport, CheckResult, ReleaseCandidate, ReleaseKind
 from app.tasks import IntakeOutcome, TaskStore
 
 PG_URL = os.environ.get("OFFICE_TEST_POSTGRES_URL")
@@ -183,6 +183,7 @@ QA_PYTEST = "def test_feature(client):\n    assert client.get('/api/version').st
 SPEC_ANSWER = {
     "summary": "Под ответом ассистента появляется кнопка копирования.",
     "acceptance_criteria": ["Кнопка копирования видна под ответом.", "Нажатие копирует текст ответа."],
+    "plan": ["apps/chat/web/src/App.tsx: добавить кнопку копирования под ответом ассистента."],
     "needs_research": False,
     "research_questions": [],
 }
@@ -470,11 +471,11 @@ class Office:
         assert response.status_code == 200, response.text
         return client, response.json()
 
-    def post_task(self, client: TestClient, text: str = UI_TASK, profile: str = "hybrid") -> Any:
-        return client.post("/api/tasks", json={"text": text, "profile": profile})
+    def post_task(self, client: TestClient, text: str = UI_TASK) -> Any:
+        return client.post("/api/tasks", json={"text": text})
 
     def queued_task(self, owner_id: str, text: str = UI_TASK) -> str:
-        task = self.store.create_task(owner_id, text, ModelProfile.hybrid, IntakeOutcome(True, None))
+        task = self.store.create_task(owner_id, text, IntakeOutcome(True, None))
         return task.id
 
     def add_candidate(self, task_id: str, **overrides: Any) -> ReleaseCandidate:
@@ -532,7 +533,7 @@ class Office:
     def start_tasks(self, app: FastAPI, owner_id: str, count: int = 1) -> list[str]:
         store: TaskStore = app.state.store
         ids = [
-            store.create_task(owner_id, UI_TASK, ModelProfile.hybrid, IntakeOutcome(True, None)).id
+            store.create_task(owner_id, UI_TASK, IntakeOutcome(True, None)).id
             for _ in range(count)
         ]
         store.promote_queue()

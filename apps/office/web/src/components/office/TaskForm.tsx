@@ -1,11 +1,10 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { asApiError, createTask, isStale, isUnauthorized, type Run } from '@/api/client'
-import { MODEL_PROFILES, type ModelProfile, type Task } from '@/api/types'
+import type { Task } from '@/api/types'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
-import { PROFILE_LABELS } from '@/lib/labels'
 
 const TEXT_MIN = 20
 const TEXT_MAX = 4000
@@ -23,7 +22,6 @@ interface Result {
 
 export function TaskForm({ run, onCreated }: TaskFormProps) {
   const [text, setText] = useState('')
-  const [profile, setProfile] = useState<ModelProfile>('hybrid')
   const [pending, setPending] = useState(false)
   const [pause, setPause] = useState(0)
   const [result, setResult] = useState<Result | null>(null)
@@ -46,7 +44,7 @@ export function TaskForm({ run, onCreated }: TaskFormProps) {
     setPending(true)
     setResult(null)
     try {
-      const task = await run(() => createTask({ text, profile }))
+      const task = await run(() => createTask({ text }))
       onCreated(task)
       if (task.status === 'rejected') {
         setResult({
@@ -98,22 +96,6 @@ export function TaskForm({ run, onCreated }: TaskFormProps) {
             </p>
           </div>
           <div className="flex flex-wrap items-end gap-3">
-            <div className="grid gap-2">
-              <Label htmlFor="task-profile">Профиль моделей</Label>
-              <select
-                id="task-profile"
-                value={profile}
-                disabled={pending}
-                onChange={(event) => setProfile(event.target.value as ModelProfile)}
-                className="h-11 rounded-md border border-input bg-background px-3 text-sm focus-visible:ring-[3px] focus-visible:ring-ring/50 desk:h-9"
-              >
-                {MODEL_PROFILES.map((value) => (
-                  <option key={value} value={value}>
-                    {PROFILE_LABELS[value]}
-                  </option>
-                ))}
-              </select>
-            </div>
             <Button type="submit" disabled={pending || pause > 0}>
               {pending ? 'Проверяем задачу…' : 'Поставить задачу'}
             </Button>

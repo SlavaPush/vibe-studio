@@ -28,7 +28,8 @@ export const ABOUT: AboutContent = {
     { label: 'Сервер', value: 'FastAPI, LangGraph, Python 3.12' },
     {
       label: 'Модели',
-      value: 'Anthropic Claude — основной провайдер, OpenAI — резерв; локальная модель Ollama qwen3:8b в профилях local и hybrid',
+      value:
+        'Anthropic Claude — основной провайдер, OpenAI — резерв. Одна таблица моделей по ролям: Haiku для фильтра приёма и исследователя, Sonnet для Supervisor, разработчика, QA, критика и агента ревью PR. Карточка задачи показывает оценку стоимости',
     },
     { label: 'Хранение', value: 'SQLite локально, PostgreSQL при деплое' },
     { label: 'Деплой', value: 'Офис работает локально; чат выпускает на Render через GitHub App и Render API' },

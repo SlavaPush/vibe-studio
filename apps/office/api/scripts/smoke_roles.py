@@ -1,7 +1,7 @@
-"""Smoke-проверка шлюза ролей: по одному вызову со схемой ответа QA на Anthropic, OpenAI и Ollama.
+"""Smoke-проверка шлюза ролей: по одному вызову со схемой ответа QA на Anthropic и OpenAI.
 
 Запуск из каталога api: PYTHONPATH=. uv run --env-file ../.env python scripts/smoke_roles.py [провайдер ...]
-Аргументы ограничивают проверку названными провайдерами (anthropic, openai, ollama); без аргументов проверяются все три.
+Аргументы ограничивают проверку названными провайдерами (anthropic, openai); без аргументов проверяются оба.
 Код возврата: 0 — все ответы завершены и проходят схему; 1 — иначе. Ключи не выводятся.
 """
 
@@ -14,7 +14,7 @@ from pydantic import ValidationError
 from app.config import Settings
 from app.models_gateway import ModelCall, ModelsGateway, ProviderError
 from app.roles import QA, QaTurn, Entry, assemble, provider_schema
-from app.schemas import AgentRole, ModelProfile
+from app.schemas import AgentRole
 
 TASK = "Добавить под каждым ответом ассистента кнопку копирования текста ответа."
 FIXED = [
@@ -28,11 +28,7 @@ FIXED = [
 def main() -> int:
     settings = Settings.from_env()
     gateway = ModelsGateway(settings)
-    targets = [
-        gateway.targets(ModelProfile.cloud, AgentRole.qa)[0],
-        gateway.targets(ModelProfile.cloud, AgentRole.qa)[1],
-        gateway.targets(ModelProfile.local, AgentRole.qa)[0],
-    ]
+    targets = gateway.targets(AgentRole.qa)
     wanted = set(sys.argv[1:])
     unknown = wanted - {target.provider for target in targets}
     if unknown:
@@ -42,7 +38,7 @@ def main() -> int:
         targets = [target for target in targets if target.provider in wanted]
     ok = True
     for target in targets:
-        budget = gateway.input_budget(ModelProfile.local, AgentRole.qa)
+        budget = gateway.input_budget(AgentRole.qa)
         call = ModelCall(
             task_id="smoke",
             role=AgentRole.qa,

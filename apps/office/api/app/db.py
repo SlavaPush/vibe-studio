@@ -28,6 +28,7 @@ ADDED_COLUMNS = (
     ("tasks", "change_class", "TEXT NOT NULL DEFAULT 'frontend_ui'"),
     ("tasks", "contour", "TEXT"),
     ("tasks", "owner_review", "TEXT"),
+    ("tasks", "cost_usd", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
     ("pr_reviews", "owner_summary", "TEXT"),
     ("release_candidates", "pr_review_id", "TEXT"),
     ("release_candidates", "e2e", "TEXT"),

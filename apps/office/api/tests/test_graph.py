@@ -4,15 +4,15 @@ import uuid
 from datetime import timedelta
 
 import pytest
-from conftest import QA_TEST, UI_TASK, FakeSuite, ScriptedGateway, developer_answer, git, qa_answer, wait_for
+from conftest import QA_TEST, SPEC_ANSWER, UI_TASK, FakeSuite, ScriptedGateway, developer_answer, git, qa_answer, wait_for
 from langgraph.types import Command
 
 from app.db import utcnow
 from app.graph import TaskGraph, spec_hash
 from app.models_gateway import ProviderReply
-from app.roles import Finding
+from app.roles import Finding, SpecDraft
 from app.sandbox import E2EResult, SandboxCancelled
-from app.schemas import AgentRole, CheckResult, ModelProfile, TaskStatus
+from app.schemas import AgentRole, CheckResult, TaskStatus
 from app.tasks import IntakeOutcome
 
 
@@ -26,9 +26,9 @@ def crash(app):
     raise Crash()
 
 
-def create(app, owner_id, *, profile=ModelProfile.hybrid, **fields):
+def create(app, owner_id, **fields):
     store = app.state.store
-    task_id = store.create_task(owner_id, UI_TASK, profile, IntakeOutcome(True, None)).id
+    task_id = store.create_task(owner_id, UI_TASK, IntakeOutcome(True, None)).id
     if fields:
         assignments = ", ".join(f"{name} = :{name}" for name in fields)
         with store.db.transaction() as conn:
@@ -103,9 +103,10 @@ def test_full_pass_reaches_awaiting_integration(office, origin, graph):
     expected = spec_required(app, task_id)
     task = store.get_task(task_id)
     assert task.status == TaskStatus.awaiting_spec_approval
-    body = {key: task.spec.model_dump()[key] for key in ("summary", "acceptance_criteria", "sources")}
+    body = {key: task.spec.model_dump()[key] for key in ("summary", "acceptance_criteria", "sources", "plan")}
     assert task.spec.spec_hash == spec_hash(body) and task.spec.spec_hash.startswith("sha256:")
     assert task.spec.acceptance_criteria == ["Кнопка копирования видна под ответом.", "Нажатие копирует текст ответа."]
+    assert task.spec.plan == SPEC_ANSWER["plan"]
     assert expected == task.version
     assert (app.state.settings.artifacts_dir / task_id / "spec-1.json").is_file()
     assert app.state.gateway.role_calls("developer") == []
@@ -150,7 +151,13 @@ def test_full_pass_reaches_awaiting_integration(office, origin, graph):
     assert [event.payload["arguments"].split()[0] for event in model_events].count("developer/implement") == 1
     assert store.get_task(task_id).usage.model_calls == len(model_events) == 4
     assert store.get_task(task_id).usage.input_tokens == 400
+    assert store.get_task(task_id).usage.cost_usd == pytest.approx(4 * (100 * 2.00 + 20 * 10.00) / 1_000_000)
     assert store.get_task(task_id).fix_cycles == 0
+    gateway = app.state.gateway
+    [dev_call] = gateway.role_calls("developer", task_id)
+    assert f"План реализации\n1. {SPEC_ANSWER['plan'][0]}" in dev_call.user
+    checkers = gateway.role_calls("qa", task_id) + gateway.role_calls("critic", task_id)
+    assert checkers and all("План реализации" not in call.user for call in checkers)
 
 
 @pytest.mark.pg
@@ -569,6 +576,34 @@ def test_crash_after_publish_does_not_publish_again(office, origin, tmp_path, gr
     assert len(app.state.gateway.role_calls("supervisor")) == 1
 
 
+@pytest.mark.pg
+def test_old_draft_without_plan_is_published_after_restart(office, origin, tmp_path, graph, monkeypatch):
+    app, client, me = graph
+    dump = SpecDraft.model_dump
+    monkeypatch.setattr(
+        SpecDraft, "model_dump", lambda self, **kwargs: {k: v for k, v in dump(self, **kwargs).items() if k != "plan"}
+    )
+    app.state.store.publish_spec = lambda *args: crash(app)
+    task_id = create(app, me["id"])
+    wait_for(
+        lambda: app.state.gateway.role_calls("supervisor") and not app.state.runner.active(task_id), 10, "crashed run"
+    )
+    office.stop_app(app)
+    monkeypatch.undo()
+
+    second = office.graph_app(origin, tmp_path)
+    second_client = office.client(second)
+    second_client.cookies.update(client.cookies)
+    approve(second_client, second, task_id)
+    wait_status(second, task_id, TaskStatus.awaiting_integration)
+    task = second.state.store.get_task(task_id)
+    body = {key: task.spec.model_dump()[key] for key in ("summary", "acceptance_criteria", "sources")}
+    assert (task.spec.plan, task.spec.spec_hash) == ([], spec_hash(body))
+    assert second.state.gateway.role_calls("supervisor") == []
+    [dev_call] = second.state.gateway.role_calls("developer", task_id)
+    assert "План реализации" not in dev_call.user
+
+
 def test_failed_checks_return_to_developer(graph):
     app, client, me = graph
     suite = app.state.suite
@@ -613,7 +648,8 @@ def test_three_graphs_run_and_fourth_waits(graph):
             event = release.setdefault(call.task_id, threading.Event())
         event.wait(30)
         return {
-            "summary": "x", "acceptance_criteria": ["y"], "needs_research": False, "research_questions": [],
+            "summary": "x", "acceptance_criteria": ["y"], "plan": ["z"], "needs_research": False,
+            "research_questions": [],
         }
 
     gateway.handlers["supervisor"] = blocked
@@ -1062,7 +1098,9 @@ def test_model_call_is_counted_before_provider(graph):
 
     def supervisor(call):
         seen.append(store.get_task(call.task_id).usage.model_calls)
-        return {"summary": "x", "acceptance_criteria": ["y"], "needs_research": False, "research_questions": []}
+        return {
+            "summary": "x", "acceptance_criteria": ["y"], "plan": ["z"], "needs_research": False, "research_questions": []
+        }
 
     app.state.gateway.handlers["supervisor"] = supervisor
     task_id = create(app, me["id"], model_calls=2)

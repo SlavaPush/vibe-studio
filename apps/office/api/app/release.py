@@ -847,9 +847,8 @@ class ReleaseWorker:
         reason = None
         try:
             user = self._review_input(c, contour)
-            profile = self.store.get_task(c.task_id).profile
             reply = self.gateway.structured(
-                self.store, c.task_id, profile, AgentRole.pr_reviewer, PR_REVIEW, PR_REVIEWER, user, PrReview
+                self.store, c.task_id, AgentRole.pr_reviewer, PR_REVIEW, PR_REVIEWER, user, PrReview
             )
             if contour == Contour.server and reply.verdict == "approve" and not reply.owner_summary.strip():
                 reason = "Агент ревью PR не подготовил сводку для владельца по PR серверного контура; решение не принято, PR открыт."
@@ -977,7 +976,7 @@ class ReleaseWorker:
                 Entry("Изменённые файлы", "\n".join(task.changed_files), required=True),
                 diff_entry,
             ]
-        budget = self.gateway.input_budget(task.profile, AgentRole.pr_reviewer)
+        budget = self.gateway.input_budget(AgentRole.pr_reviewer)
         return assemble(PR_REVIEWER, fixed, [], budget)
 
     def _merge(self, c: Carrier, review: PullRequestReview) -> bool:

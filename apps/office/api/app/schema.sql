@@ -59,7 +59,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     rework_of TEXT,
     change_class TEXT NOT NULL DEFAULT 'frontend_ui',
     contour TEXT,
-    owner_review TEXT
+    owner_review TEXT,
+    cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS tasks_status_created ON tasks (status, created_at);

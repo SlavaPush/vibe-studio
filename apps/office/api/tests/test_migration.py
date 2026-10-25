@@ -70,6 +70,8 @@ def test_old_database_is_upgraded_once(database_url):
             TaskStatus.developing, "office/tsk_old", 1, 4
         )
         assert (old.pr_number, old.head_sha, old.failure_kind, old.checks) == (None, None, None, None)
+        assert (old.usage.input_tokens, old.usage.cost_usd) == (100, 0)
+        assert "profile" not in old.model_dump()
         moved = store.get_task("tsk_release")
         assert moved.status == TaskStatus.needs_attention
         assert [event.type for event in store.events_after("tsk_old", 0)] == ["task_created"]
@@ -83,6 +85,11 @@ def test_old_database_is_upgraded_once(database_url):
     try:
         again.init_schema()
         assert dump(again) == first
+        legacy = '{"version": 1, "spec_hash": "sha256:old", "summary": "s", "acceptance_criteria": ["c"], "sources": []}'
+        with again.transaction() as conn:
+            conn.execute("UPDATE tasks SET spec = :spec WHERE id = 'tsk_old'", {"spec": legacy})
+        spec = TaskStore(again).get_task("tsk_old").spec
+        assert (spec.spec_hash, spec.plan) == ("sha256:old", [])
     finally:
         again.close()
 

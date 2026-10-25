@@ -8,7 +8,7 @@ import pytest
 
 from app.intake import CLASS_REASONS, REASON_FORBIDDEN, REASON_MODERATION, REASON_NO_LETTERS, UNAVAILABLE
 from app.sessions import COOKIE_NAME
-from conftest import UI_TASK, classification
+from conftest import UI_TASK, classification, wait_for
 
 pytestmark = pytest.mark.pg
 
@@ -19,8 +19,18 @@ def anthropic_down():
     return anthropic.APIConnectionError(request=REQUEST)
 
 
+HAIKU_COST = (120 * 0.10 + 30 * 0.50) / 1_000_000
+LUNA_COST = (200 * 0.10 + 40 * 0.50) / 1_000_000
+
+
 def events_of(office, task_id):
     return office.store.events_after(task_id, 0)
+
+
+def usage(office, task_id):
+    with office.store.db.connection() as conn:
+        row = conn.fetchone("SELECT input_tokens, output_tokens, cost_usd FROM tasks WHERE id = :id", {"id": task_id})
+    return row["input_tokens"], row["output_tokens"], row["cost_usd"]
 
 
 def test_accepted_task_uses_primary_classifier(office):
@@ -28,7 +38,10 @@ def test_accepted_task_uses_primary_classifier(office):
     task = office.post_task(client).json()
     assert task["status"] == "queued"
     assert task["rejection_reason"] is None
-    assert task["usage"] == {"model_calls": 2, "model_calls_limit": 30, "input_tokens": 120, "output_tokens": 30}
+    assert task["usage"] == {
+        "model_calls": 2, "model_calls_limit": 30, "input_tokens": 120, "output_tokens": 30, "cost_usd": 0.0
+    }
+    assert usage(office, task["id"]) == pytest.approx((120, 30, HAIKU_COST))
     call = office.anthropic.calls[0]
     assert call["model"] == "claude-haiku-5-5"
     assert call["output_config"]["effort"] == "low"
@@ -38,7 +51,7 @@ def test_accepted_task_uses_primary_classifier(office):
     events = events_of(office, task["id"])
     assert [event.type for event in events][:1] == ["task_created"]
     assert events[0].payload == {
-        "title": task["title"], "profile": "hybrid", "change_class": "frontend_ui",
+        "title": task["title"], "change_class": "frontend_ui",
         "provider": "anthropic", "model": "claude-haiku-5-5", "effort": "low",
     }
 
@@ -207,6 +220,25 @@ def test_fail_closed(office, breakdown):
     task = office.post_task(client).json()
     assert task["status"] == "rejected"
     assert task["rejection_reason"] == UNAVAILABLE
+    answered = breakdown in ("out_of_schema", "refusal", "extra_field")
+    assert usage(office, task["id"]) == pytest.approx((120, 30, HAIKU_COST) if answered else (0, 0, 0))
+
+
+@pytest.mark.parametrize("breakdown", ["anthropic_cut", "openai_cut", "openai_out_of_schema"])
+def test_rejected_answer_of_any_provider_is_counted(office, breakdown):
+    client, _ = office.login()
+    if breakdown == "anthropic_cut":
+        office.anthropic.stop_reason = "max_tokens"
+    else:
+        office.anthropic.error = anthropic_down()
+        if breakdown == "openai_cut":
+            office.openai.status = "incomplete"
+        else:
+            office.openai.answer = "не JSON"
+    task = office.post_task(client).json()
+    assert (task["status"], task["rejection_reason"]) == ("rejected", UNAVAILABLE)
+    expected = (120, 30, HAIKU_COST) if breakdown == "anthropic_cut" else (200, 40, LUNA_COST)
+    assert usage(office, task["id"]) == pytest.approx(expected)
 
 
 def test_invalid_primary_answer_does_not_trigger_fallback(office):
@@ -223,6 +255,7 @@ def test_fallback_to_openai_on_primary_error(office):
     assert task["status"] == "queued"
     assert task["usage"]["model_calls"] == 3
     assert task["usage"]["input_tokens"] == 200
+    assert usage(office, task["id"]) == pytest.approx((200, 40, LUNA_COST))
     call = office.openai.calls[0]
     assert call["model"] == "gpt-6-luna"
     assert call["reasoning"] == {"effort": "low"}
@@ -282,6 +315,50 @@ def test_valid_answer_after_deadline_is_rejected(office, late):
     assert task["status"] == "rejected"
     assert task["rejection_reason"] == UNAVAILABLE
     assert task["usage"]["model_calls"] == (2 if late == "primary" else 3)
+    assert (task["usage"]["input_tokens"], task["usage"]["output_tokens"]) == (0, 0)
+    expected = (120, 30, HAIKU_COST) if late == "primary" else (200, 40, LUNA_COST)
+    wait_for(lambda: usage(office, task["id"])[0] > 0, 5, "late usage")
+    time.sleep(0.3)
+    assert usage(office, task["id"]) == pytest.approx(expected)
+    assert office.store.get_task(task["id"]).status == "rejected"
+
+
+def test_answer_during_task_creation_is_counted_once(office, monkeypatch):
+    app = office.new_app(intake_timeout_seconds=0.2)
+    client, _ = office.login(app=app)
+    release = threading.Event()
+    reply = office.anthropic.messages.create
+
+    def held(**kwargs):
+        release.wait(5)
+        return reply(**kwargs)
+
+    office.anthropic.messages.create = held
+    store = app.state.store
+    create = store.create_task
+
+    def creating(owner_id, text, outcome, reservation_id=None):
+        release.set()
+        wait_for(lambda: outcome.meter.snapshot()[0] == 120, 5, "answer before task row")
+        return create(owner_id, text, outcome, reservation_id)
+
+    monkeypatch.setattr(store, "create_task", creating)
+    task = office.post_task(client).json()
+    assert (task["status"], task["rejection_reason"]) == ("rejected", UNAVAILABLE)
+    assert (task["usage"]["input_tokens"], task["usage"]["output_tokens"]) == (0, 0)
+    assert usage(office, task["id"]) == pytest.approx((120, 30, HAIKU_COST))
+    time.sleep(0.2)
+    assert usage(office, task["id"]) == pytest.approx((120, 30, HAIKU_COST))
+
+
+def test_profile_field_is_rejected_by_schema(office):
+    client, _ = office.login()
+    response = client.post("/api/tasks", json={"text": UI_TASK, "profile": "hybrid"})
+    assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
+    assert office.openai.moderation_calls == []
+    task = office.post_task(client).json()
+    assert "profile" not in task and "profile" not in events_of(office, task["id"])[0].payload
 
 
 def test_sixth_task_in_hour_is_rate_limited(office):
@@ -327,7 +404,7 @@ def test_leftover_reservations_are_removed_on_start(office):
     with app.state.store.db.connection() as conn:
         assert conn.fetchone("SELECT COUNT(*) AS n FROM intake_reservations")["n"] == 0
     cookie = {"Cookie": f"{COOKIE_NAME}={client.cookies[COOKIE_NAME]}"}
-    response = office.client(app).post("/api/tasks", json={"text": UI_TASK, "profile": "hybrid"}, headers=cookie)
+    response = office.client(app).post("/api/tasks", json={"text": UI_TASK}, headers=cookie)
     assert response.status_code == 201
 
 

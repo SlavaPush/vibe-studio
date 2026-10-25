@@ -42,6 +42,7 @@ class Reply(BaseModel):
 class SpecDraft(Reply):
     summary: str = Field(min_length=1, max_length=2000)
     acceptance_criteria: list[str] = Field(min_length=1, max_length=8)
+    plan: list[str] = Field(min_length=1, max_length=8)
     needs_research: bool
     research_questions: list[str] = Field(max_length=3)
 
@@ -49,6 +50,8 @@ class SpecDraft(Reply):
     def criteria_text(self) -> "SpecDraft":
         if any(not item.strip() or len(item) > 500 for item in self.acceptance_criteria):
             raise ValueError("acceptance criterion must contain 1-500 characters")
+        if any(not item.strip() or len(item) > 300 for item in self.plan):
+            raise ValueError("plan step must contain 1-300 characters")
         return self
 
 
@@ -322,6 +325,7 @@ SUPERVISOR = """Ты — Supervisor офиса разработки. Офис и
 Получив текст задачи участника и список файлов apps/chat/web/src, сформулируй требования:
 - summary — что должно измениться для пользователя, 1–3 предложения на русском;
 - acceptance_criteria — от 1 до 8 проверяемых критериев приёмки на русском; каждый критерий проверяется в браузере тестом Playwright на собранном приложении без backend;
+- plan — короткий план реализации для разработчика на русском, от 1 до 8 шагов в порядке выполнения, каждый не длиннее 300 символов: какой файл из списка apps/chat/web/src изменить или создать и что в нём сделать; без кода;
 - needs_research — true, только если для задачи нужны сведения из публичной документации в интернете;
 - research_questions — до трёх вопросов для исследователя, пустой список, если исследование не нужно.
 
@@ -392,6 +396,7 @@ SUPERVISOR_API = """Ты — Supervisor офиса разработки. Офи�
 Получив текст задачи участника и списки файлов, сформулируй требования к изменению сервера:
 - summary — что должно измениться для пользователя или клиента API, 1–3 предложения на русском;
 - acceptance_criteria — от 1 до 8 проверяемых критериев приёмки на русском; каждый критерий проверяется тестом pytest API на тестовой PostgreSQL без сети и без реальных провайдеров моделей (подделки из tests/conftest.py);
+- plan — короткий план реализации для разработчика на русском, от 1 до 8 шагов в порядке выполнения, каждый не длиннее 300 символов: какой файл из списков изменить или создать и что в нём сделать (API, контракт, схема БД, интерфейс); без кода;
 - needs_research — true, только если для задачи нужны сведения из публичной документации в интернете;
 - research_questions — до трёх вопросов для исследователя, пустой список, если исследование не нужно.
 
