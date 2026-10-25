@@ -71,10 +71,15 @@ def resolve_inside(root: Path, rel: str) -> Path:
 class RoleRule:
     write: tuple[re.Pattern[str], ...]
     extensions: frozenset[str]
+    deny: tuple[re.Pattern[str], ...] = ()
 
 
 def role_rule(rule: dict) -> RoleRule:
-    return RoleRule(write=tuple(glob_regex(item) for item in rule["write"]), extensions=frozenset(rule["extensions"]))
+    return RoleRule(
+        write=tuple(glob_regex(item) for item in rule["write"]),
+        extensions=frozenset(rule["extensions"]),
+        deny=tuple(glob_regex(item, re.IGNORECASE) for item in rule.get("deny", [])),
+    )
 
 
 class PathPolicy:
@@ -84,7 +89,8 @@ class PathPolicy:
         self.max_lock_bytes: int = data["max_lock_bytes"]
         self.max_list_entries: int = data["max_list_entries"]
         self.deny = tuple(glob_regex(item, re.IGNORECASE) for item in data["deny"])
-        self.server = tuple(glob_regex(item, re.IGNORECASE) for item in data["zones"]["server"])
+        self.tests = tuple(glob_regex(item, re.IGNORECASE) for item in data["zones"]["tests"])
+        self.server = tuple(glob_regex(item, re.IGNORECASE) for item in data["zones"]["server"]) + self.tests
         self.read_deny = tuple(glob_regex(item, re.IGNORECASE) for item in data["read_deny"])
         self.classes = {
             ChangeClass(name): {AgentRole(role): role_rule(rule) for role, rule in roles.items()}
@@ -100,6 +106,9 @@ class PathPolicy:
         if not self.readable(rel):
             raise PathDenied("Чтение этого пути запрещено политикой офиса.")
         return rel
+
+    def is_test(self, rel: str) -> bool:
+        return any(pattern.fullmatch(rel) for pattern in self.tests)
 
     def is_server(self, rel: str) -> bool:
         return any(pattern.fullmatch(rel) for pattern in self.server)
@@ -119,6 +128,8 @@ class PathPolicy:
         rule = self.office if role is None else self.classes[change_class].get(role)
         if rule is None or not any(pattern.fullmatch(rel) for pattern in rule.write):
             raise PathDenied("Путь вне каталогов, разрешённых роли для записи.")
+        if any(pattern.fullmatch(rel) for pattern in rule.deny):
+            raise PathDenied("Путь закреплён за другой ролью.")
         if PurePosixPath(rel).suffix not in rule.extensions:
             raise PathDenied("Расширение файла не разрешено роли.")
         limit = self.max_lock_bytes if role is None else self.max_file_bytes

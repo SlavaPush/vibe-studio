@@ -81,7 +81,9 @@ def test_diff_starts_at_merge_base(repo):
         ({".github/workflows/ci.yml": b"name: changed\n"}, ".github/workflows/ci.yml: "),
         ({".github/workflows/office-paths.yml": b"name: new\n"}, ".github/workflows/office-paths.yml: "),
         ({"apps/chat/api/main.py": b"app = 1\n"}, "apps/chat/api/main.py: "),
-        ({"apps/chat/api/tests/test_runs.py": b"def test_x():\n    pass\n"}, "apps/chat/api/tests/test_runs.py: "),
+        ({"apps/chat/web/src/new.spec.ts": b"export {}\n"}, "apps/chat/web/src/new.spec.ts: "),
+        ({"apps/chat/web/vitest.config.ts": b"export default {}\n"}, "apps/chat/web/vitest.config.ts: "),
+        ({"apps/chat/web/e2e/office/support/a.pw.ts": b"export {}\n"}, "apps/chat/web/e2e/office/support/a.pw.ts: "),
         ({"apps/chat/infra/Dockerfile": b"FROM scratch\n"}, "apps/chat/infra/Dockerfile: "),
         ({"apps/chat/api/.env": b"KEY=1\n"}, "apps/chat/api/.env: "),
         ({"apps/chat/web/package.json": b'{"name": "web", "scripts": {"test": "true"}}\n'}, "вне разделов зависимостей"),
@@ -89,7 +91,6 @@ def test_diff_starts_at_merge_base(repo):
             {"apps/chat/api/app/schema.sql": SCHEMA + b"ALTER TABLE users DROP COLUMN source_hash;\n"},
             "неаддитивное изменение схемы",
         ),
-        ({"apps/chat/web/src/App.test.tsx": None}, "apps/chat/web/src/App.test.tsx: "),
         ({"apps/chat/web/src/Quiet.tsx": b"// eslint-disable-next-line\nexport {}\n"}, "eslint-disable"),
         ({"apps/chat/web/src/Bin.ts": b"// \x00\n// @ts-nocheck\nexport {}\n"}, "@ts-nocheck"),
     ],
@@ -115,6 +116,21 @@ def test_server_zone_branch_passes(repo):
             "apps/chat/api/tests/office/test_tsk_1.py": b"def test_new():\n    assert True\n",
         },
         start={"apps/chat/api/app/schema.sql": SCHEMA},
+    )
+    result = check(repo, base, head)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_chat_tests_branch_passes(repo):
+    base, head = branch(
+        repo,
+        {
+            "apps/chat/api/tests/test_models.py": b"def test_models():\n    assert True\n",
+            "apps/chat/web/src/components/chat/ModelSelector.test.tsx": b"export {}\n",
+            "apps/chat/web/src/test/fixtures.ts": b"export const models = []\n",
+            "apps/chat/web/e2e/office/support/mock-api.ts": b"export {}\n",
+            "apps/chat/web/src/App.test.tsx": None,
+        },
     )
     result = check(repo, base, head)
     assert result.returncode == 0, result.stdout + result.stderr

@@ -470,7 +470,7 @@ class Workspace:
                      cwd=path, env=env | COMMIT_ENV)
             os.replace(index, real)
             sha = self.git("rev-parse", "HEAD", cwd=path)
-            names = run_git("diff", "--name-only", "-z", task.base_sha, sha, cwd=path)
+            names = run_git("diff", "--name-only", "-z", "--no-renames", task.base_sha, sha, cwd=path)
         changed = [name for name in names.decode("utf-8").split("\0") if name]
         self.store.record_commit(task_id, sha, changed, role, self.paths.contour(changed))
         return sha
@@ -564,7 +564,7 @@ class Workspace:
             return base, self.git("rev-parse", "HEAD", cwd=path)
 
     def changed_names(self, tree: str, base: str, head: str) -> list[str]:
-        output = run_git("diff", "--name-only", "-z", base, head, cwd=self.task_worktree(tree))
+        output = run_git("diff", "--name-only", "-z", "--no-renames", base, head, cwd=self.task_worktree(tree))
         return [name for name in output.decode("utf-8").split("\0") if name]
 
     def head(self, task_id: str) -> str:

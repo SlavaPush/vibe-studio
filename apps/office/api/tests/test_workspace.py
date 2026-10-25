@@ -9,7 +9,7 @@ from app.branch_check import git_env
 from app.config import REPO_ROOT
 from app.main import create_app
 from app.paths import PathDenied
-from app.schemas import ModelProfile, TaskStatus
+from app.schemas import Contour, ModelProfile, TaskStatus
 from app.tasks import IntakeOutcome
 from app.workspace import Workspace, push_env
 
@@ -322,6 +322,45 @@ def test_commit_rejects_policy_violation(office, app, owner, change):
     assert event.payload["result"] == "denied"
 
 
+def test_backend_task_commits_changed_and_deleted_chat_tests(office, app, owner):
+    [task_id] = office.start_tasks(app, owner)
+    office.set_task(task_id, change_class="backend_api")
+    store = app.state.store
+    workspace = app.state.workspace
+    path = workspace.worktree_path(task_id)
+    write(path, "apps/chat/api/tests/conftest.py", "import pytest\n\nMODELS = []\n")
+    write(path, "apps/chat/web/e2e/office/support/mock-api.ts")
+    (path / "apps/chat/web/src/App.test.tsx").unlink()
+    assert workspace.commit(task_id, "tests")
+    task = store.get_task(task_id)
+    assert task.contour == Contour.server
+    assert workspace.verify_branch(task_id) == []
+    office.set_task(task_id, change_class="frontend_ui")
+    found = workspace.verify_branch(task_id)
+    assert sorted(item.split(":")[0] for item in found) == [
+        "apps/chat/api/tests/conftest.py",
+        "apps/chat/web/e2e/office/support/mock-api.ts",
+        "apps/chat/web/src/App.test.tsx",
+    ]
+
+
+def test_renamed_chat_test_keeps_server_contour(office, app, owner):
+    [task_id] = office.start_tasks(app, owner)
+    office.set_task(task_id, change_class="backend_api")
+    workspace = app.state.workspace
+    path = workspace.worktree_path(task_id)
+    test_file = path / "apps/chat/web/src/App.test.tsx"
+    (path / "apps/chat/web/src/App.disabled.tsx").write_bytes(test_file.read_bytes())
+    test_file.unlink()
+    sha = workspace.commit(task_id, "rename")
+    task = app.state.store.get_task(task_id)
+    assert task.contour == Contour.server
+    assert sorted(workspace.changed_names(task_id, task.base_sha, sha)) == [
+        "apps/chat/web/src/App.disabled.tsx",
+        "apps/chat/web/src/App.test.tsx",
+    ]
+
+
 def test_worktrees_are_sparse_checkouts_of_chat_app(office, app, owner):
     first, second = office.start_tasks(app, owner, 2)
     workspace = app.state.workspace
@@ -419,7 +458,7 @@ def test_restart_keeps_worktree_with_files_outside_app(office, app, origin, owne
         ("apps/chat/web/vite.config.ts", b"export default {}\n", ["запрещена политикой"]),
         (".github/workflows/ci.yml", b"name: changed\n", ["запрещена политикой"]),
         ("apps/office/api/app/paths.py", b"x = 1\n", ["запрещена политикой"]),
-        ("apps/chat/web/src/App.test.tsx", None, ["запрещена политикой"]),
+        ("apps/chat/web/src/App.test.tsx", None, ["серверной зоны"]),
         ("apps/chat/web/src/Quiet.tsx", b"/* eslint-disable */\nexport {}\n", ["eslint-disable"]),
         ("apps/chat/web/src/Lint.tsx", b"export {} // oxlint-disable-line\n", ["oxlint-disable"]),
         ("apps/chat/web/src/Types.ts", b"// @ts-ignore\nexport {}\n", ["@ts-ignore"]),

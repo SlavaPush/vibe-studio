@@ -157,3 +157,26 @@ def test_delete_file(task):
     assert not (root / "apps/chat/web/src/Old.tsx").exists()
     assert developer.delete_file("apps/chat/web/src/App.test.tsx").result == "denied"
     assert (root / "apps/chat/web/src/App.test.tsx").is_file()
+
+
+def test_backend_developer_changes_chat_tests(task, office):
+    _, task_id, root = task
+    frontend = tools(task)
+    office.set_task(task_id, change_class="backend_api")
+    developer = tools(task)
+    qa = tools(task, AgentRole.qa)
+    for path in (
+        "apps/chat/api/tests/test_models.py",
+        "apps/chat/web/src/components/chat/ModelSelector.test.tsx",
+        "apps/chat/web/src/test/fixtures.ts",
+        "apps/chat/web/e2e/office/support/mock-api.ts",
+    ):
+        assert frontend.write_file(path, "x\n").result == "denied"
+        assert qa.write_file(path, "x\n").result == "denied"
+        assert developer.write_file(path, "x\n").result == "ok"
+        assert (root / path).read_text() == "x\n"
+    for path in ("apps/chat/api/tests/office/test_tsk_1.py", "apps/chat/web/e2e/office/a.pw.ts"):
+        assert developer.write_file(path, "x\n").result == "denied"
+    assert frontend.delete_file("apps/chat/web/src/App.test.tsx").result == "denied"
+    assert developer.delete_file("apps/chat/web/src/App.test.tsx").result == "ok"
+    assert not (root / "apps/chat/web/src/App.test.tsx").exists()

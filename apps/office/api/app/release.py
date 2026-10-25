@@ -799,6 +799,16 @@ class ReleaseWorker:
                 f"Изменена схема БД ({SCHEMA_SQL}). Откат Render не возвращает состояние общей БД: "
                 "добавленные таблицы и колонки останутся после отката."
             )
+        tests = [
+            path for path in changed
+            if self.workspace.paths.is_test(path) and self.workspace.file_at(c.base_sha, path) is not None
+        ]
+        deleted = [path for path in tests if self.workspace.file_at(c.head_sha, path) is None]
+        modified = [path for path in tests if path not in deleted]
+        if modified:
+            facts.append(f"Изменены защитные тесты: {', '.join(modified)}.")
+        if deleted:
+            facts.append(f"Удалены тесты: {', '.join(deleted)}.")
         return "\n".join(f"- {fact}" for fact in facts)
 
     def _changed_packages(self, base: str, head: str) -> list[str]:

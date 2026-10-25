@@ -80,11 +80,12 @@ def test_monorepo_paths_allowed(role, path):
         "apps/office/web/src/App.tsx",
         ".github/workflows/ci.yml",
         ".github/workflows/office-paths.yml",
-        "apps/chat/web/src/test/setup.ts",
-        "apps/chat/web/src/App.test.tsx",
-        "apps/chat/api/tests/test_runs.py",
-        "apps/chat/api/tests/conftest.py",
         "apps/chat/api/tests/office/conftest.py",
+        "apps/chat/web/src/new.spec.ts",
+        "apps/chat/web/e2e/office/support/a.pw.ts",
+        "apps/chat/web/tsconfig.app.json",
+        "apps/chat/web/.oxlintrc.json",
+        "apps/chat/web/scripts/check.ts",
         "apps/chat/api/scripts/access_codes.py",
         "apps/chat/api/main.py",
         "apps/chat/api/Dockerfile",
@@ -93,8 +94,6 @@ def test_monorepo_paths_allowed(role, path):
         "apps/chat/web/vite.config.ts",
         "apps/chat/web/yarn.lock",
         "apps/chat/web/e2e/office/a.ts",
-        "apps/chat/web/e2e/office/support/mock-api.ts",
-        "apps/chat/web/e2e/office/support/mock-api.test.ts",
         "apps/chat/web/e2e/smoke.pw.ts",
         "apps/chat/web/.env.local",
         "web/src/App.tsx",
@@ -138,6 +137,64 @@ def test_server_zone_is_written_only_by_backend_developer(path):
         POLICY.check_write(AgentRole.qa, path, 10, ChangeClass.backend_api)
     assert POLICY.contour([path]) == Contour.server
     assert POLICY.contour(["apps/chat/web/src/App.tsx", path]) == Contour.server
+
+
+CHAT_TEST_PATHS = [
+    "apps/chat/api/tests/test_models.py",
+    "apps/chat/api/tests/conftest.py",
+    "apps/chat/api/tests/data/gateway_cases.json",
+    "apps/chat/web/src/components/chat/ModelSelector.test.tsx",
+    "apps/chat/web/src/App.test.tsx",
+    "apps/chat/web/src/test/fixtures.ts",
+    "apps/chat/web/src/test/setup.ts",
+    "apps/chat/web/e2e/office/support/mock-api.ts",
+    "apps/chat/web/e2e/office/support/mock-api.test.ts",
+]
+
+
+@pytest.mark.parametrize("path", CHAT_TEST_PATHS)
+def test_chat_tests_are_written_only_by_backend_developer(path):
+    for size in (10, None):
+        assert POLICY.check_write(AgentRole.developer, path, size, ChangeClass.backend_api) == path
+    assert POLICY.check_any_writer(path, 10) == path
+    assert POLICY.check_any_writer(path, None, ChangeClass.backend_api) == path
+    for role in (AgentRole.developer, AgentRole.qa, None):
+        with pytest.raises(PathDenied):
+            POLICY.check_write(role, path, 10, ChangeClass.frontend_ui)
+    for role in (AgentRole.qa, None):
+        with pytest.raises(PathDenied):
+            POLICY.check_write(role, path, 10, ChangeClass.backend_api)
+    with pytest.raises(PathDenied):
+        POLICY.check_any_writer(path, None, ChangeClass.frontend_ui)
+    assert POLICY.is_test(path)
+    assert POLICY.contour(["apps/chat/web/src/App.tsx", path]) == Contour.server
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "apps/chat/api/tests/office/test_tsk_1.py",
+        "apps/chat/api/tests/office/conftest.py",
+        "apps/chat/api/tests/OFFICE/test_tsk_1.py",
+        "apps/chat/web/e2e/office/a.pw.ts",
+        "apps/chat/web/e2e/office/support/a.pw.ts",
+        "apps/chat/web/src/new.spec.ts",
+        "apps/chat/web/vite.config.ts",
+        "apps/chat/web/vitest.config.ts",
+        "apps/chat/web/tsconfig.app.json",
+        "apps/chat/web/.oxlintrc.json",
+        "apps/chat/web/scripts/check.ts",
+    ],
+)
+def test_developer_cannot_write_qa_tests_and_build_config(path):
+    for change_class in ChangeClass:
+        with pytest.raises(PathDenied):
+            POLICY.check_write(AgentRole.developer, path, 10, change_class)
+
+
+def test_non_test_paths_are_not_tests():
+    for path in ("apps/chat/web/src/App.tsx", "apps/chat/api/app/main.py", "apps/chat/web/e2e/office/a.pw.ts"):
+        assert not POLICY.is_test(path)
 
 
 def test_interface_paths_have_ui_contour():

@@ -23,8 +23,6 @@ deny:
   - apps/chat/web/components.json
   - apps/chat/web/.oxlintrc.json
   - apps/chat/web/scripts/**
-  - apps/chat/web/src/test/**
-  - "**/*.test.*"
   - "**/*.spec.*"
   - "**/migrations/**"
 
@@ -37,6 +35,11 @@ zones:
     - apps/chat/web/package.json
     - apps/chat/web/package-lock.json
     - apps/chat/web/src/components/chat/ModelSelector.tsx
+  tests:
+    - apps/chat/api/tests/**
+    - "**/*.test.*"
+    - apps/chat/web/src/test/**
+    - apps/chat/web/e2e/office/support/**
 
 read_deny:
   - .git
@@ -66,6 +69,11 @@ classes:
         - apps/chat/api/app/**/*.sql
         - apps/chat/api/pyproject.toml
         - apps/chat/contracts/**/*.md
+        - apps/chat/api/tests/**
+        - apps/chat/web/e2e/office/support/**
+      deny:
+        - apps/chat/api/tests/office/**
+        - apps/chat/web/e2e/office/**/*.pw.ts
       extensions: [.ts, .tsx, .css, .json, .svg, .md, .html, .py, .sql, .toml]
     qa:
       write:

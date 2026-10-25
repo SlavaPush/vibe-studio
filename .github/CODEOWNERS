@@ -22,3 +22,4 @@
 
 **/*.test.* @SlavaPush
 /apps/chat/web/src/test/ @SlavaPush
+/apps/chat/web/e2e/office/support/ @SlavaPush
