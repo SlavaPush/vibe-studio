@@ -114,6 +114,14 @@ def test_anthropic_call_uses_effort_schema_and_accounting(setup):
     task = store.get_task(task_id)
     assert (task.usage.model_calls, task.usage.input_tokens, task.usage.output_tokens) == (1, 120, 30)
     assert model_events(store, task_id) == ["developer/implement anthropic/claude-sonnet-5-5"]
+    [event] = [item for item in store.events_after(task_id, 0, 1000) if item.tool == "model"]
+    assert event.payload == {
+        "arguments": "developer/implement anthropic/claude-sonnet-5-5",
+        "result": "ok",
+        "provider": "anthropic",
+        "model": "claude-sonnet-5-5",
+        "effort": "high",
+    }
 
 
 def test_fallback_is_counted_as_separate_call(setup):
@@ -132,6 +140,8 @@ def test_fallback_is_counted_as_separate_call(setup):
         "critic/review anthropic/claude-sonnet-5-5",
         "critic/review openai/gpt-6.1-sol",
     ]
+    fallback = [item.payload for item in store.events_after(task_id, 0, 1000) if item.tool == "model"][-1]
+    assert (fallback["provider"], fallback["model"], fallback["effort"]) == ("openai", "gpt-6.1-sol", "high")
 
 
 def test_qa_routes(setup):

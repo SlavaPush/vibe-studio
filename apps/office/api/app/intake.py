@@ -155,10 +155,14 @@ class IntakeFilter:
         result = reply.classification
         accepted = result.related_to_vibe_chat and result.change_class == "frontend_ui"
         logger.info("intake %s: %s (%s)", model, result.change_class, result.reason)
+        provider, name = model.split("/", 1)
         return IntakeOutcome(
             accepted=accepted,
             reason=None if accepted else CLASS_REASONS.get(result.change_class, CLASS_REASONS["other"]),
             model_calls=calls[0],
             input_tokens=reply.input_tokens,
             output_tokens=reply.output_tokens,
+            provider=provider,
+            model=name,
+            effort=self._effort(model, route["effort"]),
         )

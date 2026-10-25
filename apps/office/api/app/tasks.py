@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import partial
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
@@ -31,6 +31,9 @@ from app.schemas import (
     TaskEventType,
     TaskStatus,
 )
+
+if TYPE_CHECKING:
+    from app.models_gateway import Target
 
 logger = logging.getLogger("office.tasks")
 
@@ -101,6 +104,9 @@ class IntakeOutcome:
     model_calls: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    provider: str | None = None
+    model: str | None = None
+    effort: str | None = None
 
 
 def new_id(prefix: str) -> str:
@@ -393,7 +399,7 @@ class TaskStore:
             )
             return self.load_task(conn, task_id)
 
-    def reserve_model_call(self, task_id: str, role: AgentRole, step: str, target: str) -> None:
+    def reserve_model_call(self, task_id: str, role: AgentRole, step: str, target: "Target") -> None:
         with self.db.locked_transaction() as conn:
             task = self.load_task(conn, task_id)
             if task is None:
@@ -410,7 +416,13 @@ class TaskStore:
                 conn,
                 task_id,
                 TaskEventType.tool_called,
-                {"arguments": f"{role.value}/{step} {target}", "result": "ok"},
+                {
+                    "arguments": f"{role.value}/{step} {target.name}",
+                    "result": "ok",
+                    "provider": target.provider,
+                    "model": target.model,
+                    "effort": target.effort,
+                },
                 role=role,
                 tool="model",
             )
@@ -799,9 +811,10 @@ class TaskStore:
                     "output_tokens": outcome.output_tokens,
                 },
             )
-            self.record_event(
-                conn, task_id, TaskEventType.task_created, {"title": title, "profile": profile.value}
-            )
+            created: dict[str, Any] = {"title": title, "profile": profile.value}
+            if outcome.model is not None:
+                created |= {"provider": outcome.provider, "model": outcome.model, "effort": outcome.effort}
+            self.record_event(conn, task_id, TaskEventType.task_created, created)
             if not outcome.accepted:
                 self.record_event(conn, task_id, TaskEventType.task_rejected, {"reason": outcome.reason})
             task = self.load_task(conn, task_id)

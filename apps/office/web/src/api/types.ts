@@ -183,7 +183,7 @@ export interface TaskEvent {
   event_id: number
   task_id: string
   seq: number
-  type: TaskEventType
+  type: TaskEventType | (string & Record<never, never>)
   timestamp: string
   role: AgentRole | null
   tool: string | null

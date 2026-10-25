@@ -89,6 +89,22 @@ export const EVENT_TYPE_LABELS: Record<TaskEventType, string> = {
   rework_started: 'Доработка после отката',
 }
 
+export function eventTypeLabel(type: string): string {
+  return (EVENT_TYPE_LABELS as Record<string, string | undefined>)[type] ?? type
+}
+
+export const RENDER_STATUS_LABELS: Record<string, string> = {
+  requested: 'запрошен',
+  created: 'создан',
+  build_in_progress: 'сборка',
+  update_in_progress: 'обновление',
+  live: 'опубликован',
+  build_failed: 'ошибка сборки',
+  update_failed: 'ошибка обновления',
+  canceled: 'отменён',
+  deactivated: 'деактивирован',
+}
+
 export const FAILURE_KIND_LABELS: Record<FailureKind, string> = {
   checks_failed: 'Обязательные проверки PR не пройдены, PR закрыт.',
   pr_rejected: 'Агент ревью отклонил PR.',
