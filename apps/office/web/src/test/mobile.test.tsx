@@ -74,6 +74,32 @@ describe('выбор задачи на узкой ширине', () => {
     expect(button).toHaveFocus()
   })
 
+  it.each([true, false])(
+    'кнопка задачи в очереди выпуска открывает карточку и переводит фокус на заголовок (узкий экран: %s)',
+    async (narrow) => {
+      backend()
+      viewport(narrow)
+      await ready()
+      const target = tasks.find(
+        (task) => task.id === releases.find((release) => release.status === 'pending')?.task_id,
+      ) as Task
+      const open = () =>
+        within(screen.getByRole('region', { name: 'Очередь выпуска' })).getByRole('button', {
+          name: `Открыть задачу «${target.title}»`,
+        })
+      open().focus()
+      fireEvent.click(open())
+      expect(await screen.findByRole('heading', { level: 2, name: target.title })).toHaveFocus()
+      expect(within(stack()).getByRole('button', { name: new RegExp(target.title) })).toHaveAttribute(
+        'aria-current',
+        'true',
+      )
+      open().focus()
+      fireEvent.click(open())
+      expect(screen.getByRole('heading', { level: 2, name: target.title })).toHaveFocus()
+    },
+  )
+
   it('создание задачи через форму не переводит фокус на карточку', async () => {
     const api = backend()
     viewport(true)

@@ -279,6 +279,10 @@ function App() {
     dispatch({ type: 'tasks', tasks: [item] })
     if (item.status !== 'rejected') dispatch({ type: 'select', id: item.id })
   }
+  const select = (id: string, focus: boolean) => {
+    dispatch({ type: 'select', id })
+    if (focus) setHeadingFocus((count) => count + 1)
+  }
   const releaseChanged = (release: ReleaseCandidate) => {
     refresh(loadReleases)
     refresh(() => loadTask(release.task_id))
@@ -355,10 +359,7 @@ function App() {
             tasks={state.tasks}
             slots={state.slots}
             selectedId={state.selectedId}
-            onSelect={(id) => {
-              dispatch({ type: 'select', id })
-              if (narrow()) setHeadingFocus((count) => count + 1)
-            }}
+            onSelect={(id) => select(id, narrow())}
           />
           {task && (
             <TaskCard
@@ -374,10 +375,12 @@ function App() {
         </div>
         <ReleaseQueue
           releases={state.releases}
+          tasks={state.tasks}
           queue={state.queue}
           participant={participant}
           run={run}
           onRefresh={releaseChanged}
+          onOpenTask={(id) => select(id, true)}
         />
       </main>
     </div>

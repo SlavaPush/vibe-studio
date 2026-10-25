@@ -602,17 +602,56 @@ function renderQueue(
   queue: ReleaseQueueState | null = freeQueue,
 ) {
   const onRefresh = vi.fn()
-  const view = render(
-    <ReleaseQueue releases={list} queue={queue} participant={participant} run={direct} onRefresh={onRefresh} />,
+  const onOpenTask = vi.fn()
+  const queueView = (next: ReleaseCandidate[]) => (
+    <ReleaseQueue
+      releases={next}
+      tasks={tasks}
+      queue={queue}
+      participant={participant}
+      run={direct}
+      onRefresh={onRefresh}
+      onOpenTask={onOpenTask}
+    />
   )
-  const rerender = (next: ReleaseCandidate[]) =>
-    view.rerender(
-      <ReleaseQueue releases={next} queue={queue} participant={participant} run={direct} onRefresh={onRefresh} />,
-    )
-  return { onRefresh, rerender }
+  const view = render(queueView(list))
+  const rerender = (next: ReleaseCandidate[]) => view.rerender(queueView(next))
+  return { onRefresh, onOpenTask, rerender }
 }
 
 describe('ReleaseQueue', () => {
+  it('показывает название задачи кнопкой и ссылку на PR', () => {
+    fakeApi()
+    const { onOpenTask } = renderQueue(maria, releases)
+    const task = tasks.find((item) => item.id === pending.task_id) as Task
+    const queueSection = screen.getByRole('region', { name: 'Очередь выпуска' })
+    const open = within(queueSection).getByRole('button', { name: `Открыть задачу «${task.title}»` })
+    expect(open).toHaveTextContent(task.title)
+    const link = within(queueSection).getByRole('link', { name: 'PR #12' })
+    expect(link).toHaveAttribute('href', 'https://github.com/SlavaPush/vibe-studio/pull/12')
+    expect(link).toHaveAttribute('target', '_blank')
+    expect(link).toHaveAttribute('rel', 'noreferrer')
+    fireEvent.click(open)
+    expect(onOpenTask).toHaveBeenCalledWith(task.id)
+  })
+
+  it('задача вне списка выводится идентификатором без кнопки, PR без номера — «PR»', () => {
+    fakeApi()
+    const other: ReleaseCandidate = { ...published, pr_url: 'https://github.com/SlavaPush/vibe-studio/commit/abc' }
+    renderQueue(maria, [pending, other])
+    const history = screen.getByRole('region', { name: 'История выпусков' })
+    expect(within(history).getByText(`Задача ${published.task_id}`)).toBeInTheDocument()
+    expect(within(history).queryByRole('button', { name: /Открыть задачу/ })).not.toBeInTheDocument()
+    expect(within(history).getByRole('link', { name: 'PR' })).toHaveAttribute('href', other.pr_url)
+  })
+
+  it('без pr_url ссылки на PR нет', () => {
+    fakeApi()
+    renderQueue(maria, [{ ...pending, pr_url: null }])
+    const queueSection = screen.getByRole('region', { name: 'Очередь выпуска' })
+    expect(within(queueSection).queryByRole('link')).not.toBeInTheDocument()
+  })
+
   it('участник не видит кнопок отката и возобновления, подтверждения выпуска нет', () => {
     fakeApi()
     renderQueue(maria, [...releases, blockedRelease], releaseQueue)

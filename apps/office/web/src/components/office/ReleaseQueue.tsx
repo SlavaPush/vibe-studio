@@ -6,6 +6,7 @@ import type {
   ReleaseDecision,
   ReleaseQueueState,
   ReleaseStatus,
+  Task,
   VerifyResult,
 } from '@/api/types'
 import { ConfirmButton, DecisionMessage } from '@/components/office/DecisionControls'
@@ -30,18 +31,22 @@ const REASON_LIMIT = 500
 
 interface ReleaseQueueProps {
   releases: ReleaseCandidate[]
+  tasks: Task[]
   queue: ReleaseQueueState | null
   participant: Participant
   run: Run
   onRefresh: (release: ReleaseCandidate) => void
+  onOpenTask: (id: string) => void
 }
 
 interface ReleaseItemProps {
   release: ReleaseCandidate
+  task: Task | undefined
   queue: ReleaseQueueState | null
   participant: Participant
   run: Run
   onRefresh: (release: ReleaseCandidate) => void
+  onOpenTask: (id: string) => void
 }
 
 function useReleaseDecision(release: ReleaseCandidate, run: Run, onRefresh: (release: ReleaseCandidate) => void) {
@@ -57,7 +62,12 @@ function verifyText(verify: VerifyResult): string {
   return `не пройдена: ${fault}${verify.error ?? 'нет данных'}`
 }
 
-function ReleaseItem({ release, queue, participant, run, onRefresh }: ReleaseItemProps) {
+function prLabel(url: string): string {
+  const number = /\/pull\/(\d+)/.exec(url)?.[1]
+  return number ? `PR #${number}` : 'PR'
+}
+
+function ReleaseItem({ release, task, queue, participant, run, onRefresh, onOpenTask }: ReleaseItemProps) {
   const decision = useReleaseDecision(release, run, onRefresh)
   const reasonId = useId()
   const [reason, setReason] = useState('')
@@ -82,7 +92,23 @@ function ReleaseItem({ release, queue, participant, run, onRefresh }: ReleaseIte
         )}
         {release.is_published && <Badge variant="outline">Опубликован сейчас</Badge>}
         {active && <Badge variant="outline">Выполняется</Badge>}
-        <span className="text-muted-foreground">Задача {release.task_id}</span>
+        {task ? (
+          <button
+            type="button"
+            className="tap-target min-w-0 text-left underline"
+            aria-label={`Открыть задачу «${task.title}»`}
+            onClick={() => onOpenTask(task.id)}
+          >
+            {task.title}
+          </button>
+        ) : (
+          <span className="text-muted-foreground">Задача {release.task_id}</span>
+        )}
+        {release.pr_url && (
+          <a className="tap-target underline" href={release.pr_url} target="_blank" rel="noreferrer">
+            {prLabel(release.pr_url)}
+          </a>
+        )}
       </div>
       <dl className="grid grid-cols-1 gap-x-3 gap-y-1 sm:grid-cols-[auto_minmax(0,1fr)]">
         <dt className="text-muted-foreground">Commit</dt>
@@ -291,7 +317,7 @@ const REVERT_LABELS: Record<NonNullable<ReleaseCandidate['revert']>['status'], s
   merged: 'кандидат исправления создан',
 }
 
-export function ReleaseQueue({ releases, queue, participant, run, onRefresh }: ReleaseQueueProps) {
+export function ReleaseQueue({ releases, tasks, queue, participant, run, onRefresh, onOpenTask }: ReleaseQueueProps) {
   const pending = releases.filter((release) => QUEUE_STATUSES.includes(release.status))
   const history = releases.filter((release) => !QUEUE_STATUSES.includes(release.status))
   const isAdmin = participant.role === 'admin'
@@ -299,10 +325,12 @@ export function ReleaseQueue({ releases, queue, participant, run, onRefresh }: R
     <ReleaseItem
       key={release.id}
       release={release}
+      task={tasks.find((task) => task.id === release.task_id)}
       queue={queue}
       participant={participant}
       run={run}
       onRefresh={onRefresh}
+      onOpenTask={onOpenTask}
     />
   )
 
