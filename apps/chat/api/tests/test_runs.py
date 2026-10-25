@@ -1,3 +1,5 @@
+import asyncio
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -6,6 +8,7 @@ import psycopg
 from conftest import ORIGIN, FakeProviders, FakeStorage, client_for, login, make_app, seed_run, seeded_user, sql
 from fastapi.testclient import TestClient
 
+from app import events, runs
 from app.policy import CHECK_UNAVAILABLE_TEXT, CLARIFY_TEXT, REFUSAL_TEXT
 
 
@@ -208,6 +211,63 @@ def test_idempotent_retry_returns_same_run_and_single_call(db):
         assert sql(db, "SELECT count(*) FROM messages WHERE role = 'user'") == [(1,)]
 
 
+def wait_for_text_calls(providers: FakeProviders, count: int) -> None:
+    deadline = time.monotonic() + 5
+    while providers.count("text") < count and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert providers.count("text") == count
+
+
+def test_concurrent_double_submit_creates_single_run_and_call(db, monkeypatch):
+    providers = FakeProviders()
+    original = runs.existing_run
+    gate: dict = {}
+
+    async def gated(conn, user_id, key, digest):
+        result = await original(conn, user_id, key, digest)
+        if len(gate["initial"]) < 2:
+            gate["initial"].append(result)
+            if len(gate["initial"]) == 2:
+                gate["both"].set()
+            await asyncio.wait_for(gate["both"].wait(), 5)
+        return result
+
+    monkeypatch.setattr(runs, "existing_run", gated)
+    with client_for(make_app(db, providers)) as client:
+        user = login(client)
+        for round_number in range(1, 4):
+            gate.update(initial=[], both=asyncio.Event())
+            providers.fail("text", "hang")
+            conversation_id = user.conversation()
+            key = str(uuid.uuid4())
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                responses = list(pool.map(lambda _: user.send(conversation_id, "Привет", key=key), range(2)))
+            assert gate["initial"] == [None, None]
+            assert sorted(response.status_code for response in responses) == [200, 202], [r.text for r in responses]
+            run_id = responses[0].json()["id"]
+            assert responses[1].json()["id"] == run_id
+            assert sql(db, "SELECT id::text FROM runs WHERE conversation_id = %s", (conversation_id,)) == [(run_id,)]
+            assert sql(
+                db, "SELECT count(*) FROM messages WHERE run_id = %s AND role = 'user'", (run_id,)
+            ) == [(1,)]
+            assert sql(
+                db, "SELECT count(*) FROM budget_reservations WHERE run_id = %s AND purpose = 'run'", (run_id,)
+            ) == [(1,)]
+
+            wait_for_text_calls(providers, round_number)
+            busy = user.send(conversation_id, "Привет")
+            assert busy.status_code == 429
+            assert busy.json()["code"] == "rate_limited"
+            conflict = user.send(conversation_id, "Другой текст", key=key)
+            assert conflict.status_code == 409
+            assert conflict.json()["code"] == "idempotency_conflict"
+
+            assert user.post(f"/api/runs/{run_id}/cancel").status_code == 202
+            assert user.wait(run_id)["status"] == "cancelled"
+            assert providers.count("text") == round_number
+        assert sql(db, "SELECT count(*) FROM runs") == [(3,)]
+
+
 def test_second_active_run_is_rate_limited_and_cancel_works(db):
     providers = FakeProviders()
     providers.fail("text", "hang")
@@ -270,6 +330,54 @@ def test_events_replay_after_last_event_id(db):
             f"/api/runs/{run['id']}/events?after_seq=3", headers=user.headers()
         )
         assert by_query.text.count("id: ") == len(events) - 3
+
+
+def test_reconnect_to_active_run_continues_after_last_event_id(db, monkeypatch):
+    providers = FakeProviders()
+    providers.fail("text", "hang")
+    original = events.EventBus.wait
+    waiting = threading.Event()
+    watched: dict = {}
+
+    async def signalling(self, run_id, timeout):
+        if run_id == watched.get("run_id"):
+            waiting.set()
+        return await original(self, run_id, timeout)
+
+    monkeypatch.setattr(events.EventBus, "wait", signalling)
+    with client_for(make_app(db, providers)) as client:
+        user = login(client)
+        conversation_id = user.conversation()
+        run_id = user.send(conversation_id, "Привет").json()["id"]
+        wait_for_text_calls(providers, 1)
+
+        assert user.get(f"/api/runs/{run_id}").json()["status"] == "running"
+        messages = user.get(f"/api/conversations/{conversation_id}/messages").json()
+        assert messages["active_run_id"] == run_id
+        stored = [row[0] for row in sql(db, "SELECT seq FROM run_events WHERE run_id = %s ORDER BY seq", (run_id,))]
+        last = stored[-1]
+        assert stored == list(range(1, last + 1))
+
+        watched["run_id"] = run_id
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pending = pool.submit(user.events, run_id, last)
+            try:
+                assert waiting.wait(5)
+                assert not pending.done()
+                assert user.post(f"/api/runs/{run_id}/cancel").status_code == 202
+                resumed = pending.result(timeout=10)
+            finally:
+                if not pending.done():
+                    sql(db, "DELETE FROM sessions WHERE user_id = %s", (user.id,))
+
+        assert resumed
+        assert all(event["seq"] > last for event in resumed)
+        assert [event["seq"] for event in resumed] == list(range(last + 1, last + 1 + len(resumed)))
+        assert resumed[-1]["type"] == "failed"
+        assert resumed[-1]["payload"]["error"]["code"] == "run_cancelled"
+        full = user.events(run_id)
+        assert [event for event in full if event["seq"] <= last] + resumed == full
+        assert [event["seq"] for event in full[:last]] == stored
 
 
 def test_user_b_gets_not_found_for_objects_of_user_a(db):

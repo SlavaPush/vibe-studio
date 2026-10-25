@@ -15,6 +15,7 @@ from conftest import (
 )
 
 from app import retry
+from app.routing import FALLBACK_REASON, switch_text
 
 
 def attempts(db, run_id: str, purpose: str) -> list[tuple]:
@@ -67,6 +68,30 @@ def test_confirmed_refusal_is_retried_then_falls_back(db, error):
     assert switched[0]["payload"]["switch_reason"] == "provider_fallback"
     selected = [event for event in events if event["type"] == "model_selected"]
     assert selected[0]["payload"]["assistant_message_id"] == selected[1]["payload"]["assistant_message_id"]
+
+
+def test_fallback_system_message_is_stored_in_history(db):
+    providers = FakeProviders()
+    error = connect_error()
+    providers.fail("text:claude-haiku-5-5", error, error, error)
+    with client_for(make_app(db, providers)) as client:
+        user = login(client)
+        conversation_id = user.conversation()
+        run = user.ask("Привет", conversation_id=conversation_id)
+        assert run["status"] == "completed"
+        assert run["switch_reason"] == "provider_fallback"
+        before = user.get(f"/api/conversations/{conversation_id}/messages").json()
+        system = [item for item in before["items"] if item["role"] == "system"]
+        assert [(item["kind"], item["text"]) for item in system] == [
+            ("model_switched", switch_text("gpt-6-luna", FALLBACK_REASON))
+        ]
+        assistant = [item for item in before["items"] if item["role"] == "assistant"]
+        assert [item["text"] for item in assistant] == ["Ответ модели."]
+
+    with client_for(make_app(db)) as client:
+        user.client = client
+        after = user.get(f"/api/conversations/{conversation_id}/messages").json()
+        assert after == before
 
 
 def test_refusal_then_success_on_retry(db):
