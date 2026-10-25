@@ -64,16 +64,13 @@ export function createChatController(
   let creating: Promise<string | null> | null = null
   let createFailure: { key: string; error: ApiError } | null = null
   let persisted: Pick<ChatState, 'queue' | 'queuePause' | 'trackedRunId'> | null = null
-  let hadSession = false
 
   store.subscribe(() => {
     const { session, queue, queuePause, trackedRunId } = store.getState()
     if (!session) {
       persisted = null
-      if (hadSession) endSession()
       return
     }
-    hadSession = true
     if (
       persisted &&
       persisted.queue === queue &&
@@ -101,18 +98,13 @@ export function createChatController(
     store.signIn(session, readQueue(session.user_id))
   }
 
-  function endSession() {
-    hadSession = false
+  function signOut() {
     generation += 1
     restoring = false
     creating = null
     for (const runId of [...sources.keys()]) close(runId)
     loading.clear()
     api.forgetSession()
-  }
-
-  function signOut() {
-    endSession()
     store.signOut()
   }
 
