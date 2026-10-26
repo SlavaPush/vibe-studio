@@ -10,7 +10,8 @@ Group=office
 WorkingDirectory=/home/office/vibe-studio/apps/office/api
 EnvironmentFile=/home/office/office/.env
 EnvironmentFile=/home/office/office/vps.env
-ExecStart=/home/office/.local/bin/uv run --no-sync uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8001
+ExecStart=/home/office/.local/bin/uv run --no-sync uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8001 --timeout-graceful-shutdown 10
+TimeoutStopSec=30
 Restart=always
 RestartSec=5
 
