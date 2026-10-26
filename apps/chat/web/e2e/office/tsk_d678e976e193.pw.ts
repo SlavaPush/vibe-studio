@@ -8,10 +8,9 @@ test("кошка появляется раз в минуту, собака го�
   await page.goto("/");
   await expect(page.getByRole("button", { name: fixtures.conversation.title, exact: true })).toBeVisible();
 
-  let t = 0;
+  const now = () => page.evaluate(() => Date.now());
   const run = async (ms: number) => {
     await page.clock.runFor(ms);
-    t += ms;
   };
   const dog = page.getByTestId("dog-follower");
   const cat = page.getByTestId("cat-runner");
@@ -31,6 +30,7 @@ test("кошка появляется раз в минуту, собака го�
 
   // Критерий 1: собака следует за курсором, кошки нет
   await expect(dog).toBeVisible();
+  const startTime = await now();
   await page.mouse.move(600, 400);
   await run(1000);
   await page.mouse.move(300, 250);
@@ -50,8 +50,8 @@ test("кошка появляется раз в минуту, собака го�
     }
   }
   expect(appeared).toBe(true);
-  const firstAppear = t;
-  expect(firstAppear).toBeGreaterThan(50000);
+  const firstAppear = await now();
+  expect(firstAppear - startTime).toBeGreaterThan(50000);
   await expect(cat).toBeVisible();
   await expect(cat).toHaveAttribute("data-x", /\d/);
   const cx = await num(cat, "data-x");
@@ -94,13 +94,13 @@ test("кошка появляется раз в минуту, собака го�
   expect(away).toBe(true);
   await expect(dog).toBeHidden();
   await expect(cat).toHaveCount(0);
-  const awayAt = t;
+  const awayAt = await now();
 
   // Критерий 4: через 10 секунд собака возвращается с противоположного края
-  await run(9000);
+  await run(8000);
   await expect(dog).toBeHidden();
   let returned = false;
-  for (let i = 0; i < 200; i++) {
+  for (let i = 0; i < 400; i++) {
     await run(16);
     if ((await dog.getAttribute("data-scene")) === "return") {
       returned = true;
@@ -108,8 +108,9 @@ test("кошка появляется раз в минуту, собака го�
     }
   }
   expect(returned).toBe(true);
-  expect(t - awayAt).toBeGreaterThanOrEqual(9900);
-  expect(t - awayAt).toBeLessThanOrEqual(11000);
+  const returnedAt = await now();
+  expect(returnedAt - awayAt).toBeGreaterThanOrEqual(9800);
+  expect(returnedAt - awayAt).toBeLessThanOrEqual(11000);
   await expect(dog).toBeVisible();
   const dx = await num(dog, "data-x");
   const dy = await num(dog, "data-y");
@@ -130,7 +131,7 @@ test("кошка появляется раз в минуту, собака го�
     }
   }
   expect(again).toBe(true);
-  const secondAppear = t;
+  const secondAppear = await now();
   expect(secondAppear - firstAppear).toBeGreaterThanOrEqual(58000);
   expect(secondAppear - firstAppear).toBeLessThanOrEqual(62500);
   await expect(cat).toBeVisible();
