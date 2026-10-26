@@ -412,6 +412,17 @@ export function createChatController(
       await restoreQueue()
     },
 
+    async signOutUser() {
+      const activeId = store.getState().activeConversationId
+      try {
+        await api.logout()
+      } catch (error) {
+        handleError(error, activeId)
+        return
+      }
+      signOut()
+    },
+
     async selectConversation(id: string) {
       store.selectConversation(id)
       rememberActive(id)

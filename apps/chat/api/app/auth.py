@@ -188,3 +188,20 @@ async def create_session(body: DemoSessionRequest, request: Request, response: R
 @router.get("/api/me")
 async def me(user: CurrentUser = Depends(current_user)) -> Session:
     return Session(user_id=user.user_id, expires_at=user.expires_at, csrf_token=user.csrf_token)
+
+
+@router.post("/api/logout")
+@router.post("/api/auth/logout", include_in_schema=False)
+@router.post("/auth/logout", include_in_schema=False)
+async def logout(request: Request, response: Response, user: CurrentUser = Depends(mutating_user)) -> dict:
+    token = request.cookies.get(COOKIE, "")
+    async with request.app.state.pool.connection() as conn:
+        await conn.execute("DELETE FROM sessions WHERE token_hash = %s", (token_hash(token),))
+    response.delete_cookie(
+        COOKIE,
+        path="/",
+        httponly=True,
+        secure=request.app.state.settings.cookie_secure,
+        samesite="lax",
+    )
+    return {}

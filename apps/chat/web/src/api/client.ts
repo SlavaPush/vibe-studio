@@ -90,6 +90,7 @@ export function createApiClient(fetchImpl: typeof fetch = (...args) => fetch(...
     me: () => request<Session>('GET', '/api/me').then(remember),
     createSession: (code: string) =>
       request<Session>('POST', '/api/demo-session', { code }).then(remember),
+    logout: () => request<Record<string, never>>('POST', '/api/logout'),
     forgetSession: () => {
       csrfToken = null
     },
