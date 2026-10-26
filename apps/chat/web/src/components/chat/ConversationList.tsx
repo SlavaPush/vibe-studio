@@ -78,9 +78,7 @@ export function ConversationList({
                 onClick={() => onSelect(conversation.id)}
                 className="min-w-0 flex-1 justify-start"
               >
-                <span className="min-w-0 truncate" title={conversation.title}>
-                  {conversation.title}
-                </span>
+                <span className="truncate">{conversation.title}</span>
               </Button>
               <Button
                 variant="ghost"
