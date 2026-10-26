@@ -150,6 +150,41 @@
   animation: dog-bounce 0.35s ease-in-out infinite alternate;
 }
 
+.cat-runner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 56px;
+  height: 56px;
+  z-index: 40;
+  pointer-events: none;
+  user-select: none;
+  will-change: transform;
+  /* До первого кадра кошка находится за краем экрана. */
+  transform: translate3d(-200px, -200px, 0);
+}
+
+.cat-runner .cat-flip {
+  width: 100%;
+  height: 100%;
+  animation: dog-bounce 0.3s ease-in-out infinite alternate;
+}
+
+.cat-runner svg {
+  display: block;
+  overflow: visible;
+}
+
+.cat-runner .cat-leg {
+  transform-box: fill-box;
+  transform-origin: 50% 0;
+  animation: dog-leg-swing 0.3s ease-in-out infinite alternate;
+}
+
+.cat-runner .cat-leg-b {
+  animation-direction: alternate-reverse;
+}
+
 @keyframes dog-leg-swing {
   from {
     transform: rotate(-30deg);
