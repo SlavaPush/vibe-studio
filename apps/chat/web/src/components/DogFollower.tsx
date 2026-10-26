@@ -28,6 +28,8 @@ const DOG_RUN_SPEED = 400
 const FACE_OFF_S = 0.6
 // Страховка: погоня не длится дольше этого времени.
 const CHASE_MAX_S = 12
+// Страховка: возвращение собаки не длится дольше этого времени, даже если курсор движется.
+const RETURN_MAX_S = 5
 
 function randomBetween(min: number, max: number) {
   return min + Math.random() * Math.max(0, max - min)
@@ -160,6 +162,9 @@ export function DogFollower() {
     let dir: Vec = { x: 1, y: 0 }
     let faceOffTime = 0
     let chaseTime = 0
+    let returnTime = 0
+    // Минутный таймер сработал, когда сцена ещё шла: запустить кошку сразу после возврата в покой.
+    let pendingScene = false
 
     const render = () => {
       root.style.transform = `translate3d(${pos.x - SIZE / 2}px, ${pos.y - SIZE / 2}px, 0)`
@@ -205,6 +210,7 @@ export function DogFollower() {
 
     const startScene = () => {
       if (phase !== 'idle') return
+      pendingScene = false
       const w = window.innerWidth
       const h = window.innerHeight
       originEdge = Math.floor(Math.random() * 4)
@@ -243,6 +249,7 @@ export function DogFollower() {
       pos.y = start.y
       if (!cursor) cursor = { x: w / 2, y: h / 2 }
       phase = 'return'
+      returnTime = 0
       sitting = false
       setState('running')
       root.style.visibility = ''
@@ -257,7 +264,7 @@ export function DogFollower() {
       awayTimer = setTimeout(returnDog, AWAY_MS)
     }
 
-    const followStep = () => {
+    const followStep = (dt: number) => {
       if (!cursor) return
       const dx = cursor.x - pos.x
       const dy = cursor.y - pos.y
@@ -270,10 +277,14 @@ export function DogFollower() {
       pos.y += uy * step
       if (Math.abs(dx) > 2) setFacing(dx > 0 ? 'right' : 'left')
       render()
-      if (phase === 'return' && Math.abs(dist - GAP) < 6) {
-        phase = 'idle'
-        armIdle()
-        render()
+      if (phase === 'return') {
+        returnTime += dt
+        // Возврат завершается по сближению или по тайм-ауту: при движущемся курсоре сближение может не наступить.
+        if (Math.abs(dist - GAP) < 6 || returnTime > RETURN_MAX_S) {
+          phase = 'idle'
+          armIdle()
+          render()
+        }
       }
     }
 
@@ -282,9 +293,13 @@ export function DogFollower() {
       last = ts
 
       if (phase === 'idle') {
-        if (cursor && !sitting) followStep()
+        if (pendingScene) {
+          startScene()
+        } else if (cursor && !sitting) {
+          followStep(dt)
+        }
       } else if (phase === 'return') {
-        followStep()
+        followStep(dt)
       } else if (phase === 'approach') {
         const remaining = Math.hypot(cat.x - pos.x, cat.y - pos.y) - stopDist
         const step = APPROACH_SPEED * dt
@@ -323,7 +338,10 @@ export function DogFollower() {
 
     render()
     window.addEventListener('mousemove', onMove, { passive: true })
-    const sceneTimer = setInterval(startScene, SCENE_INTERVAL_MS)
+    const sceneTimer = setInterval(() => {
+      if (phase === 'idle') startScene()
+      else pendingScene = true
+    }, SCENE_INTERVAL_MS)
     if (typeof window.requestAnimationFrame === 'function') {
       frame = window.requestAnimationFrame(tick)
     }
