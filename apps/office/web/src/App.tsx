@@ -42,6 +42,7 @@ import { Button } from '@/components/ui/button'
 import { AboutDialog } from '@/components/office/AboutDialog'
 import { connectOfficeEvents, type OfficeEvents, type StreamState } from '@/lib/events'
 import { initialOfficeState, officeReducer } from '@/lib/office-state'
+import { nextPulse, type TaskPulse } from '@/lib/pipeline'
 import { clearAwaitedDecisions } from '@/lib/use-decision'
 
 const COALESCE_MS = 300
@@ -84,7 +85,7 @@ function App() {
   const [leaving, setLeaving] = useState(false)
   const [logoutError, setLogoutError] = useState<string | null>(null)
   const [headingFocus, setHeadingFocus] = useState(0)
-  const [lastEvents, setLastEvents] = useState<Record<string, number>>({})
+  const [pulses, setPulses] = useState<Record<string, TaskPulse>>({})
   const generation = useRef(0)
   const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>())
   const slotsSeq = useRef(0)
@@ -120,7 +121,7 @@ function App() {
     timers.current.clear()
     clearAwaitedDecisions()
     dispatch({ type: 'reset' })
-    setLastEvents({})
+    setPulses({})
     setParticipant(null)
     setGateNotice(notice)
     setLeaving(false)
@@ -207,9 +208,11 @@ function App() {
 
   const onEvent = useCallback(
     (event: TaskEvent) => {
-      setLastEvents((current) =>
-        (current[event.task_id] ?? 0) >= event.event_id ? current : { ...current, [event.task_id]: event.event_id },
-      )
+      setPulses((current) => {
+        const previous = current[event.task_id]
+        const next = nextPulse(previous, event)
+        return next === previous ? current : { ...current, [event.task_id]: next }
+      })
       schedule(`task:${event.task_id}`, () => loadTask(event.task_id))
       if (event.type === 'status_changed') schedule('slots', loadSlots)
       if (touchesReleases(event)) schedule('releases', loadReleases)
@@ -350,6 +353,7 @@ function App() {
             tasks={state.tasks}
             slots={state.slots}
             selectedId={state.selectedId}
+            pulses={pulses}
             onSelect={(id) => select(id, narrow())}
           />
           {task && (
@@ -359,7 +363,7 @@ function App() {
               participant={participant}
               run={run}
               onRefresh={() => refresh(() => loadTask(task.id))}
-              lastEventId={lastEvents[task.id] ?? 0}
+              lastEventId={pulses[task.id]?.eventId ?? 0}
               releases={state.releases.filter((release) => release.task_id === task.id)}
             />
           )}

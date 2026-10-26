@@ -4,8 +4,11 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { AGENT_ROLE_LABELS, CHECK_STATUS_LABELS, eventTypeLabel, formatDateTime } from '@/lib/labels'
 import {
+  QUIET_MS,
   STAGE_STATE_LABELS,
   describeEvent,
+  formatElapsed,
+  type Activity,
   describeEventDetails,
   handoffText,
   type AgentKey,
@@ -18,6 +21,7 @@ import {
   type Stage,
   type StageState,
 } from '@/lib/pipeline'
+import { useNow } from '@/lib/use-now'
 
 const linkClass = 'tap-target w-fit underline underline-offset-4'
 
@@ -245,6 +249,28 @@ export function PipelineBoard({ pipeline }: { pipeline: Pipeline }) {
           empty={pipeline.releaseStarted ? undefined : 'Выпуск начнётся после слияния PR.'}
         />
       </div>
+    </div>
+  )
+}
+
+export function NowLine({ activity }: { activity: Activity }) {
+  const now = useNow(activity.since !== null)
+  const elapsed = activity.since === null ? null : now - Date.parse(activity.since)
+  const quiet = elapsed !== null && elapsed > QUIET_MS
+  return (
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+      <span aria-hidden="true" className="size-2 shrink-0 animate-pulse rounded-full bg-primary motion-reduce:animate-none" />
+      <p role="status" aria-live="polite" className="min-w-0 break-words">
+        <span className="font-medium">Сейчас: </span>
+        {activity.title && `${activity.title} — `}
+        <PhraseView phrase={activity.phrase} />
+        {quiet && <span className="text-amber-700 dark:text-amber-400">, долго нет событий</span>}
+      </p>
+      {elapsed !== null && (
+        <span className={quiet ? 'text-amber-700 dark:text-amber-400' : 'text-muted-foreground'}>
+          {formatElapsed(elapsed)} с последнего события
+        </span>
+      )}
     </div>
   )
 }

@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import type { AgentRole, ReleaseCandidate, Task, TaskEvent } from '@/api/types'
 import {
+  activeRole,
   buildPipeline,
+  currentActivity,
   describeEvent,
+  formatElapsed,
+  nextPulse,
+  type TaskPulse,
   describeEventDetails,
   handoffText,
   type Pipeline,
@@ -703,5 +708,108 @@ describe('describeEventDetails', () => {
         { label: 'nested', value: '{"a":1}' },
       ],
     ])
+  })
+})
+
+describe('currentActivity', () => {
+  const now = (log: Log, task: Task = developing) => {
+    const activity = currentActivity(log.events, task)
+    if (!activity) return null
+    const { phrase } = activity
+    return { title: activity.title, text: `${phrase.text}${phrase.code ?? ''}${phrase.tail ?? ''}`, since: activity.since }
+  }
+
+  it('активная роль — последний role_started без парного role_finished, ждёт ответ модели', () => {
+    const log = new Log().intake().started('supervisor', 'spec').finished('supervisor', 'spec').started('developer', 'implement')
+    expect(now(log)).toEqual({ title: 'Разработчик: реализация', text: 'ждёт ответ модели', since: '2026-10-25T10:00:00Z' })
+  })
+
+  it('после результата инструмента ждёт ответ последней модели этой роли', () => {
+    const log = new Log()
+      .started('supervisor', 'spec')
+      .model('supervisor', 'spec', 'anthropic/claude-haiku-5-5')
+      .finished('supervisor', 'spec')
+      .started('developer', 'implement')
+      .model('developer', 'implement', 'anthropic/claude-sonnet-5-5')
+      .model('developer', 'implement', 'anthropic/claude-opus-5-5')
+      .tool('developer', 'read_file', 'src/App.tsx')
+    expect(now(log)?.text).toBe('ждёт ответ anthropic/claude-opus-5-5')
+  })
+
+  it('после check_result — идут проверки в Docker, в том числе без активной роли', () => {
+    const qa = new Log().started('qa', 'qa').model('qa', 'qa', 'anthropic/claude-sonnet-5-5').check('qa', 'e2e', 0)
+    expect(now(qa, { ...developing, status: 'reviewing' })).toMatchObject({ title: 'QA: тест QA', text: 'идут проверки в Docker' })
+    const written = new Log().started('qa', 'qa').model('qa', 'qa', 'anthropic/claude-sonnet-5-5')
+    expect(now(written, { ...developing, status: 'reviewing' })?.text).toBe('идут проверки в Docker')
+    const verify = new Log().started('developer', 'implement').finished('developer', 'implement')
+    expect(now(verify)).toMatchObject({ title: null, text: 'идут проверки в Docker' })
+    expect(now(verify.check(null, 'lint', 0))).toMatchObject({ title: null, text: 'идут проверки в Docker' })
+  })
+
+  it('фразы статусов ожидания', () => {
+    const empty = new Log()
+    expect(now(empty, { ...developing, status: 'awaiting_spec_approval' })).toEqual({
+      title: null,
+      text: 'ждёт подтверждения требований заказчиком',
+      since: null,
+    })
+    expect(now(empty, { ...developing, status: 'awaiting_release' })?.text).toBe('в очереди выпуска')
+    expect(now(empty, { ...developing, status: 'deploying' })?.text).toBe('деплой на Render')
+    expect(now(empty, { ...developing, status: 'queued' })?.text).toBe('ждёт свободного слота')
+    const integrating = { ...developing, status: 'awaiting_integration' as const }
+    const log = new Log().add('pr_opened', { pr_number: 7 })
+    expect(now(log, integrating)?.text).toBe('ждёт обязательные проверки PR')
+    log.add('checks_status', { head_sha: HEAD, checks: [{ name: 'chat-web', status: 'completed', conclusion: 'success', url: null }] })
+    expect(now(log, integrating)?.text).toBe('ждёт решения агента ревью')
+    log.add('pr_review', { verdict: 'approve', head_sha: HEAD }).add('owner_review_requested', { head_sha: HEAD })
+    expect(now(log, integrating)?.text).toBe('ждёт одобрения владельца на GitHub')
+    log.add('pr_merged', { pr_number: 7, merge_sha: MERGE })
+    expect(now(log, integrating)?.text).toBe('ждёт обязательные проверки итогового commit')
+  })
+
+  it.each(['needs_attention', 'failed', 'cancelled', 'rejected', 'released'] as const)('%s — null', (status) => {
+    expect(currentActivity(new Log().started('developer', 'implement').events, { ...developing, status })).toBeNull()
+  })
+
+  it('параллельные QA и критик: после завершения критика активен QA, фраза — по событиям своей роли', () => {
+    const reviewing = { ...developing, status: 'reviewing' as const }
+    const log = new Log()
+      .started('qa', 'qa')
+      .started('critic', 'review')
+      .model('critic', 'review', 'openai/gpt-6-astra')
+      .model('qa', 'qa', 'anthropic/claude-sonnet-5-5')
+      .check(null, 'lint', 0)
+    expect(now(log, reviewing)).toMatchObject({ title: 'Критик: ревью критика', text: 'ждёт ответ openai/gpt-6-astra' })
+    log.finished('critic', 'review')
+    expect(now(log, reviewing)).toMatchObject({ title: 'QA: тест QA', text: 'идут проверки в Docker' })
+    const pulse = log.events.reduce<TaskPulse | undefined>(nextPulse, undefined)
+    expect(pulse && activeRole(pulse.roles)).toEqual({ role: 'qa', step: 'qa' })
+  })
+
+  it('после доработки прежнее слияние не влияет на фразу новой интеграции', () => {
+    const integrating = { ...developing, status: 'awaiting_integration' as const }
+    const log = new Log()
+      .add('pr_opened', { pr_number: 7 })
+      .add('pr_merged', { pr_number: 7, merge_sha: MERGE })
+      .add('rework_started', { attempt: 1, limit: 1 })
+      .add('pr_opened', { pr_number: 9 })
+    expect(now(log, integrating)?.text).toBe('ждёт обязательные проверки PR')
+    log.add('owner_review_requested', { head_sha: HEAD })
+    expect(now(log, integrating)?.text).toBe('ждёт одобрения владельца на GitHub')
+  })
+
+  it('остановка без роли закрывает активную роль', () => {
+    const log = new Log().started('developer', 'implement').finished(null, 'time', 'error')
+    expect(now(log)?.title).toBeNull()
+  })
+})
+
+describe('formatElapsed', () => {
+  it('секунды, минуты с секундами, часы; без секунд для списка', () => {
+    expect(formatElapsed(-5)).toBe('0 с')
+    expect(formatElapsed(45_900)).toBe('45 с')
+    expect(formatElapsed(135_000)).toBe('2 мин 15 с')
+    expect(formatElapsed(135_000, false)).toBe('2 мин')
+    expect(formatElapsed(3_900_000)).toBe('1 ч 5 мин')
   })
 })

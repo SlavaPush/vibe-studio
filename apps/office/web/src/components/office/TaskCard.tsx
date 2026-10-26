@@ -22,7 +22,7 @@ import {
   type TaskStatus,
 } from '@/api/types'
 import { ConfirmButton, DecisionMessage } from '@/components/office/DecisionControls'
-import { EventFeed, PipelineBoard } from '@/components/office/PipelineBoard'
+import { EventFeed, NowLine, PipelineBoard } from '@/components/office/PipelineBoard'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -39,7 +39,7 @@ import {
   formatDateTime,
 } from '@/lib/labels'
 import { TASK_DECISION_STATUSES, canAct } from '@/lib/permissions'
-import { buildPipeline } from '@/lib/pipeline'
+import { buildPipeline, currentActivity, isLive } from '@/lib/pipeline'
 import { newDecision, useDecision } from '@/lib/use-decision'
 
 interface TaskCardProps {
@@ -106,8 +106,10 @@ export function TaskCard({
     task.version,
   )
 
+  const streaming = tab === 'events' || isLive(task.status)
+
   useEffect(() => {
-    if (tab !== 'events') return
+    if (!streaming) return
     return openTaskEvents(task.id, {
       onEvent: (event) =>
         setEvents((current) =>
@@ -118,7 +120,7 @@ export function TaskCard({
       onState: setJournal,
       onBroken: () => run(me),
     })
-  }, [tab, task.id, run])
+  }, [streaming, task.id, run])
 
   useEffect(() => {
     if (tab !== 'diff') return
@@ -161,6 +163,7 @@ export function TaskCard({
     () => (tab === 'events' && events.length > 0 ? buildPipeline(events, task, releases) : null),
     [tab, events, task, releases],
   )
+  const activity = useMemo(() => currentActivity(events, task), [events, task])
   const fresh = tab !== 'events' && lastEventId > seen
   const changeTab = (value: string) => {
     if (value === 'events' || tab === 'events') setSeen(lastEventId)
@@ -186,6 +189,7 @@ export function TaskCard({
       </CardHeader>
       <CardContent className="grid grid-cols-1 gap-4">
         <TaskDescription text={task.text} />
+        {activity && <NowLine activity={activity} />}
         {task.status === 'failed' && task.failure_kind && (
           <p className="text-sm text-destructive">Причина ошибки: {failureLabel(task)}</p>
         )}

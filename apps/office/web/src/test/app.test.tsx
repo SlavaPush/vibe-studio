@@ -439,6 +439,24 @@ describe('обновление через SSE', () => {
     expect(screen.getByRole('tab', { name: 'Ход работы, есть новые события' })).toBeInTheDocument()
   })
 
+  it('список задач: до события из общего потока только точка, после — роль и время', async () => {
+    backend()
+    render(<App />)
+    await ready()
+    const source = openStream()
+    const item = () => within(stack()).getByRole('button', { name: new RegExp(developing.title) })
+    expect(item().querySelector('.animate-pulse')).toHaveClass('motion-reduce:animate-none')
+    expect(item()).not.toHaveTextContent('мин')
+    const at = new Date(Date.now() - 125_000).toISOString()
+    act(() => source.emit({ ...taskEvent('tsk_101', 'role_started', { step: 'implement' }), role: 'developer', timestamp: at }))
+    expect(item()).toHaveTextContent('Разработчик · 2 мин')
+    act(() =>
+      source.emit({ ...taskEvent('tsk_101', 'role_finished', { step: 'implement', outcome: 'ok' }), role: 'developer', timestamp: at }),
+    )
+    expect(item()).not.toHaveTextContent('Разработчик')
+    expect(item()).toHaveTextContent('2 мин')
+  })
+
   it('после разрыва перечитывает списки до подключения и повторно после open', async () => {
     const api = backend()
     render(<App />)

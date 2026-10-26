@@ -72,7 +72,7 @@ describe('TaskCard: PR задачи', () => {
       'href',
       'https://github.com/job/2',
     )
-    expect(FakeEventSource.all('/api/tasks/tsk_101/events')).toHaveLength(0)
+    expect(FakeEventSource.all('/api/tasks/tsk_101/events')).toHaveLength(1)
   })
 
   it('показывает доработку после отката с номером попытки и причиной', () => {
@@ -651,8 +651,9 @@ describe('TaskCard: вкладки', () => {
     installEventSource()
     fakeApi()
     renderCard(maria)
-    expect(FakeEventSource.all('/api/tasks/tsk_101/events')).toHaveLength(0)
+    expect(FakeEventSource.all('/api/tasks/tsk_101/events')).toHaveLength(1)
     openTab('Ход работы')
+    expect(FakeEventSource.all('/api/tasks/tsk_101/events')).toHaveLength(1)
     const source = FakeEventSource.last('/api/tasks/tsk_101/events')
     const first = { ...taskEvent('tsk_101', 'task_created', { title: 'x' }), seq: 1 }
     const second = { ...taskEvent('tsk_101', 'role_started', { step: 'spec' }), seq: 2 }
@@ -666,7 +667,64 @@ describe('TaskCard: вкладки', () => {
     expect(items[0]).toHaveTextContent('начал работу')
     expect(items[1]).toHaveTextContent('Задача создана')
     openTab('Требования')
+    expect(source.closed).toBe(false)
+    expect(FakeEventSource.all('/api/tasks/tsk_101/events')).toHaveLength(1)
+  })
+
+  it('у выпущенной задачи поток открыт только на вкладке «Ход работы»', () => {
+    fakeApi()
+    renderCard(maria, { ...developing, status: 'released' })
+    expect(FakeEventSource.all('/api/tasks/tsk_101/events')).toHaveLength(0)
+    openTab('Ход работы')
+    const source = FakeEventSource.last('/api/tasks/tsk_101/events')
+    openTab('Требования')
     expect(source.closed).toBe(true)
+  })
+
+  const nowLine = () => screen.queryByText('Сейчас:', { exact: false })?.closest('div') ?? null
+
+  it('строка «Сейчас» видна на вкладке «Требования» у задачи в разработке, время растёт, после 10 минут — пометка', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-10-24T10:02:15Z'))
+    fakeApi()
+    renderCard(maria)
+    expect(screen.getByRole('tab', { name: 'Требования' })).toHaveAttribute('aria-selected', 'true')
+    const source = FakeEventSource.last('/api/tasks/tsk_101/events')
+    act(() => {
+      source.open()
+      source.emit(roleEvent('role_started', 'developer', { step: 'implement' }))
+      source.emit(
+        roleEvent(
+          'tool_called',
+          'developer',
+          { arguments: 'developer/implement anthropic/claude-opus-5-5', provider: 'anthropic', model: 'claude-opus-5-5', result: 'ok' },
+          'model',
+        ),
+      )
+    })
+    expect(nowLine()).toHaveTextContent('Сейчас: Разработчик: реализация — ждёт ответ anthropic/claude-opus-5-5')
+    expect(nowLine()).toHaveTextContent('2 мин 15 с с последнего события')
+    act(() => vi.advanceTimersByTime(2000))
+    expect(nowLine()).toHaveTextContent('2 мин 17 с с последнего события')
+    expect(nowLine()).not.toHaveTextContent('долго нет событий')
+    act(() => vi.advanceTimersByTime(8 * 60 * 1000))
+    expect(nowLine()).toHaveTextContent('10 мин 17 с с последнего события')
+    expect(nowLine()).toHaveTextContent('долго нет событий')
+  })
+
+  it('строка «Сейчас»: role="status", aria-live и пульсирующая точка без анимации при reduced motion', () => {
+    fakeApi()
+    renderCard(maria)
+    const line = nowLine() as HTMLElement
+    expect(within(line).getByRole('status')).toHaveAttribute('aria-live', 'polite')
+    expect(line.querySelector('[aria-hidden="true"]')).toHaveClass('animate-pulse', 'motion-reduce:animate-none')
+    expect(line).toHaveClass('flex-wrap')
+  })
+
+  it('у выпущенной задачи строки «Сейчас» нет', () => {
+    fakeApi()
+    renderCard(maria, { ...developing, status: 'released' })
+    expect(nowLine()).toBeNull()
   })
 
   const roleEvent = (

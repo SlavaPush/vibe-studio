@@ -60,6 +60,20 @@ describe('новые элементы на узкой ширине', () => {
   })
 })
 
+describe('строка «Сейчас» на узкой ширине', () => {
+  it('переносится без горизонтальной прокрутки', async () => {
+    backend()
+    viewport(true)
+    await ready()
+    select(second)
+    const status = await screen.findByText('Сейчас:', { exact: false })
+    const text = status.closest('[role="status"]') as HTMLElement
+    expect(text).toHaveClass('min-w-0', 'break-words')
+    expect(text.parentElement).toHaveClass('flex', 'flex-wrap')
+    expect(text.parentElement?.className).not.toMatch(/whitespace-nowrap|w-\[|min-w-\[/)
+  })
+})
+
 describe('выбор задачи на узкой ширине', () => {
   it('переводит фокус на заголовок карточки, в том числе при повторном выборе', async () => {
     backend()

@@ -1,4 +1,4 @@
-import type { AgentRole, PullRequestCheck, ReleaseCandidate, Task, TaskEvent } from '@/api/types'
+import type { AgentRole, PullRequestCheck, ReleaseCandidate, Task, TaskEvent, TaskStatus } from '@/api/types'
 import {
   AGENT_ROLE_LABELS,
   CHECK_STATUS_LABELS,
@@ -1130,6 +1130,170 @@ export function handoffText(handoff: Handoff): string {
   const to = handoff.to.map((key) => AGENT_LABELS[key]).join(' и ')
   const verb = handoff.from.length > 1 ? 'передают' : 'передаёт'
   return `${from} ${verb} ${handoff.label} → ${to}${handoff.active ? ', сейчас' : ''}`
+}
+
+const IDLE_STATUSES = new Set<string>(['needs_attention', 'failed', 'cancelled', 'rejected', 'released'])
+
+export const QUIET_MS = 10 * 60 * 1000
+
+export function isLive(status: TaskStatus): boolean {
+  return !IDLE_STATUSES.has(status)
+}
+
+export interface RoleStep {
+  role: AgentRole
+  step: string | null
+}
+
+const NO_ROLES: readonly RoleStep[] = []
+
+export function nextRoles(open: readonly RoleStep[], event: TaskEvent): readonly RoleStep[] {
+  if (event.type === 'role_started' || event.type === 'role_finished') {
+    if (event.role === null) return event.type === 'role_finished' ? NO_ROLES : open
+    const step = text(event.payload.step)
+    const rest = open.filter((item) => item.role !== event.role || item.step !== step)
+    return event.type === 'role_started' ? [...rest, { role: event.role, step }] : rest
+  }
+  if (event.type === 'rework_started') return NO_ROLES
+  if (event.type === 'status_changed' && IDLE_STATUSES.has(String(event.payload.to))) return NO_ROLES
+  return open
+}
+
+export function activeRole(open: readonly RoleStep[]): RoleStep | null {
+  return open.length > 0 ? open[open.length - 1] : null
+}
+
+export interface TaskPulse {
+  eventId: number
+  since: string
+  roles: readonly RoleStep[]
+}
+
+export function nextPulse(current: TaskPulse | undefined, event: TaskEvent): TaskPulse {
+  if (current && current.eventId >= event.event_id) return current
+  return { eventId: event.event_id, since: event.timestamp, roles: nextRoles(current?.roles ?? NO_ROLES, event) }
+}
+
+function roleStepLabel(active: RoleStep): string {
+  const role = AGENT_ROLE_LABELS[active.role]
+  return active.step ? `${role}: ${mapped(STEP_LABELS, active.step)}` : role
+}
+
+export interface Activity {
+  title: string | null
+  phrase: Phrase
+  since: string | null
+}
+
+const IN_DOCKER: Phrase = { text: 'идут проверки в Docker' }
+
+const WAITING_PHRASES: Partial<Record<TaskStatus, string>> = {
+  queued: 'ждёт свободного слота',
+  awaiting_release: 'в очереди выпуска',
+  deploying: 'деплой на Render',
+}
+
+const INTEGRATION_TYPES = new Set([
+  'pr_opened',
+  'checks_status',
+  'pr_review',
+  'owner_review_requested',
+  'owner_review',
+  'merge_started',
+])
+
+function waitingModel(events: Events, role: AgentRole): Phrase {
+  const start = lastIndex(events, (event) => event.type === 'role_started' && event.role === role)
+  const last = at(
+    events,
+    lastIndex(
+      events,
+      (event) =>
+        event.role === role ||
+        ((role === 'qa' || role === 'developer') && event.role === null && event.type === 'check_result'),
+      start,
+    ),
+  )
+  if (last?.type === 'check_result') return IN_DOCKER
+  if (role === 'qa' && last?.type === 'tool_called' && (last.tool === 'model' || last.tool === 'git_commit')) {
+    return IN_DOCKER
+  }
+  const model = lastModel(events, role, 0, events.length)
+  if (!model) return { text: 'ждёт ответ модели' }
+  return { text: 'ждёт ответ ', code: model.provider ? `${model.provider}/${model.model}` : model.model }
+}
+
+function integrationPhrase(events: Events): string {
+  const from = lastIndex(events, (event) => event.type === 'rework_started') + 1
+  if (lastIndex(events, (event) => event.type === 'pr_merged' && !isRevert(event), from) >= 0) {
+    return 'ждёт обязательные проверки итогового commit'
+  }
+  const event = at(
+    events,
+    lastIndex(
+      events,
+      (item) =>
+        !isRevert(item) &&
+        (INTEGRATION_TYPES.has(item.type) || (item.type === 'tool_called' && item.role === 'pr_reviewer')),
+      from,
+    ),
+  )
+  switch (event?.type) {
+    case undefined:
+      return 'готовит ветку и PR'
+    case 'pr_opened':
+      return 'ждёт обязательные проверки PR'
+    case 'checks_status': {
+      const checks = checksOf(event)
+      return checks.length > 0 && checks.every(passed) ? 'ждёт решения агента ревью' : 'ждёт обязательные проверки PR'
+    }
+    case 'tool_called':
+      return 'ждёт решения агента ревью'
+    case 'pr_review':
+      return event.payload.verdict === 'approve' ? 'PR принят агентом ревью' : 'PR отклонён агентом ревью'
+    case 'owner_review_requested':
+      return 'ждёт одобрения владельца на GitHub'
+    default:
+      return 'слияние PR'
+  }
+}
+
+function statusPhrase(events: Events, task: Task, last: TaskEvent | null): Phrase {
+  switch (task.status) {
+    case 'awaiting_spec_approval':
+      return { text: task.spec ? 'ждёт подтверждения требований заказчиком' : 'готовит требования' }
+    case 'awaiting_integration':
+      return { text: integrationPhrase(events) }
+    case 'developing':
+    case 'reviewing': {
+      const built =
+        last?.type === 'role_finished' &&
+        last.role === 'developer' &&
+        last.payload.step === 'implement' &&
+        last.payload.outcome === 'ok'
+      return last?.type === 'check_result' || built ? IN_DOCKER : { text: 'переходит к следующему шагу' }
+    }
+    default:
+      return { text: WAITING_PHRASES[task.status] ?? statusLabel(task.status).toLowerCase() }
+  }
+}
+
+export function currentActivity(events: Events, task: Task): Activity | null {
+  if (!isLive(task.status)) return null
+  const last = at(events, events.length - 1)
+  const since = last?.timestamp ?? null
+  const active = activeRole(events.reduce(nextRoles, NO_ROLES))
+  if (active) return { title: roleStepLabel(active), phrase: waitingModel(events, active.role), since }
+  return { title: null, phrase: statusPhrase(events, task, last), since }
+}
+
+export function formatElapsed(ms: number, seconds = true): string {
+  const total = Math.max(0, Math.floor(ms / 1000))
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  if (hours > 0) return `${hours} ч ${minutes} мин`
+  if (minutes > 0) return seconds ? `${minutes} мин ${total % 60} с` : `${minutes} мин`
+  return `${total} с`
 }
 
 export function buildPipeline(events: Events, task: Task, releases: readonly ReleaseCandidate[] = []): Pipeline {
