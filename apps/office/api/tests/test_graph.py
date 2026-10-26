@@ -151,7 +151,7 @@ def test_full_pass_reaches_awaiting_integration(office, origin, graph):
     assert [event.payload["arguments"].split()[0] for event in model_events].count("developer/implement") == 1
     assert store.get_task(task_id).usage.model_calls == len(model_events) == 4
     assert store.get_task(task_id).usage.input_tokens == 400
-    prices = {"supervisor": (10.00, 50.00), "developer": (4.00, 20.00), "qa": (2.00, 10.00), "critic": (10.00, 50.00)}
+    prices = {"supervisor": (10.00, 50.00), "developer": (2.00, 10.00), "qa": (2.00, 10.00), "critic": (10.00, 50.00)}
     expected = sum((100 * price_in + 20 * price_out) / 1_000_000 for price_in, price_out in prices.values())
     assert store.get_task(task_id).usage.cost_usd == pytest.approx(expected)
     assert store.get_task(task_id).fix_cycles == 0

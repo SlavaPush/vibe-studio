@@ -50,13 +50,12 @@ SPEC = {
 ROUTES = {
     AgentRole.researcher: ("anthropic/claude-haiku-5-5", "openai/gpt-6-luna", "low", 8192),
     AgentRole.supervisor: ("anthropic/claude-fable-5-1", "openai/gpt-6-astra", "medium", 8192),
-    AgentRole.developer: ("anthropic/claude-opus-5-5", "openai/gpt-5.6-sol", "medium", 32000),
+    AgentRole.developer: ("anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol", "high", 32000),
     AgentRole.qa: ("anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol", "medium", 16000),
     AgentRole.critic: ("openai/gpt-6-astra", "anthropic/claude-fable-5-1", "medium", 16000),
     AgentRole.pr_reviewer: ("anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol", "high", 16000),
 }
 SONNET_COST = (120 * 2.00 + 30 * 10.00) / 1_000_000
-OPUS_COST = (120 * 4.00 + 30 * 20.00) / 1_000_000
 SOL_COST = (200 * 2.00 + 40 * 10.00) / 1_000_000
 
 
@@ -97,23 +96,23 @@ def test_anthropic_call_uses_effort_schema_and_accounting(setup):
     reply = make().structured(store, task_id, AgentRole.developer, "implement", "SYSTEM", "USER", Turn)
     assert reply.actions[0].path == "web/src/App.tsx"
     [call] = claude.calls
-    assert call["model"] == "claude-opus-5-5"
+    assert call["model"] == "claude-sonnet-5-5"
     assert call["max_tokens"] == 32000
     assert call["system"] == "SYSTEM" and call["messages"] == [{"role": "user", "content": "USER"}]
-    assert call["output_config"] == {"effort": "medium", "format": {"type": "json_schema", "schema": provider_schema(Turn)}}
+    assert call["output_config"] == {"effort": "high", "format": {"type": "json_schema", "schema": provider_schema(Turn)}}
     assert call["timeout"] == 300
     task = store.get_task(task_id)
     assert (task.usage.model_calls, task.usage.input_tokens, task.usage.output_tokens) == (1, 120, 30)
-    assert raw_cost(store, task_id) == pytest.approx(OPUS_COST)
-    assert task.usage.cost_usd == round(OPUS_COST, 4)
-    assert model_events(store, task_id) == ["developer/implement anthropic/claude-opus-5-5"]
+    assert raw_cost(store, task_id) == pytest.approx(SONNET_COST)
+    assert task.usage.cost_usd == round(SONNET_COST, 4)
+    assert model_events(store, task_id) == ["developer/implement anthropic/claude-sonnet-5-5"]
     [event] = [item for item in store.events_after(task_id, 0, 1000) if item.tool == "model"]
     assert event.payload == {
-        "arguments": "developer/implement anthropic/claude-opus-5-5",
+        "arguments": "developer/implement anthropic/claude-sonnet-5-5",
         "result": "ok",
         "provider": "anthropic",
-        "model": "claude-opus-5-5",
-        "effort": "medium",
+        "model": "claude-sonnet-5-5",
+        "effort": "high",
     }
 
 
@@ -223,13 +222,13 @@ def test_cost_counts_input_and_output_separately(setup, caplog):
 def test_model_without_price_adds_tokens_but_not_cost(setup, caplog):
     store, task_id, claude, _, make = setup
     gateway = make()
-    del gateway.models["capabilities"]["anthropic/claude-opus-5-5"]["price_usd_per_mtok"]
+    del gateway.models["capabilities"]["anthropic/claude-sonnet-5-5"]["price_usd_per_mtok"]
     claude.answer = json.dumps(TURN)
     with caplog.at_level(logging.WARNING, logger="office.models"):
         gateway.structured(store, task_id, AgentRole.developer, "implement", "S", "U", Turn)
     task = store.get_task(task_id)
     assert (task.usage.input_tokens, task.usage.output_tokens, raw_cost(store, task_id)) == (120, 30, 0)
-    assert "anthropic/claude-opus-5-5 has no price" in caplog.text
+    assert "anthropic/claude-sonnet-5-5 has no price" in caplog.text
 
 
 def test_qa_prompt_requires_mock_module_and_exact_locators():
@@ -314,7 +313,7 @@ def test_answer_outside_schema_is_rejected(setup, answer):
     with pytest.raises(InvalidModelResponse):
         make().structured(store, task_id, AgentRole.developer, "implement", "S", "U", Turn)
     assert store.get_task(task_id).usage.output_tokens == 30
-    assert raw_cost(store, task_id) == pytest.approx(OPUS_COST)
+    assert raw_cost(store, task_id) == pytest.approx(SONNET_COST)
 
 
 def test_openai_answer_outside_schema_is_counted(setup):
