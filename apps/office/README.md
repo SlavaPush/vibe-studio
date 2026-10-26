@@ -26,7 +26,7 @@
 | --- | --- |
 | Интерфейс | React, TypeScript, Vite, shadcn/ui |
 | Сервер | FastAPI, LangGraph, Python 3.12 |
-| Модели | Anthropic Claude — основной провайдер, OpenAI — резерв; одна таблица моделей по ролям, оценка стоимости задачи |
+| Модели | Anthropic Claude и OpenAI, у каждой роли свой резерв; одна таблица моделей по ролям (Fable 5.1 — Supervisor, Opus 5.5 — разработчик, GPT-6 Astra — критик, Sonnet — QA и агент ревью PR, Haiku — фильтр и исследователь), оценка стоимости задачи |
 | Хранение | SQLite на диске компьютера или VPS, где работает офис; PostgreSQL поддерживается |
 | Деплой | Офис работает на VPS владельца за Caddy с HTTPS (`infra/`) или локально; чат выпускает на Render через GitHub App и Render API |
 | Проверки | Docker и Playwright, GitHub Actions, ruleset ветки main |
@@ -250,10 +250,10 @@ CREATE POLICY office_codes_update ON access_codes FOR UPDATE TO office_codes USI
 | --- | --- | --- | --- |
 | Фильтр приёма (`intake_filter`) | модерация OpenAI `omni-moderation-latest` и `claude-haiku-5-5` `low` | `gpt-6-luna` `low` | 1024 |
 | Исследователь | `claude-haiku-5-5` `low` | `gpt-6-luna` `low` | 8192 |
-| Supervisor | `claude-sonnet-5-5` `medium` | `gpt-6.1-sol` `medium` | 8192 |
-| Разработчик | `claude-sonnet-5-5` `high` | `gpt-6.1-sol` `high` | 32000 |
+| Supervisor | `claude-fable-5-1` `medium` | `gpt-6-astra` `medium` | 8192 |
+| Разработчик | `claude-opus-5-5` `high` | `gpt-5.6-sol` `high` | 32000 |
 | QA | `claude-sonnet-5-5` `medium` | `gpt-6.1-sol` `medium` | 16000 |
-| Критик | `claude-sonnet-5-5` `medium` | `gpt-6.1-sol` `medium` | 16000 |
+| Критик | `gpt-6-astra` `medium` | `claude-fable-5-1` `medium` | 16000 |
 | Агент ревью PR | `claude-sonnet-5-5` `high` | `gpt-6.1-sol` `high` | 16000 |
 
 Раздел `capabilities` описывает параметр рассуждения каждой пары провайдер/модель; поле `verified` и список `verified_values` заполняются после реального вызова (smoke-проверки этапа `P0`). При старте API шлюз проверяет таблицу: роль без маршрута или модель без записи в `capabilities` останавливает запуск с ошибкой.
@@ -266,8 +266,12 @@ Supervisor добавляет в требования короткий план 
 
 | Модель | Вход, $ за 1 млн токенов | Выход, $ за 1 млн токенов | Источник |
 | --- | --- | --- | --- |
+| `anthropic/claude-fable-5-1` | 10.00 | 50.00 | сторонние обзоры цен Anthropic, 26 октября 2026 |
+| `anthropic/claude-opus-5-5` | 4.00 | 20.00 | сторонние обзоры цен Anthropic, 26 октября 2026 |
 | `anthropic/claude-sonnet-5-5` | 2.00 | 10.00 | справка Claude API, 6 октября 2026 |
 | `anthropic/claude-haiku-5-5` | 0.10 | 0.50 | справка Claude API, 6 октября 2026; запрос до 100K токенов |
+| `openai/gpt-6-astra` | 10.00 | 50.00 | страница OpenAI о GPT-6 Astra и сторонние обзоры, 26 октября 2026; до 272K токенов на запрос |
+| `openai/gpt-5.6-sol` | 5.00 | 30.00 | сторонние обзоры цен OpenAI, 26 октября 2026 |
 | `openai/gpt-6.1-sol` | 2.00 | 10.00 | сторонние обзоры цен OpenAI, 25 октября 2026 |
 | `openai/gpt-6-luna` | 0.10 | 0.50 | сторонние обзоры цен OpenAI, 25 октября 2026; один источник даёт 0.20/1.20 |
 
