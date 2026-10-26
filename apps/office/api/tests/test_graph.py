@@ -151,7 +151,7 @@ def test_full_pass_reaches_awaiting_integration(office, origin, graph):
     assert [event.payload["arguments"].split()[0] for event in model_events].count("developer/implement") == 1
     assert store.get_task(task_id).usage.model_calls == len(model_events) == 4
     assert store.get_task(task_id).usage.input_tokens == 400
-    prices = {"supervisor": (10.00, 50.00), "developer": (2.00, 10.00), "qa": (2.00, 10.00), "critic": (10.00, 50.00)}
+    prices = {"supervisor": (10.00, 50.00), "developer": (2.00, 10.00), "qa": (2.00, 10.00), "critic": (2.00, 10.00)}
     expected = sum((100 * price_in + 20 * price_out) / 1_000_000 for price_in, price_out in prices.values())
     assert store.get_task(task_id).usage.cost_usd == pytest.approx(expected)
     assert store.get_task(task_id).fix_cycles == 0
@@ -887,6 +887,8 @@ def test_missing_qa_evidence_is_retried_once(graph):
     approve(client, app, task_id)
     wait_status(app, task_id, TaskStatus.needs_attention)
     assert len([call for call in app.state.suite.calls if call[3]]) == 2
+    suite = app.state.suite
+    assert [reuse for call, reuse in zip(suite.calls, suite.reuses) if call[3]] == [True, False]
     finished = [event for event in events(app, task_id, "role_finished") if event.role == "qa"]
     assert finished[-1].payload["summary"].startswith("Нет свидетельства QA")
     assert app.state.store.get_task(task_id).halt_reason == "Нет свидетельства QA: Сборка приложения для e2e не прошла."

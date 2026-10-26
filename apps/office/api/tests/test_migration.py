@@ -6,7 +6,7 @@ import pytest
 
 from app.db import Database
 from app.release_queue import fixes_of, targets_of
-from app.schemas import ReleaseKind, TaskStatus
+from app.schemas import CheckResult, ReleaseKind, TaskStatus
 from app.tasks import TaskStore
 
 pytestmark = pytest.mark.pg
@@ -18,7 +18,7 @@ P53_SCHEMA = Path(__file__).with_name("data") / "schema_3f92be1.sql"
 NOW = "2026-10-23T09:00:00.000000Z"
 TABLES = (
     "scheduler", "participants", "sessions", "tasks", "task_events", "decisions", "release_candidates",
-    "check_reports", "intake_reservations", "operations", "pr_reviews",
+    "check_reports", "intake_reservations", "operations", "pr_reviews", "check_cache",
 )
 
 
@@ -92,6 +92,34 @@ def test_old_database_is_upgraded_once(database_url):
         assert (spec.spec_hash, spec.plan) == ("sha256:old", [])
     finally:
         again.close()
+
+
+def test_old_database_gets_check_cache_with_unique_key(database_url):
+    create_old(database_url)
+    db = Database(database_url)
+    try:
+        db.init_schema()
+        store = TaskStore(db)
+        failed = CheckResult(
+            command="npm run lint", exit_code=1, duration_ms=5, artifact_urls=["/api/tasks/tsk_old/artifacts/lint-1.log"]
+        )
+        passed = failed.model_copy(update={"exit_code": 0})
+        store.save_check("tsk_old", "sha256:tree", "npm run lint", failed)
+        store.save_check("tsk_old", "sha256:tree", "npm run lint", passed)
+        assert store.cached_check("tsk_old", "sha256:tree", "npm run lint") == passed
+        assert store.cached_check("tsk_release", "sha256:tree", "npm run lint") is None
+        assert store.cached_check("tsk_old", "sha256:other", "npm run lint") is None
+        with db.connection() as conn:
+            assert len(conn.fetchall("SELECT id FROM check_cache")) == 1
+        with pytest.raises((sqlite3.IntegrityError, psycopg.errors.UniqueViolation)):
+            with db.transaction() as conn:
+                conn.execute(
+                    "INSERT INTO check_cache (id, task_id, tree_hash, step, result, created_at) "
+                    "VALUES ('chc_copy', 'tsk_old', :hash, 'npm run lint', '{}', :now)",
+                    {"hash": "sha256:tree", "now": NOW},
+                )
+    finally:
+        db.close()
 
 
 def create_p51(url: str) -> None:

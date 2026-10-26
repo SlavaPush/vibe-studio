@@ -595,10 +595,10 @@ class TaskGraph:
 
     def evidence(self, app_sha: str, qa_sha: str, test_file: str) -> Any:
         result = None
-        for _ in range(1 + INFRA_RETRIES):
+        for attempt in range(1 + INFRA_RETRIES):
             task = self.guard(S.reviewing)
             report = self.sandbox.run_suite(
-                self.task_id, app_sha, qa_sha, require_e2e=True, change_class=task.change_class
+                self.task_id, app_sha, qa_sha, require_e2e=True, change_class=task.change_class, reuse=attempt == 0
             )
             result = self.sandbox.e2e_result(self.task_id, report, test_file)
             if result.status != "no_evidence":

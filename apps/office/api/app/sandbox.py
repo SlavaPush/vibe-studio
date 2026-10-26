@@ -44,6 +44,7 @@ COMPAT_COMMANDS = (
 PYTHON_STEP = SANDBOX_DIR.parent / "sandbox-python" / "step.sh"
 TIMEOUT_EXIT = 124
 BUILD_EXIT = 90
+UNCACHED_EXITS = frozenset({TIMEOUT_EXIT, 125, 126, 127, 137})
 LABEL = "back-office.workspace"
 REPORT_NAME = "playwright-report.json"
 UNMOCKED_NAME = "unmocked-api.txt"
@@ -349,6 +350,22 @@ def regular_files(root: Path) -> list[Path]:
     return sorted(found)
 
 
+def tree_entries(root: Path, names: list[str] | None) -> list[tuple[str, str, Path]] | None:
+    found = []
+    for directory, dirs, files in os.walk(root):
+        for name in [*dirs, *files]:
+            path = Path(directory) / name
+            mode = os.lstat(path).st_mode
+            rel = path.relative_to(root).as_posix()
+            if stat.S_ISLNK(mode):
+                found.append((rel, "link", path))
+            elif stat.S_ISREG(mode):
+                found.append((rel, "exec" if mode & 0o111 else "file", path))
+    if names is not None and {rel for rel, _, _ in found} - set(names):
+        return None
+    return sorted(found)
+
+
 class Sandbox:
     def __init__(
         self,
@@ -501,6 +518,61 @@ class Sandbox:
         if self._docker("image", "inspect", self.image) != 0:
             raise SandboxError(UNAVAILABLE)
 
+    def image_id(self, image: str) -> str | None:
+        output = io.BytesIO()
+        try:
+            code = self.runner(
+                ["docker", "image", "inspect", "--format", "{{.Id}}", image], 60, CappedLog(output, 4096)
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            logger.exception("docker image inspect failed")
+            return None
+        found = output.getvalue().decode("utf-8", "replace").strip()
+        return found if code == 0 and found else None
+
+    def tree_hash(self, images: list[str], trees: list[tuple[str, Path]]) -> str | None:
+        digest = hashlib.sha256()
+        for image in images:
+            found = self.image_id(image)
+            if found is None:
+                return None
+            digest.update(f"image\0{image}\0{found}\0".encode())
+        items = [("policy", path.name, "file", path) for path in self.policy_files]
+        for label, root in trees:
+            entries = tree_entries(root, self.workspace.commit_files(root))
+            if entries is None:
+                return None
+            items += [(label, rel, kind, path) for rel, kind, path in entries]
+        for label, rel, kind, path in items:
+            data = os.readlink(path).encode() if kind == "link" else path.read_bytes()
+            digest.update(f"{label}\0{rel}\0{kind}\0{len(data)}\0".encode())
+            digest.update(data)
+        return f"sha256:{digest.hexdigest()}"
+
+    def cached(self, task_id: str, key: str | None, name: str) -> CheckResult | None:
+        return None if key is None else self.store.cached_check(task_id, key, name)
+
+    def remember(self, task_id: str, key: str | None, name: str, result: CheckResult) -> None:
+        if key is not None and result.exit_code >= 0 and result.exit_code not in UNCACHED_EXITS:
+            self.store.save_check(task_id, key, name, result)
+
+    def replay(
+        self, task_id: str, result: CheckResult, step: str, role: AgentRole | None, context: dict[str, str] | None
+    ) -> CheckResult:
+        payload = {
+            "command": result.command, "exit_code": result.exit_code, "duration_ms": result.duration_ms,
+            "step": step, "cached": True,
+        }
+        self.store.add_event(
+            task_id,
+            TaskEventType.check_result,
+            payload | (context or {}),
+            role=role,
+            tool="sandbox",
+            artifact=result.artifact_urls[0].rsplit("/", 1)[-1] if result.artifact_urls else None,
+        )
+        return result
+
     def volume_ready(self, task_id: str, volume: str) -> bool:
         if self._docker("volume", "inspect", volume) != 0:
             return False
@@ -551,6 +623,7 @@ class Sandbox:
         context: dict[str, str] | None = None,
         build: Callable[[str, Path], list[str]] | None = None,
         keep: Callable[[Path], None] | None = None,
+        key: str | None = None,
     ) -> CheckResult:
         task_dir = self.artifacts_dir / task_id
         number = self._next_number(task_dir, step.name)
@@ -595,6 +668,7 @@ class Sandbox:
             tool="sandbox",
             artifact=log_name,
         )
+        self.remember(task_id, key, step.command, result)
         return result
 
     def ensure_deps(
@@ -656,6 +730,9 @@ class Sandbox:
 
             return self._run(task_id, step, src=src, volume="", build=build, keep=keep)
 
+    def node_key(self, src: Path, qa: Path | None) -> str | None:
+        return self.tree_hash([self.image], [("src", src), *([("qa", qa)] if qa is not None else [])])
+
     def run_step(self, task_id: str, step_name: str, role: AgentRole | None) -> CheckResult:
         if step_name == API_TEST:
             task = self.store.get_task(task_id)
@@ -672,16 +749,20 @@ class Sandbox:
         self.require_image()
         root = self.workspace.task_worktree(task_id)
         src = root / APP_DIR
-        volume, install = self.ensure_deps(task_id, src)
-        if install is not None and install.exit_code != 0:
-            return install
         with tempfile.TemporaryDirectory(dir=self.workspace.root) as tmp:
             qa = None
             if step.name == "e2e":
                 qa = Path(tmp) / "qa"
                 if not self._copy_qa(root, qa):
                     raise SandboxError("Набор тестов QA пуст.")
-            return self._run(task_id, step, src=src, volume=volume, qa=qa, role=role)
+            key = self.node_key(src, qa)
+            found = self.cached(task_id, key, step.command)
+            if found is not None:
+                return self.replay(task_id, found, step.name, role, None)
+            volume, install = self.ensure_deps(task_id, src)
+            if install is not None and install.exit_code != 0:
+                return install
+            return self._run(task_id, step, src=src, volume=volume, qa=qa, role=role, key=key)
 
     def _copy_qa(self, src: Path, qa: Path) -> list[str]:
         files = []
@@ -723,7 +804,7 @@ class Sandbox:
 
     def run_suite(
         self, task_id: str, app_sha: str, qa_sha: str, *, require_e2e: bool = False, diff_base: str | None = None,
-        change_class: ChangeClass | None = None,
+        change_class: ChangeClass | None = None, reuse: bool = True,
     ) -> CheckReport:
         self.check_cancelled(task_id)
         self.require_image()
@@ -746,29 +827,37 @@ class Sandbox:
             steps = suite_steps(self.workspace.changed_between(base, app_full), change_class, bool(qa_files))
             suite_hash = self.suite_hash(app, qa if qa_files else None, api_qa)
             context = {"commit_sha": app_full, "qa_sha": qa_full}
-            volume, install = self.ensure_deps(task_id, app / APP_DIR, context)
+            src = app / APP_DIR
+            keys = {name: self.node_key(src, qa if name == "e2e" else None) for name in SUITE if name in steps}
+            found = {
+                name: hit for name, key in keys.items()
+                if reuse and (hit := self.cached(task_id, key, self.policy.steps[name].command)) is not None
+            }
+            volume, install = ("", None) if len(found) == len(keys) else self.ensure_deps(task_id, src, context)
             if install is not None:
                 checks.append(install)
             if install is None or install.exit_code == 0:
-                for name in SUITE:
-                    if name not in steps:
-                        continue
+                for name in keys:
                     self.check_cancelled(task_id)
+                    if name in found:
+                        checks.append(self.replay(task_id, found[name], name, None, context))
+                        continue
                     checks.append(
                         self._run(
                             task_id,
                             self.policy.steps[name],
-                            src=app / APP_DIR,
+                            src=src,
                             volume=volume,
                             qa=qa if name == "e2e" else None,
                             context=context,
+                            key=keys[name],
                         )
                     )
             if API_TEST in steps:
-                checks += self.python.run_api_tests(task_id, app / APP_DIR, context, junit=pytest_qa)
+                checks += self.python.run_api_tests(task_id, src, context, junit=pytest_qa, reuse=reuse)
             if API_COMPAT in steps:
                 with self.workspace.checkout(base) as (previous, _):
-                    checks += self.python.api_compat(task_id, previous / APP_DIR, app / APP_DIR, context)
+                    checks += self.python.api_compat(task_id, previous / APP_DIR, src, context, reuse=reuse)
         report = CheckReport(
             task_id=task_id,
             commit_sha=app_full,

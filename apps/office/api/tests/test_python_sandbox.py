@@ -7,7 +7,7 @@ import pytest
 
 from app import python_sandbox
 from app.python_sandbox import PythonSandbox
-from app.sandbox import MARKER, Sandbox, SandboxCancelled, SandboxError
+from app.sandbox import COMPAT_COMMANDS, MARKER, Sandbox, SandboxCancelled, SandboxError
 
 PYPROJECT = '[project]\nname = "vibe-chat-api"\n'
 LOCK = "version = 1\n"
@@ -30,12 +30,16 @@ class FakeDocker:
     def __init__(self):
         self.calls = []
         self.images = {"office-python-sandbox:p5", "postgres:16-alpine"}
+        self.image_ids = {}
         self.volumes = {}
         self.networks = set()
         self.created = {}
         self.started = set()
         self.install_exit = 0
         self.test_exit = 0
+        self.dump_exit = 0
+        self.restore_exit = 0
+        self.psql = []
         self.marker = True
         self.pg_ready = 0
         self.failures = {}
@@ -58,7 +62,9 @@ class FakeDocker:
             self.calls.append(list(args))
         command = args[1:3]
         if command == ["image", "inspect"]:
-            return 0 if args[3] in self.images else 1
+            if "--format" in args and args[-1] in self.image_ids and log is not None:
+                log.write(self.image_ids[args[-1]].encode())
+            return 0 if args[-1] in self.images else 1
         if command == ["volume", "inspect"]:
             return 0 if args[3] in self.volumes else 1
         if command == ["volume", "rm"]:
@@ -90,6 +96,12 @@ class FakeDocker:
             if self.on_create is not None:
                 self.on_create(name)
             return 0
+        if args[1] == "exec" and args[3] == "pg_dump":
+            log.write(b"-- base data\n")
+            return self.dump_exit
+        if args[1] == "exec" and args[3] == "psql":
+            self.psql.append(args[4:])
+            return self.restore_exit if "-f" in args else 0
         if args[1] == "exec":
             return self.pg_ready
         if args[1] == "start" and args[2] != "--attach":
@@ -404,3 +416,125 @@ def test_stale_containers_and_networks_are_removed(setup):
     assert list(docker.created) == ["foreign"]
     assert docker.networks == set()
     assert ["docker", "network", "ls", "-q", "--filter", f"label={sandbox.label}"] in docker.calls
+
+
+IMAGE_IDS = {"office-python-sandbox:p5": "sha256:python-1", "postgres:16-alpine": "sha256:postgres-1"}
+
+
+def check_events(app, task_id):
+    return [event for event in app.state.store.events_after(task_id, 0, 1000) if event.type == "check_result"]
+
+
+def containers(docker, start=0):
+    return [args for args in docker.calls[start:] if args[:2] == ["docker", "create"] or args[1] == "network"]
+
+
+def task_copy(src, path, schema):
+    (path / "api" / "app").mkdir(parents=True)
+    for name in ("pyproject.toml", "uv.lock"):
+        (path / "api" / name).write_text((src / "api" / name).read_text())
+    (path / "api" / "app" / "schema.sql").write_text(schema)
+    return path
+
+
+def test_api_tests_are_reused_for_same_tree(setup):
+    app, docker, _, python, task_id, src = setup
+    docker.image_ids = dict(IMAGE_IDS)
+    [_, first] = python.run_api_tests(task_id, src)
+    before = len(docker.calls)
+    [again] = python.run_api_tests(task_id, src, {"commit_sha": "c" * 40})
+    assert containers(docker, before) == []
+    assert again == first
+    event = check_events(app, task_id)[-1]
+    assert event.payload["cached"] is True and event.payload["step"] == "api-test"
+    assert event.payload["commit_sha"] == "c" * 40 and event.artifact == "api-test-1.log"
+
+    python.run_api_tests(task_id, src, junit=True)
+    assert len(docker.step_args("api-test")) == 2
+    (src / "api" / "tests").mkdir()
+    (src / "api" / "tests" / "test_new.py").write_text("def test_new():\n    pass\n")
+    python.run_api_tests(task_id, src)
+    assert len(docker.step_args("api-test")) == 3
+    docker.image_ids["postgres:16-alpine"] = "sha256:postgres-2"
+    python.run_api_tests(task_id, src)
+    assert len(docker.step_args("api-test")) == 4
+
+
+def test_api_compat_reuses_base_pytest_when_task_version_changes(setup, tmp_path):
+    app, docker, _, python, task_id, src = setup
+    docker.image_ids = dict(IMAGE_IDS)
+    task_src = task_copy(src, tmp_path / "task-chat", "CREATE TABLE a (id text);\n")
+    first = python.api_compat(task_id, src, task_src)
+    assert len(docker.step_args("api-compat")) == 3
+
+    [first_pg] = docker.create_args("pg")
+    assert "/restore" not in "".join(first_pg)
+    [dump] = [args for args in docker.calls if args[1] == "exec" and args[3] == "pg_dump"]
+    assert dump[2] == first_pg[first_pg.index("--name") + 1]
+    dumps = list((app.state.settings.artifacts_dir / task_id).glob("api-compat-base-*.sql"))
+    assert len(dumps) == 1 and dumps[0].read_text() == "-- base data\n"
+
+    (task_src / "api" / "app" / "schema.sql").write_text("CREATE TABLE b (id text);\n")
+    second = python.api_compat(task_id, src, task_src, {"commit_sha": "d" * 40})
+    runs = docker.step_args("api-compat")
+    assert len(runs) == 5
+    assert [mounts(args)["/src"][1] for args in runs[3:]] == [str(task_src), str(src)]
+    second_pg = docker.create_args("pg")[1]
+    assert mounts(second_pg)["/restore/base.sql"] == ("bind", str(dumps[0]), True)
+    assert docker.psql == [
+        ["-U", "vibe", "-d", "vibe", "-v", "ON_ERROR_STOP=1", "-q", "-c", "CREATE DATABASE vibe_test"],
+        ["-U", "vibe", "-d", "vibe_test", "-v", "ON_ERROR_STOP=1", "-q", "-f", "/restore/base.sql"],
+    ]
+    assert [check.command for check in second] == list(COMPAT_COMMANDS)
+    assert second[0] == first[1]
+    assert [event.payload.get("cached") for event in check_events(app, task_id)[-3:]] == [True, None, None]
+
+    before = len(docker.calls)
+    third = python.api_compat(task_id, src, task_src)
+    assert containers(docker, before) == []
+    assert third == second
+    assert docker.created == {} and docker.networks == set()
+
+
+@pytest.mark.parametrize("failure", ["restore", "dump", "missing"])
+def test_api_compat_runs_base_again_without_restored_data(setup, tmp_path, failure):
+    app, docker, _, python, task_id, src = setup
+    docker.image_ids = dict(IMAGE_IDS)
+    docker.dump_exit = 1 if failure == "dump" else 0
+    task_src = task_copy(src, tmp_path / "task-chat", "CREATE TABLE a (id text);\n")
+    python.api_compat(task_id, src, task_src)
+    dumps = list((app.state.settings.artifacts_dir / task_id).glob("api-compat-base-*.sql"))
+    assert len(dumps) == (0 if failure == "dump" else 1)
+    if failure == "missing":
+        dumps[0].unlink()
+    docker.restore_exit = 1 if failure == "restore" else 0
+    (task_src / "api" / "app" / "schema.sql").write_text("CREATE TABLE b (id text);\n")
+    checks = python.api_compat(task_id, src, task_src)
+    assert [check.command for check in checks] == list(COMPAT_COMMANDS)
+    assert len(docker.step_args("api-compat")) == 6
+    assert all("cached" not in event.payload for event in check_events(app, task_id)[-3:])
+    if failure == "restore":
+        assert docker.psql[-1][-1] == "DROP DATABASE IF EXISTS vibe_test"
+    else:
+        assert docker.psql == []
+
+
+def test_cached_failure_of_base_pytest_is_returned_without_database(setup, tmp_path):
+    app, docker, _, python, task_id, src = setup
+    docker.image_ids = dict(IMAGE_IDS)
+    docker.test_exit = 1
+    task_src = task_copy(src, tmp_path / "task-chat", "CREATE TABLE a (id text);\n")
+    [_, failed] = python.api_compat(task_id, src, task_src)
+    (task_src / "api" / "app" / "schema.sql").write_text("CREATE TABLE b (id text);\n")
+    before = len(docker.calls)
+    assert python.api_compat(task_id, src, task_src) == [failed]
+    assert containers(docker, before) == []
+
+
+def test_timeout_of_api_tests_is_not_cached(setup):
+    _, docker, _, python, task_id, src = setup
+    docker.image_ids = dict(IMAGE_IDS)
+    docker.test_exit = 124
+    python.run_api_tests(task_id, src)
+    python.run_api_tests(task_id, src)
+    assert len(docker.step_args("api-test")) == 2

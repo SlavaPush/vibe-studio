@@ -182,7 +182,8 @@ function host(url: string): string {
 function checkPhrase(event: TaskEvent): Phrase {
   const step = text(event.payload.step) ?? text(event.payload.command) ?? 'проверка'
   const ok = event.payload.exit_code === 0
-  return { text: 'проверка ', code: step, tail: ok ? ': успешно' : ': ошибка' }
+  const cached = event.payload.cached === true ? ' (результат прежнего прогона)' : ''
+  return { text: 'проверка ', code: step, tail: `${ok ? ': успешно' : ': ошибка'}${cached}` }
 }
 
 function toolPhrase(event: TaskEvent, role: AgentRole | null): Phrase {
@@ -371,6 +372,7 @@ const DETAIL_LABELS: Record<string, string> = {
   command: 'Команда',
   exit_code: 'Код выхода',
   duration_ms: 'Длительность',
+  cached: 'Источник',
   commit_sha: 'Commit',
   qa_sha: 'Commit теста QA',
   release_id: 'Выпуск',
@@ -482,6 +484,8 @@ function detailValue(key: string, value: unknown): string {
       return value === true ? 'пройдена' : 'не пройдена'
     case 'fault':
       return value === true ? 'да' : 'нет'
+    case 'cached':
+      return value === true ? 'прежний прогон на том же дереве' : 'новый запуск'
     case 'duration_ms':
       return typeof value === 'number' ? `${(value / 1000).toFixed(1)} с` : plain(value)
     case 'pr_number':

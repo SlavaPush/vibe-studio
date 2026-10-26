@@ -127,6 +127,25 @@ def test_api_compat_rejects_schema_that_breaks_base_version(real, tmp_path):
     assert checks[-1].exit_code != 0
 
 
+def test_cached_base_pytest_restores_base_data_before_new_schema(real, tmp_path):
+    app, sandbox, python, task_id, src = real
+    task_dir = app.state.settings.artifacts_dir / task_id
+    additive = task_copy(src, tmp_path / "task-chat", "\nALTER TABLE users ADD COLUMN IF NOT EXISTS nickname text;\n")
+    first = python.api_compat(task_id, src, additive)
+    assert [check.exit_code for check in first][-3:] == [0, 0, 0]
+    assert len(list(task_dir.glob("api-compat-base-*.sql"))) == 1
+    needs_empty_table = (
+        "\nALTER TABLE access_codes ADD COLUMN IF NOT EXISTS must text;\n"
+        "ALTER TABLE access_codes ALTER COLUMN must SET NOT NULL;\n"
+    )
+    second = python.api_compat(task_id, src, task_copy(src, tmp_path / "task-chat-2", needs_empty_table))
+    logs = "\n".join((task_dir / check.artifact_urls[0].rsplit("/", 1)[1]).read_text(errors="replace")[-3000:] for check in second)
+    assert [check.command for check in second] == list(COMPAT_COMMANDS[:2]), logs
+    assert second[0] == first[-3]
+    assert second[1].exit_code != 0, logs
+    assert docker_lines("network", "ls", "-q", "--filter", f"label={sandbox.label}") == []
+
+
 def test_real_uv_lock_adds_dependency(real):
     app, sandbox, python, task_id, src = real
     pyproject = src / "api" / "pyproject.toml"

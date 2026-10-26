@@ -571,6 +571,15 @@ describe('describeEvent', () => {
     ])
   })
 
+  it('переиспользованный результат проверки помечен в ленте', () => {
+    const log = new Log().check(null, 'lint', 0).check(null, 'test', 1, { cached: true }).check(null, 'lint', 0, { cached: true })
+    expect(log.events.map(describeEvent)).toEqual([
+      { text: 'Проверка ', code: 'lint', tail: ': успешно' },
+      { text: 'Проверка ', code: 'test', tail: ': ошибка (результат прежнего прогона)' },
+      { text: 'Проверка ', code: 'lint', tail: ': успешно (результат прежнего прогона)' },
+    ])
+  })
+
   it('строка смены статуса показывает причину остановки', () => {
     const log = new Log()
       .status('developing', 'reviewing')
@@ -584,6 +593,20 @@ describe('describeEvent', () => {
 
 describe('describeEventDetails', () => {
   const details = (log: Log) => log.events.map(describeEventDetails)
+
+  it('переиспользованная проверка: источник — прежний прогон', () => {
+    const log = new Log().check(null, 'build', 0, { cached: true })
+    expect(details(log)).toEqual([
+      [
+        { label: 'Инструмент', value: 'sandbox' },
+        { label: 'Команда', value: 'npm run build' },
+        { label: 'Код выхода', value: '0' },
+        { label: 'Длительность', value: '1.0 с' },
+        { label: 'Шаг', value: 'build' },
+        { label: 'Источник', value: 'прежний прогон на том же дереве' },
+      ],
+    ])
+  })
 
   it('смена статуса с причиной', () => {
     const log = new Log().add('status_changed', { from: 'developing', to: 'needs_attention', reason: 'Нужен сервер.' })

@@ -638,6 +638,15 @@ class Workspace:
         output = run_git("ls-files", "-z", "--", APP_DIR, cwd=path)
         return [name for name in output.decode("utf-8").split("\0") if name]
 
+    def commit_files(self, src: Path) -> list[str] | None:
+        try:
+            if run_git("rev-parse", "--show-prefix", cwd=src).decode("utf-8").strip() != f"{APP_DIR}/":
+                return None
+            output = run_git("ls-files", "-z", "--cached", "--others", "--exclude-standard", cwd=src)
+        except WorkspaceError:
+            return None
+        return list(dict.fromkeys(name for name in output.decode("utf-8").split("\0") if name))
+
     @contextmanager
     def checkout(self, sha: str) -> Iterator[tuple[Path, str]]:
         with self.lock:

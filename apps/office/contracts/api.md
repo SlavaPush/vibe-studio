@@ -273,7 +273,7 @@
 | `artifact_ready` | `name`, `size_bytes` |
 | `decision_required` | `decision`, `expected_version`, при выпуске также `release_id` |
 | `decision_recorded` | `decision`, `decision_id`, `participant_id`; для `rollback` с причиной также `reason` |
-| `check_result` | `command`, `exit_code`, `duration_ms` |
+| `check_result` | `command`, `exit_code`, `duration_ms`; `cached: true` — офис не запускал проверку заново, а переиспользовал результат своего прежнего прогона этой задачи на том же дереве (те же файлы, файлы политики и образ песочницы); `duration_ms` и `artifact` — от прежнего прогона. При новом запуске поле `cached` отсутствует |
 | `release_candidate` | `release_id`, `commit_sha` |
 | `deploy_status` | `release_id`, `render_deploy_id`, `render_status` — новый статус деплоя Render; после проверки после деплоя также `verified` (boolean) и `fault` (boolean — управляемый сбой `OFFICE_VERIFY_FAULT=1`, сервис не проверялся) |
 | `pr_opened` | `pr_number`, `pr_url` — PR задачи создан или найден |

@@ -47,6 +47,7 @@ class FakeDocker:
         self.calls = []
         self.volumes = {}
         self.image = True
+        self.image_id = None
         self.delay = 0.0
         self.install_exit = 0
         self.exit_codes = {}
@@ -70,6 +71,8 @@ class FakeDocker:
             self.calls.append(list(args))
         command = args[1:3]
         if command == ["image", "inspect"]:
+            if "--format" in args and self.image_id and log is not None:
+                log.write(self.image_id.encode())
             return 0 if self.image else 1
         if command == ["volume", "inspect"]:
             return 0 if args[3] in self.volumes else 1
@@ -433,6 +436,161 @@ def test_suite_checks_committed_content_while_worktree_changes(setup):
     assert seen["draft"] is False
     assert seen["src"] != root
     assert len({mounts(args)["/src"][1] for args in docker.runs()}) == 1
+
+
+def creates(docker, start=0):
+    return [args for args in docker.calls[start:] if args[:2] == ["docker", "create"]]
+
+
+def check_events(app, task_id):
+    return [event for event in app.state.store.events_after(task_id, 0, 1000) if event.type == "check_result"]
+
+
+def test_developer_checks_are_reused_by_suite_on_same_commit(setup):
+    app, _, docker, make, start = setup
+    sandbox = make()
+    [task_id] = start()
+    ready(docker, sandbox, app, task_id)
+    docker.image_id = "sha256:image-1"
+    workspace = app.state.workspace
+    root = workspace.worktree_path(task_id)
+    (root / "apps/chat/web/src/Feature.tsx").write_text("export const feature = 1\n")
+    docker.exit_codes["test"] = 1
+    own = [sandbox.run_step(task_id, step, AgentRole.developer) for step in ("lint", "test", "build")]
+    commit = workspace.commit(task_id, "feature")
+    before = len(docker.calls)
+
+    report = sandbox.run_suite(task_id, commit, commit)
+    assert creates(docker, before) == []
+    assert report.checks == own
+    assert [check.exit_code for check in report.checks] == [0, 1, 0]
+    events = check_events(app, task_id)
+    assert all("cached" not in event.payload for event in events[:3])
+    assert [event.payload["step"] for event in events[3:]] == ["lint", "test", "build"]
+    assert all(event.payload["cached"] is True and event.payload["commit_sha"] == commit for event in events[3:])
+    assert [event.artifact for event in events[3:]] == ["lint-1.log", "test-1.log", "build-1.log"]
+    assert [event.payload["duration_ms"] for event in events[3:]] == [check.duration_ms for check in own]
+    assert app.state.store.check_reports(task_id, commit)[0].checks == own
+
+
+def test_worktree_with_ignored_files_is_not_reused_for_commit(setup):
+    app, _, docker, make, start = setup
+    sandbox = make()
+    [task_id] = start()
+    ready(docker, sandbox, app, task_id)
+    docker.image_id = "sha256:image-1"
+    workspace = app.state.workspace
+    root = workspace.worktree_path(task_id)
+    (workspace.clone / ".git/info/exclude").write_text("coverage/\n")
+    (root / "apps/chat/web/src/coverage").mkdir()
+    (root / "apps/chat/web/src/coverage/helper.ts").write_text("export const helper = 1\n")
+    (root / "apps/chat/web/src/App.tsx").write_text("import { helper } from './coverage/helper'\nexport const app = helper\n")
+    sandbox.run_step(task_id, "build", AgentRole.developer)
+    sandbox.run_step(task_id, "build", AgentRole.developer)
+    assert len(docker.runs("build")) == 2
+    commit = workspace.commit(task_id, "feature")
+    assert "apps/chat/web/src/coverage/helper.ts" not in git(root, "ls-tree", "-r", "--name-only", commit)
+    sandbox.run_suite(task_id, commit, commit)
+    assert len(docker.runs("build")) == 3
+    assert all("cached" not in event.payload for event in check_events(app, task_id))
+
+
+@pytest.mark.parametrize("change", ["source", "qa", "lock", "policy", "image"])
+def test_changed_input_runs_check_again(setup, tmp_path, change):
+    app, _, docker, make, start = setup
+    policy = tmp_path / "commands.yaml"
+    policy.write_text(app.state.settings.commands_policy.read_text())
+    sandbox = make(commands_policy=policy)
+    [task_id] = start()
+    ready(docker, sandbox, app, task_id)
+    docker.image_id = "sha256:image-1"
+    root = app.state.workspace.worktree_path(task_id)
+    qa_test = root / "apps/chat/web/e2e/office/feature.pw.ts"
+    qa_test.parent.mkdir(parents=True)
+    qa_test.write_text("test('feature')\n")
+    step, role = ("e2e", AgentRole.qa) if change == "qa" else ("lint", AgentRole.developer)
+    sandbox.run_step(task_id, step, role)
+    sandbox.run_step(task_id, step, role)
+    assert len(docker.runs(step)) == 1
+    if change == "source":
+        (root / "apps/chat/web/src/App.tsx").write_text("export const changed = 1\n")
+    elif change == "qa":
+        qa_test.write_text("test('changed')\n")
+    elif change == "lock":
+        lock = root / "apps/chat/web/package-lock.json"
+        lock.write_text(lock.read_text() + "\n")
+    elif change == "policy":
+        policy.write_text(policy.read_text() + "\n# changed\n")
+    else:
+        docker.image_id = "sha256:image-2"
+    sandbox.run_step(task_id, step, role)
+    assert len(docker.runs(step)) == 2
+
+
+def test_failure_is_cached_but_timeout_is_not(setup):
+    app, _, docker, make, start = setup
+    sandbox = make()
+    [task_id] = start()
+    ready(docker, sandbox, app, task_id)
+    docker.image_id = "sha256:image-1"
+    docker.timeouts = {"lint"}
+    assert sandbox.run_step(task_id, "lint", AgentRole.developer).exit_code == 124
+    docker.timeouts = set()
+    docker.exit_codes["lint"] = 1
+    assert sandbox.run_step(task_id, "lint", AgentRole.developer).exit_code == 1
+    assert sandbox.run_step(task_id, "lint", AgentRole.developer).exit_code == 1
+    assert len(docker.runs("lint")) == 2
+
+
+def test_checks_are_not_reused_without_image_id_or_across_tasks(setup):
+    app, _, docker, make, start = setup
+    sandbox = make()
+    first, second = start(2)
+    for task_id in (first, second):
+        ready(docker, sandbox, app, task_id)
+    sandbox.run_step(first, "lint", AgentRole.developer)
+    sandbox.run_step(first, "lint", AgentRole.developer)
+    assert len(docker.runs("lint")) == 2
+    docker.image_id = "sha256:image-1"
+    sandbox.run_step(first, "lint", AgentRole.developer)
+    sandbox.run_step(second, "lint", AgentRole.developer)
+    assert len(docker.runs("lint")) == 4
+    sandbox.run_step(first, "lint", AgentRole.developer)
+    sandbox.run_step(second, "lint", AgentRole.developer)
+    assert len(docker.runs("lint")) == 4
+
+
+def test_repeated_qa_run_on_base_reuses_result_unless_fresh(setup):
+    app, _, docker, make, start = setup
+    sandbox = make()
+    [task_id] = start()
+    ready(docker, sandbox, app, task_id)
+    docker.image_id = "sha256:image-1"
+    workspace = app.state.workspace
+    root = workspace.worktree_path(task_id)
+    (root / "apps/chat/web/e2e/office").mkdir(parents=True)
+    (root / f"apps/chat/{QA_FILE}").write_text("test('feature')\n")
+    commit = workspace.commit(task_id, "qa test")
+    base = app.state.store.get_task(task_id).base_sha
+
+    def write_report(args):
+        out = Path(mounts(args)["/out"][1])
+        (out / "playwright-report.json").write_text(json.dumps(report(result("failed", FAILURE))))
+
+    docker.hooks = {"e2e": write_report}
+    first = sandbox.run_suite(task_id, base, commit, require_e2e=True)
+    second = sandbox.run_suite(task_id, base, commit, require_e2e=True)
+    assert len(docker.runs()) == 4
+    assert second.checks == first.checks
+    assert sandbox.e2e_result(task_id, second, QA_FILE).status == "failed"
+    assert sandbox.e2e_result(task_id, second, QA_FILE) == sandbox.e2e_result(task_id, first, QA_FILE)
+
+    fresh = sandbox.run_suite(task_id, base, commit, require_e2e=True, reuse=False)
+    assert len(docker.runs()) == 8
+    assert fresh.checks[-1].artifact_urls != first.checks[-1].artifact_urls
+    again = sandbox.run_suite(task_id, base, commit, require_e2e=True)
+    assert len(docker.runs()) == 8
+    assert again.checks == fresh.checks
 
 
 def test_missing_marker_after_install_stops_checks(setup):

@@ -302,6 +302,7 @@ class FakeSuite:
         self.python = SimpleNamespace(lock=FakeLock("uv.lock", "uv lock"))
         self.steps: list[list[str]] = []
         self.calls: list[tuple[str, str, str, bool]] = []
+        self.reuses: list[bool] = []
         self.exits: Callable[[str, str, str, bool], dict[str, int]] = lambda task_id, app, qa, e2e: {}
         self.e2e: Callable[[str, str, str], E2EResult] = self.default_e2e
         self.on_suite: Callable[[str, str, str, bool], None] | None = None
@@ -323,11 +324,12 @@ class FakeSuite:
 
     def run_suite(
         self, task_id: str, app_sha: str, qa_sha: str, *, require_e2e: bool = False, diff_base: str | None = None,
-        change_class: Any = None,
+        change_class: Any = None, reuse: bool = True,
     ) -> CheckReport:
         self.check_cancelled(task_id)
         with self.lock:
             self.calls.append((task_id, app_sha, qa_sha, require_e2e))
+            self.reuses.append(reuse)
         if self.on_suite is not None:
             self.on_suite(task_id, app_sha, qa_sha, require_e2e)
         exits = self.exits(task_id, app_sha, qa_sha, require_e2e)

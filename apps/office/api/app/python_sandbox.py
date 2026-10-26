@@ -52,6 +52,7 @@ APPLY_SCHEMA = (
     "with psycopg.connect(os.environ['TEST_DATABASE_URL'], autocommit=True) as conn:\n"
     "    conn.execute(open(sys.argv[1], encoding='utf-8').read())\n"
 )
+RESTORE_PATH = "/restore/base.sql"
 LOCK_STEP = "lock-python"
 LOCK_COMMAND = "uv lock"
 LOCK_TIMEOUT = 600
@@ -114,9 +115,13 @@ class PythonSandbox:
                 self.sandbox._docker(*removal, item, timeout=30)
 
     def run_api_tests(
-        self, task_id: str, src: Path, context: dict[str, str] | None = None, *, junit: bool = False
+        self, task_id: str, src: Path, context: dict[str, str] | None = None, *, junit: bool = False,
+        reuse: bool = True,
     ) -> list[CheckResult]:
-        return self._run_api_tests(task_id, src, context, junit=junit)
+        return self._run_api_tests(task_id, src, context, junit=junit, reuse=reuse)
+
+    def tree_key(self, *trees: tuple[str, Path]) -> str | None:
+        return self.sandbox.tree_hash([self.image, self.postgres_image], list(trees))
 
     def _run_api_tests(
         self,
@@ -126,16 +131,23 @@ class PythonSandbox:
         command: list[str] | None = None,
         *,
         junit: bool = False,
+        reuse: bool = True,
     ) -> list[CheckResult]:
         self.sandbox.check_cancelled(task_id)
         self.require_images()
         self.check_source(src)
+        shown = TEST_COMMAND if command is None else shlex.join(command)
+        argv = [*(command or TEST_ARGS), *([f"--junitxml=/out/{JUNIT_NAME}"] if junit else [])]
+        key = self.tree_key(("src", src))
+        found = self.sandbox.cached(task_id, key, shlex.join(argv)) if reuse else None
+        if found is not None:
+            return [self.sandbox.replay(task_id, found, TEST_STEP, None, context)]
         volume, install = self.ensure_deps(task_id, src, context)
         checks = [] if install is None else [install]
         if install is not None and install.exit_code != 0:
             return checks
         self.sandbox.check_cancelled(task_id)
-        checks.append(self._tests(task_id, src, volume, context, command, junit))
+        checks.append(self._tests(task_id, src, volume, context, shown, argv, key, junit))
         return checks
 
     def volume_ready(self, task_id: str, volume: str) -> bool:
@@ -188,7 +200,7 @@ class PythonSandbox:
                     self.sandbox._docker("volume", "rm", "-f", volume)
             return volume, result
 
-    def postgres_args(self, name: str, network: str) -> list[str]:
+    def postgres_args(self, name: str, network: str, restore: Path | None = None) -> list[str]:
         size = self.sandbox.policy.tmpfs_size
         return [
             "create", "--pull", "never", "--name", name,
@@ -209,6 +221,7 @@ class PythonSandbox:
             "--env", "POSTGRES_USER=vibe",
             "--env", "POSTGRES_PASSWORD=vibe",
             "--env", "POSTGRES_DB=vibe",
+            *(mount("bind", restore, RESTORE_PATH, readonly=True) if restore is not None else []),
             self.postgres_image,
         ]
 
@@ -222,20 +235,51 @@ class PythonSandbox:
                 raise SandboxError(f"PostgreSQL для тестов API не запустился за {int(PG_WAIT_SECONDS)} с.")
             time.sleep(PG_POLL_SECONDS)
 
+    def _psql(self, postgres: str, database: str, *args: str) -> int:
+        return self.sandbox._docker(
+            "exec", postgres, "psql", "-U", "vibe", "-d", database, "-v", "ON_ERROR_STOP=1", "-q", *args,
+            timeout=TEST_TIMEOUT,
+        )
+
+    def _restore(self, postgres: str) -> bool:
+        if self._psql(postgres, "vibe", "-c", "CREATE DATABASE vibe_test") != 0:
+            return False
+        if self._psql(postgres, "vibe_test", "-f", RESTORE_PATH) == 0:
+            return True
+        if self._psql(postgres, "vibe", "-c", "DROP DATABASE IF EXISTS vibe_test") != 0:
+            raise SandboxError("Не удалось очистить временную PostgreSQL после неудачного восстановления данных.")
+        return False
+
+    def _dump(self, postgres: str, path: Path) -> None:
+        temp = path.with_name(f".{path.name}.tmp")
+        try:
+            with open(temp, "wb") as file:
+                log = CappedLog(file, self.sandbox.policy.artifact_bytes)
+                code = self.sandbox.runner(
+                    ["docker", "exec", postgres, "pg_dump", "-U", "vibe", "-d", "vibe_test", "--no-owner"],
+                    TEST_TIMEOUT, log,
+                )
+            if code == 0 and not log.truncated:
+                os.replace(temp, path)
+        except (OSError, subprocess.TimeoutExpired):
+            logger.exception("pg_dump failed")
+        finally:
+            temp.unlink(missing_ok=True)
+
     @contextmanager
-    def _database(self, task_id: str) -> Iterator[str]:
+    def _database(self, task_id: str, restore: Path | None = None) -> Iterator[tuple[str, str]]:
         suffix = os.urandom(4).hex()
         network = f"office-pynet-{task_id}-{suffix}"
         postgres = f"office-{task_id}-pg-{suffix}"
         try:
             if self.sandbox._docker("network", "create", "--internal", "--label", self.sandbox.label, network) != 0:
                 raise SandboxError("Не удалось создать внутреннюю сеть Docker для тестов API.")
-            if self.sandbox._docker(*self.postgres_args(postgres, network)) != 0:
+            if self.sandbox._docker(*self.postgres_args(postgres, network, restore)) != 0:
                 raise SandboxError("Не удалось создать контейнер PostgreSQL для тестов API.")
             if self.sandbox._docker("start", postgres) != 0:
                 raise SandboxError("Не удалось запустить контейнер PostgreSQL для тестов API.")
             self.wait_postgres(task_id, postgres)
-            yield network
+            yield network, postgres
         finally:
             if self.sandbox._docker("rm", "-f", postgres, timeout=30) != 0:
                 logger.warning("docker rm %s failed", postgres)
@@ -260,45 +304,73 @@ class PythonSandbox:
         src: Path,
         volume: str,
         context: dict[str, str] | None,
-        command: list[str] | None,
-        junit: bool = False,
+        shown: str,
+        argv: list[str],
+        key: str | None,
+        junit: bool,
     ) -> CheckResult:
-        with self._database(task_id) as network:
-            shown = TEST_COMMAND if command is None else shlex.join(command)
-            argv = [*(command or TEST_ARGS), *([f"--junitxml=/out/{JUNIT_NAME}"] if junit else [])]
+        with self._database(task_id) as (network, _):
             return self._run(
                 task_id, TEST_STEP, shown,
                 lambda name, out: self._client_args(name, network, src, volume, argv, out if junit else None),
-                TEST_TIMEOUT, context,
+                TEST_TIMEOUT, context, key=key, cache_name=shlex.join(argv),
             )
 
+    def base_dump(self, task_id: str, key: str | None) -> Path | None:
+        if key is None:
+            return None
+        return self.sandbox.artifacts_dir / task_id / f"{COMPAT_STEP}-base-{key.rsplit(':', 1)[-1][:32]}.sql"
+
     def api_compat(
-        self, task_id: str, base_src: Path, task_src: Path, context: dict[str, str] | None = None
+        self, task_id: str, base_src: Path, task_src: Path, context: dict[str, str] | None = None,
+        *, reuse: bool = True,
     ) -> list[CheckResult]:
         self.sandbox.check_cancelled(task_id)
         self.require_images()
         self.check_source(base_src)
         self.check_source(task_src)
+        base_key = self.tree_key(("base", base_src))
+        both_key = self.tree_key(("base", base_src), ("task", task_src))
+        steps = (
+            (COMPAT_BASE, base_src, list(TEST_ARGS), base_key),
+            (COMPAT_SCHEMA, task_src, ["/deps/venv/bin/python", "-c", APPLY_SCHEMA, "/src/api/app/schema.sql"], both_key),
+            (COMPAT_RETEST, base_src, list(TEST_ARGS), both_key),
+        )
+        found: list[CheckResult] = []
+        for shown, _, _, key in (steps if reuse else ()):
+            hit = self.sandbox.cached(task_id, key, shown)
+            if hit is None:
+                break
+            found.append(hit)
+            if hit.exit_code != 0:
+                break
+        if len(found) == 2 and found[-1].exit_code == 0:
+            found.pop()
+        if found and (len(found) == len(steps) or found[-1].exit_code != 0):
+            return [self.sandbox.replay(task_id, hit, COMPAT_STEP, None, context) for hit in found]
+        dump = self.base_dump(task_id, base_key)
+        if found and (dump is None or not dump.is_file()):
+            found = []
         volume, install = self.ensure_deps(task_id, base_src, context)
         checks = [] if install is None else [install]
         if install is not None and install.exit_code != 0:
             return checks
-        steps = (
-            (COMPAT_BASE, base_src, list(TEST_ARGS)),
-            (COMPAT_SCHEMA, task_src, ["/deps/venv/bin/python", "-c", APPLY_SCHEMA, "/src/api/app/schema.sql"]),
-            (COMPAT_RETEST, base_src, list(TEST_ARGS)),
-        )
-        with self._database(task_id) as network:
-            for shown, src, argv in steps:
+        with self._database(task_id, dump if found else None) as (network, postgres):
+            if found and not self._restore(postgres):
+                found = []
+            checks += [self.sandbox.replay(task_id, hit, COMPAT_STEP, None, context) for hit in found]
+            for shown, src, argv, key in steps[len(found):]:
                 self.sandbox.check_cancelled(task_id)
                 result = self._run(
                     task_id, COMPAT_STEP, shown,
                     lambda name, out, src=src, argv=argv: self._client_args(name, network, src, volume, argv),
-                    TEST_TIMEOUT, context,
+                    TEST_TIMEOUT, context, key=key,
                 )
                 checks.append(result)
                 if result.exit_code != 0:
                     break
+                if shown == COMPAT_BASE and dump is not None:
+                    self._dump(postgres, dump)
         return checks
 
     def lock(self, task_id: str, root: Path) -> CheckResult:
@@ -339,6 +411,8 @@ class PythonSandbox:
         timeout: float,
         context: dict[str, str] | None,
         keep: Callable[[Path], None] | None = None,
+        key: str | None = None,
+        cache_name: str | None = None,
     ) -> CheckResult:
         task_dir = self.sandbox.artifacts_dir / task_id
         number = self.sandbox._next_number(task_dir, step)
@@ -381,4 +455,5 @@ class PythonSandbox:
             tool="sandbox",
             artifact=log_name,
         )
+        self.sandbox.remember(task_id, key, cache_name or command, result)
         return result

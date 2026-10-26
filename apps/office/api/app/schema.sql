@@ -149,6 +149,16 @@ CREATE TABLE IF NOT EXISTS check_reports (
     checks TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS check_cache (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks (id),
+    tree_hash TEXT NOT NULL,
+    step TEXT NOT NULL,
+    result TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (task_id, tree_hash, step)
+);
+
 CREATE TABLE IF NOT EXISTS operations (
     id TEXT PRIMARY KEY,
     task_id TEXT REFERENCES tasks (id),

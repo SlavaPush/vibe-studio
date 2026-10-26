@@ -21,6 +21,7 @@ from app.schemas import (
     AgentRole,
     ChangeClass,
     CheckReport,
+    CheckResult,
     Contour,
     FailureKind,
     PullRequestReview,
@@ -936,6 +937,31 @@ class TaskStore:
                     "spec_hash": report.spec_hash,
                     "suite_hash": report.suite_hash,
                     "checks": _json([check.model_dump() for check in report.checks]),
+                },
+            )
+
+    def cached_check(self, task_id: str, tree_hash: str, step: str) -> CheckResult | None:
+        with self.db.connection() as conn:
+            row = conn.fetchone(
+                "SELECT result FROM check_cache WHERE task_id = :id AND tree_hash = :hash AND step = :step",
+                {"id": task_id, "hash": tree_hash, "step": step},
+            )
+        return None if row is None else CheckResult.model_validate_json(row["result"])
+
+    def save_check(self, task_id: str, tree_hash: str, step: str, result: CheckResult) -> None:
+        with self.db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO check_cache (id, task_id, tree_hash, step, result, created_at) "
+                "VALUES (:id, :task_id, :hash, :step, :result, :now) "
+                "ON CONFLICT (task_id, tree_hash, step) DO UPDATE SET result = excluded.result, "
+                "created_at = excluded.created_at",
+                {
+                    "id": new_id("chc"),
+                    "task_id": task_id,
+                    "hash": tree_hash,
+                    "step": step,
+                    "result": result.model_dump_json(),
+                    "now": to_text(utcnow()),
                 },
             )
 
