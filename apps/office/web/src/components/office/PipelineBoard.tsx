@@ -6,6 +6,7 @@ import { AGENT_ROLE_LABELS, CHECK_STATUS_LABELS, eventTypeLabel, formatDateTime 
 import {
   STAGE_STATE_LABELS,
   describeEvent,
+  describeEventDetails,
   handoffText,
   type AgentKey,
   type AgentState,
@@ -315,6 +316,29 @@ export function EventFeed({ events }: { events: readonly TaskEvent[] }) {
   )
 }
 
+function EventDetails({ event }: { event: TaskEvent }) {
+  const lines = describeEventDetails(event)
+  if (lines.length === 0) return null
+  return (
+    <dl className="mt-1 grid gap-x-3 gap-y-1 desk:grid-cols-[max-content_minmax(0,1fr)]">
+      {lines.map((line, index) => (
+        <div key={`${index}:${line.label}`} className="grid gap-x-3 desk:col-span-2 desk:grid-cols-subgrid">
+          <dt className="text-muted-foreground">{line.label}</dt>
+          <dd className="break-words whitespace-pre-wrap">
+            {line.href ? (
+              <a href={line.href} target="_blank" rel="noopener noreferrer" className={linkClass}>
+                {line.value}
+              </a>
+            ) : (
+              line.value
+            )}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  )
+}
+
 function EventList({ events, ref }: { events: readonly TaskEvent[]; ref: Ref<HTMLOListElement> }) {
   return (
     <ol ref={ref} className="grid gap-2" aria-label="События задачи">
@@ -337,12 +361,18 @@ function EventList({ events, ref }: { events: readonly TaskEvent[]; ref: Ref<HTM
             <summary className="min-h-11 w-fit cursor-pointer content-center text-muted-foreground desk:min-h-0">
               Подробности
             </summary>
+            <EventDetails event={event} />
             <p className="mt-1 text-muted-foreground">
               {eventTypeLabel(event.type)} (<code className="font-mono">{event.type}</code>)
             </p>
-            <pre className="mt-1 max-h-64 overflow-auto rounded-md bg-muted p-2 font-mono break-all whitespace-pre-wrap">
-              {JSON.stringify({ tool: event.tool, artifact: event.artifact, payload: event.payload }, null, 2)}
-            </pre>
+            <details className="mt-1">
+              <summary className="min-h-11 w-fit cursor-pointer content-center text-muted-foreground desk:min-h-0">
+                Данные
+              </summary>
+              <pre className="mt-1 max-h-64 overflow-auto rounded-md bg-muted p-2 font-mono break-all whitespace-pre-wrap">
+                {JSON.stringify({ tool: event.tool, artifact: event.artifact, payload: event.payload }, null, 2)}
+              </pre>
+            </details>
           </details>
         </li>
       ))}

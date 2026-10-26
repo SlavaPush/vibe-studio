@@ -97,6 +97,20 @@ def test_event_examples_cover_every_type():
     assert {event["type"] for event in events} == set(PLAN_EVENT_TYPES)
 
 
+def test_task_examples_list_every_field():
+    tasks = [task for batch in examples_of("Task[]") for task in batch]
+    assert tasks
+    for task in tasks:
+        assert set(task) == set(schemas.Task.model_fields)
+    assert "| `halt_reason` |" in CONTRACT.read_text(encoding="utf-8")
+
+
+def test_status_change_example_carries_halt_reason():
+    events = [event for batch in examples_of("TaskEvent[]") for event in batch]
+    halted = [event for event in events if event["type"] == "status_changed" and "reason" in event["payload"]]
+    assert halted and halted[0]["payload"]["to"] == "needs_attention"
+
+
 def test_error_examples_cover_access_and_version_errors():
     codes = {error["code"] for error in examples_of("ApiError")}
     assert {"forbidden_not_owner", "forbidden_role", "version_mismatch", "unauthorized"} <= codes

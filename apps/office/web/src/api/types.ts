@@ -186,6 +186,7 @@ export interface Task {
   pr_number: number | null
   head_sha: string | null
   failure_kind: FailureKind | null
+  halt_reason: string | null
   checks: PullRequestChecks | null
   pr_review: PullRequestReview | null
   merge_sha: string | null

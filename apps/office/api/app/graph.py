@@ -553,7 +553,10 @@ class TaskGraph:
         if sha is None:
             sha = self.workspace.head(self.task_id)
             if sha == task.base_sha:
-                self.halt(AgentRole.developer, "implement", "Разработчик не изменил файлы.")
+                reason = "Разработчик не изменил файлы."
+                if reply.summary.strip():
+                    reason = f"{reason} Разработчик сообщил: {reply.summary.strip()}"
+                self.halt(AgentRole.developer, "implement", reason)
             self.finished(AgentRole.developer, "implement", "ok", "Новых изменений нет, проверяется текущая версия ветки.")
             return self.lock_files(task, marker)
         self.finished(AgentRole.developer, "implement", "ok", reply.summary or "Изменения зафиксированы.")
@@ -806,7 +809,16 @@ class TaskGraph:
                 raise Stopped("cannot enter awaiting_integration")
             return {"fix": False, "findings": findings}
         if task.status == S.reviewing and task.fix_cycles >= MAX_FIX_CYCLES:
-            self.halt(AgentRole.critic, "review", "Блокирующие замечания остались после двух циклов исправления.")
+            first = next(item for item in findings if item["blocking"])
+            place = first.get("file") or ""
+            if place and first.get("line"):
+                place = f"{place}:{first['line']}"
+            place = f" ({place})" if place else ""
+            self.halt(
+                AgentRole.critic,
+                "review",
+                f"Блокирующие замечания остались после двух циклов исправления. Первое замечание{place}: {first['text']}",
+            )
         cycles = task.fix_cycles + 1 if task.status == S.reviewing else task.fix_cycles
         if not self.store.ensure_status(self.task_id, S.reviewing, S.developing, fix_cycles=cycles):
             raise Stopped("cannot return to developing")

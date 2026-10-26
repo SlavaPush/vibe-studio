@@ -102,6 +102,13 @@ def test_server_task_is_accepted_with_backend_class(office):
         "Увеличь лимит токенов ответа для длинных вопросов.",
         "Increase the token limit for model responses in the chat.",
         "Увеличить дневную квоту сообщений для участника.",
+        "Добавить кнопку выхода из чата",
+        "Добавь кнопку «Выйти» в шапку чата.",
+        "Сделать вход в чат по коду доступа без перезагрузки.",
+        "Показывать участнику, сколько времени осталось до конца сессии.",
+        "Исправить авторизацию в чате после перезагрузки страницы.",
+        "Add a logout button to the chat header.",
+        "Let users sign out of the chat.",
     ],
 )
 def test_server_and_model_topics_raise_class_to_backend(office, text):
@@ -129,6 +136,11 @@ def test_interface_task_keeps_frontend_class(office):
         "Добавь отступы между репликами в контейнере чата.",
         "Измени контейнер чата таким образом, чтобы он занимал всю ширину.",
         "Покажи число реплик в диалоге рядом с заголовком.",
+        "Добавь в чат кнопку «Экспорт в Markdown».",
+        "Подсвечивай входящие сообщения в чате другим цветом.",
+        "Показывай в выходные дни праздничную тему чата.",
+        "В ходе генерации ответа показывай индикатор загрузки.",
+        "Show the error log in the chat settings panel.",
     ],
 )
 def test_interface_container_task_reaches_classifier(office, text):

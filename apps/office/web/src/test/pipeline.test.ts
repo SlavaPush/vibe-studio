@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import type { AgentRole, ReleaseCandidate, Task, TaskEvent } from '@/api/types'
-import { buildPipeline, describeEvent, handoffText, type Pipeline, type Stage } from '@/lib/pipeline'
+import {
+  buildPipeline,
+  describeEvent,
+  describeEventDetails,
+  handoffText,
+  type Pipeline,
+  type Stage,
+} from '@/lib/pipeline'
 import { releases, tasks } from '@/mocks/data'
 
 const developing = tasks.find((task) => task.id === 'tsk_101') as Task
@@ -556,6 +563,145 @@ describe('describeEvent', () => {
       { text: 'обращается к модели ', code: 'openai/gpt-6.1-sol', tail: ', усилие high' },
       { text: 'Обязательные проверки: 1 из 1 успешно для ', code: HEAD.slice(0, 7) },
       { text: 'Деплой Render: опубликован' },
+    ])
+  })
+
+  it('строка смены статуса показывает причину остановки', () => {
+    const log = new Log()
+      .status('developing', 'reviewing')
+      .add('status_changed', { from: 'developing', to: 'needs_attention', reason: 'Разработчик не изменил файлы.' })
+    expect(log.events.map(describeEvent)).toEqual([
+      { text: 'Статус: Проверка' },
+      { text: 'Статус: Требует внимания. Причина: Разработчик не изменил файлы.' },
+    ])
+  })
+})
+
+describe('describeEventDetails', () => {
+  const details = (log: Log) => log.events.map(describeEventDetails)
+
+  it('смена статуса с причиной', () => {
+    const log = new Log().add('status_changed', { from: 'developing', to: 'needs_attention', reason: 'Нужен сервер.' })
+    expect(details(log)).toEqual([
+      [
+        { label: 'Было', value: 'Разработка' },
+        { label: 'Стало', value: 'Требует внимания' },
+        { label: 'Причина', value: 'Нужен сервер.' },
+      ],
+    ])
+  })
+
+  it('итог роли словами агента и пояснение офиса', () => {
+    const log = new Log()
+      .finished('developer', 'implement', 'blocked', 'Выход требует серверного эндпоинта.')
+      .finished(null, 'verify_branch', 'error', 'Повторная проверка ветки не пройдена.')
+    expect(details(log)).toEqual([
+      [
+        { label: 'Шаг', value: 'реализация' },
+        { label: 'Итог', value: 'заблокировано' },
+        { label: 'Итог словами агента', value: 'Выход требует серверного эндпоинта.' },
+      ],
+      [
+        { label: 'Шаг', value: 'повторная проверка ветки' },
+        { label: 'Итог', value: 'ошибка' },
+        { label: 'Пояснение', value: 'Повторная проверка ветки не пройдена.' },
+      ],
+    ])
+  })
+
+  it('обращение к модели: инструмент, аргументы, результат, провайдер, модель, усилие', () => {
+    const log = new Log().model('critic', 'review', 'openai/gpt-6.1-sol', 'high')
+    expect(details(log)).toEqual([
+      [
+        { label: 'Инструмент', value: 'model' },
+        { label: 'Аргументы', value: 'critic/review openai/gpt-6.1-sol' },
+        { label: 'Результат', value: 'успешно' },
+        { label: 'Провайдер', value: 'openai' },
+        { label: 'Модель', value: 'gpt-6.1-sol' },
+        { label: 'Усилие', value: 'high' },
+      ],
+    ])
+  })
+
+  it('обязательные проверки: каждая проверка с заключением и head', () => {
+    const url = 'https://github.com/SlavaPush/vibe-studio/actions/runs/1/job/2'
+    const log = new Log().add('checks_status', {
+      head_sha: HEAD,
+      checks: [
+        { name: 'chat-web', status: 'completed', conclusion: 'success', url },
+        { name: 'chat-api', status: 'completed', conclusion: 'failure', url: null },
+        { name: 'office-paths', status: 'in_progress', conclusion: null, url: null },
+      ],
+    })
+    expect(details(log)).toEqual([
+      [
+        { label: 'Head', value: HEAD.slice(0, 7) },
+        { label: 'Проверка chat-web', value: 'успешно', href: url },
+        { label: 'Проверка chat-api', value: 'ошибка' },
+        { label: 'Проверка office-paths', value: 'выполняется' },
+      ],
+    ])
+  })
+
+  it('слияние PR: номер и commit слияния; ссылка на артефакт', () => {
+    const log = new Log()
+      .add('pr_merged', { pr_number: 12, merge_sha: MERGE })
+      .add('artifact_ready', { name: 'spec.json', size_bytes: 512 }, { artifact: 'spec.json' })
+    expect(details(log)).toEqual([
+      [
+        { label: 'PR', value: '#12' },
+        { label: 'Commit слияния', value: MERGE.slice(0, 7) },
+      ],
+      [
+        { label: 'Имя', value: 'spec.json' },
+        { label: 'Размер, байт', value: '512' },
+        { label: 'Артефакт', value: 'spec.json', href: '/api/tasks/tsk_101/artifacts/spec.json' },
+      ],
+    ])
+  })
+
+  it('доработка и неизвестный исход операции: источник, материалы и операция по-русски', () => {
+    const log = new Log()
+      .add('rework_started', {
+        reason: 'Проверка после деплоя не пройдена.',
+        attempt: 1,
+        limit: 1,
+        source: 'verify_failed',
+        release_id: 'rel_7',
+        materials: ['reason', 'render_logs', 'new_source'],
+      })
+      .add('operation_unknown', { kind: 'merge_pr', pr_number: 15, reason: 'GitHub недоступен.' })
+      .finished(null, 'future_step', 'error', 'x')
+    expect(details(log)).toEqual([
+      [
+        { label: 'Причина', value: 'Проверка после деплоя не пройдена.' },
+        { label: 'Попытка', value: '1' },
+        { label: 'Лимит', value: '1' },
+        { label: 'Источник', value: 'проверка после деплоя не пройдена' },
+        { label: 'Выпуск', value: 'rel_7' },
+        { label: 'Материалы', value: 'причина, журналы Render, new_source' },
+      ],
+      [
+        { label: 'Операция', value: 'слияние PR' },
+        { label: 'PR', value: '#15' },
+        { label: 'Причина', value: 'GitHub недоступен.' },
+      ],
+      [
+        { label: 'Шаг', value: 'future_step' },
+        { label: 'Итог', value: 'ошибка' },
+        { label: 'Пояснение', value: 'x' },
+      ],
+    ])
+  })
+
+  it('неизвестный тип: ключ и значение без пересказа, пустые значения пропускаются', () => {
+    const log = new Log().add('future_event', { alpha: 'x', beta: 2, gamma: null, delta: '', nested: { a: 1 } })
+    expect(details(log)).toEqual([
+      [
+        { label: 'alpha', value: 'x' },
+        { label: 'beta', value: '2' },
+        { label: 'nested', value: '{"a":1}' },
+      ],
     ])
   })
 })

@@ -177,7 +177,7 @@
 
 Задача с `failure_kind` `checks_failed` (обязательные проверки PR или итогового commit не пройдены), `pr_rejected` (PR отклонён агентом ревью), `deploy_failed` (деплой Render завершился ошибкой), `verify_failed` (проверка после деплоя не пройдена, выполнен откат) или `rolled_back` (выпуск откатан администратором) решением `retry` не повторяется. Задачи, чьё слияние отменено revert-PR офиса (`verify_failed`, `rolled_back`, `checks_failed` итогового commit), офис сам возвращает на доработку после публикации revert — раздел «Доработка после отката» в `integrations.md`; при исчерпанном лимите доработки нужна новая задача.
 
-Доработка: задача переходит `failed` → `queued` (событие `rework_started`) и занимает первый свободный слот раньше обычных задач `queued`, сразу в `developing` (`queued` → `developing`): требования не подтверждаются повторно. При этом переходе `branch`, `base_sha`, `head_sha`, `pr_number`, `pr_url`, `merge_sha`, `checks`, `failure_kind` очищаются, `changed_files` пуст, `fix_cycles` равен 0, предел обращений агента ревью PR начинается заново, `usage.model_calls_limit` увеличивается на предел класса задачи: 30 для `frontend_ui`, 60 для `backend_api` (расход `usage` сохраняется). Ветка доработки — `office/<task_id>-r<n>`. Предел времени `OFFICE_TASK_TIME_LIMIT_MINUTES` отсчитывается от перехода доработки в `developing`.
+Доработка: задача переходит `failed` → `queued` (событие `rework_started`) и занимает первый свободный слот раньше обычных задач `queued`, сразу в `developing` (`queued` → `developing`): требования не подтверждаются повторно. При этом переходе `branch`, `base_sha`, `head_sha`, `pr_number`, `pr_url`, `merge_sha`, `checks`, `failure_kind`, `halt_reason` очищаются, `changed_files` пуст, `fix_cycles` равен 0, предел обращений агента ревью PR начинается заново, `usage.model_calls_limit` увеличивается на предел класса задачи: 30 для `frontend_ui`, 60 для `backend_api` (расход `usage` сохраняется). Ветка доработки — `office/<task_id>-r<n>`. Предел времени `OFFICE_TASK_TIME_LIMIT_MINUTES` отсчитывается от перехода доработки в `developing`.
 
 `cancel` в `awaiting_integration` переводит задачу в `cancelled`; офис закрывает открытый PR задачи и записывает событие `pr_closed`. После слияния PR (`merge_sha` заполнен) и во время слияния `cancel` недоступен (`409 decision_not_allowed`): изменение уже в `main` или может там оказаться.
 
@@ -222,6 +222,7 @@
 | `pr_number` | integer или `null` | Номер PR в `vibe-studio` |
 | `head_sha` | string или `null` | Commit ветки `office/<task_id>`, отправленный в `vibe-studio` |
 | `failure_kind` | `FailureKind` или `null` | Причина `failed` на этапе выпуска: `checks_failed` — обязательные проверки PR или итогового commit (в том числе критический E2E) не пройдены, `pr_rejected` — PR отклонён агентом ревью, `deploy_failed` — деплой Render завершился ошибкой или Render отклонил запрос (отката нет), `verify_failed` — проверка после деплоя не пройдена, выполнен откат (в том числе для выпуска, в составе которого было изменение задачи), `rolled_back` — выпуск с изменением задачи откатан администратором, `owner_rejected` — владелец отклонил PR серверного контура отзывом «Request changes» (PR закрыт, комментарий владельца — в `owner_review.comment` и в `role_finished`); `null` для остальных причин |
+| `halt_reason` | string или `null` | Причина последней остановки в `needs_attention` или `failed` (до 1000 символов): текст офиса и слова агента, если они есть, например «Разработчик не изменил файлы. Разработчик сообщил: …». Та же причина — в `payload.reason` события `status_changed`. Очищается решением `retry` и при старте доработки; `null`, если остановки не было или причина не записана |
 | `checks` | `PullRequestChecks` или `null` | Последняя сводка обязательных проверок: до слияния — проверки PR для `head_sha`, после слияния — проверки события `push` итогового commit `merge_sha` (поле `checks.head_sha` указывает проверенный commit); `null`, пока PR не проверялся и сразу после слияния |
 | `pr_review` | `PullRequestReview` или `null` | Последнее решение агента ревью PR; `null`, пока агент не вызывался. Решение действительно только для своего `head_sha` |
 | `merge_sha` | string или `null` | Итоговый commit squash-слияния PR в `main`; `null`, пока PR не слит |
@@ -265,7 +266,7 @@
 | --- | --- |
 | `task_created` | `title`, `change_class` (в событиях до появления поля отсутствует); в событиях до `P5.7` также `profile`; если классификатор фильтра приёма ответил — также `provider`, `model`, `effort` модели, которая дала ответ (основная или резерв) |
 | `task_rejected` | `reason` |
-| `status_changed` | `from`, `to` — статусы задачи |
+| `status_changed` | `from`, `to` — статусы задачи; при переходе в `needs_attention` или `failed` с известной причиной — также `reason` (то же значение, что `halt_reason` задачи) |
 | `role_started` | `step` — шаг роли |
 | `role_finished` | `step`, `outcome` (`ok`, `blocked`, `error`), `summary`; итог шага очереди выпуска (`step = release`: публикация, остановка, ошибка деплоя, откат) — также `release_id` |
 | `tool_called` | `arguments` — краткое описание аргументов, `result` (`ok`, `denied`, `error`); для `tool = model` (обращение к модели) также `provider`, `model`, `effort` — провайдер, модель и уровень усилий вызова |
@@ -508,6 +509,7 @@ Revert изменения со схемой БД: после `git revert` офи
     "pr_number": null,
     "head_sha": null,
     "failure_kind": null,
+    "halt_reason": null,
     "checks": null,
     "pr_review": null,
     "merge_sha": null,
@@ -567,6 +569,7 @@ Revert изменения со схемой БД: после `git revert` офи
     "pr_number": null,
     "head_sha": null,
     "failure_kind": null,
+    "halt_reason": null,
     "checks": null,
     "pr_review": null,
     "merge_sha": null,
@@ -620,6 +623,7 @@ Revert изменения со схемой БД: после `git revert` офи
     "pr_number": 12,
     "head_sha": "b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f80",
     "failure_kind": null,
+    "halt_reason": null,
     "checks": {
       "head_sha": "c3d4e5f6a7b8091a2b3c4d5e6f708192a3b4c5d6",
       "checks": [
@@ -933,6 +937,36 @@ data: {"event_id":211,"task_id":"tsk_101","seq":11,"type":"check_result", ...}
   "artifact": null,
   "payload": {"kind": "close_pr", "pr_number": 15, "reason": "Исход операции не установлен: GitHub недоступен."}
 }
+```
+
+Задача `tsk_106` остановилась: разработчик не изменил файлы и объяснил почему. Задача получает `"status": "needs_attention"` и `"halt_reason"` с тем же текстом, что `payload.reason` события `status_changed`.
+
+<!-- example: TaskEvent[] -->
+```json
+[
+  {
+    "event_id": 260,
+    "task_id": "tsk_106",
+    "seq": 12,
+    "type": "role_finished",
+    "timestamp": "2026-10-23T13:10:00Z",
+    "role": "developer",
+    "tool": null,
+    "artifact": null,
+    "payload": {"step": "implement", "outcome": "blocked", "summary": "Разработчик не изменил файлы. Разработчик сообщил: Выход требует серверного эндпоинта: cookie сеанса HttpOnly, DELETE /api/session нет."}
+  },
+  {
+    "event_id": 261,
+    "task_id": "tsk_106",
+    "seq": 13,
+    "type": "status_changed",
+    "timestamp": "2026-10-23T13:10:00Z",
+    "role": null,
+    "tool": null,
+    "artifact": null,
+    "payload": {"from": "developing", "to": "needs_attention", "reason": "Разработчик не изменил файлы. Разработчик сообщил: Выход требует серверного эндпоинта: cookie сеанса HttpOnly, DELETE /api/session нет."}
+  }
+]
 ```
 
 Фрагмент журнала задачи `tsk_102` (агент ревью принял PR, офис слил его, кандидат выпуска ждёт администратора):

@@ -189,6 +189,9 @@ export function TaskCard({
         {task.status === 'failed' && task.failure_kind && (
           <p className="text-sm text-destructive">Причина ошибки: {failureLabel(task)}</p>
         )}
+        {(task.status === 'needs_attention' || task.status === 'failed') && task.halt_reason && (
+          <HaltPanel task={task} participant={participant} />
+        )}
         {(task.rework_count > 0 || task.rework_reason) && <ReworkPanel task={task} />}
         {(task.pr_url || task.checks || task.merge_sha) && <PullRequestPanel task={task} />}
         {task.pr_review && <ReviewPanel review={task.pr_review} />}
@@ -332,6 +335,29 @@ function checkLabel(check: PullRequestCheck): string {
 function commitUrl(task: Task, sha: string): string | null {
   if (!task.pr_url || !/\/pull\/\d+$/.test(task.pr_url)) return null
   return task.pr_url.replace(/\/pull\/\d+$/, `/commit/${sha}`)
+}
+
+function HaltPanel({ task, participant }: { task: Task; participant: Participant }) {
+  const hints: string[] = []
+  if (canAct(participant, task, 'retry').allowed) {
+    hints.push(
+      task.status === 'needs_attention' && task.integration_started
+        ? `«${DECISION_LABELS.retry}» продолжает слияние и выпуск текущей версии.`
+        : `«${DECISION_LABELS.retry}» запускает задачу заново с текущими требованиями.`,
+    )
+  }
+  if (canAct(participant, task, 'cancel').allowed) {
+    hints.push(`«${DECISION_LABELS.cancel}» завершает задачу.`)
+  }
+  return (
+    <section aria-labelledby="task-halt-heading" className="grid gap-1 text-sm">
+      <h3 id="task-halt-heading" className="font-medium">
+        Причина остановки
+      </h3>
+      <p className="break-words whitespace-pre-wrap">{task.halt_reason}</p>
+      {hints.length > 0 && <p className="text-muted-foreground">{hints.join(' ')}</p>}
+    </section>
+  )
 }
 
 function ReworkPanel({ task }: { task: Task }) {

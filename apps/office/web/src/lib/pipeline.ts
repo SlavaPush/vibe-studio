@@ -1,9 +1,12 @@
 import type { AgentRole, PullRequestCheck, ReleaseCandidate, Task, TaskEvent } from '@/api/types'
 import {
   AGENT_ROLE_LABELS,
+  CHECK_STATUS_LABELS,
   DECISION_LABELS,
+  EVENT_TYPE_LABELS,
   RELEASE_STATUS_LABELS,
   RENDER_STATUS_LABELS,
+  REVIEW_VERDICT_LABELS,
   STATUS_LABELS,
 } from '@/lib/labels'
 
@@ -146,8 +149,12 @@ const isStop: Match = (event) => {
 function stopNote(event: TaskEvent): string {
   if (event.type === 'role_finished') return text(event.payload.summary) ?? 'Работа остановлена.'
   if (event.type === 'rework_started') return 'Задача возвращена на доработку.'
-  const to = String(event.payload.to)
-  return `Статус задачи: ${STATUS_LABELS[to as keyof typeof STATUS_LABELS] ?? to}.`
+  return `Статус задачи: ${statusLabel(event.payload.to)}.`
+}
+
+function statusLabel(value: unknown): string {
+  const key = String(value)
+  return (STATUS_LABELS as Record<string, string | undefined>)[key] ?? key
 }
 
 export function modelOf(event: TaskEvent): ModelInfo | null {
@@ -274,8 +281,9 @@ export function describeEvent(event: TaskEvent): Phrase {
     case 'task_rejected':
       return { text: `Фильтр приёма отклонил задачу: ${text(payload.reason) ?? 'нет данных'}` }
     case 'status_changed': {
-      const to = String(payload.to)
-      return { text: `Статус: ${STATUS_LABELS[to as keyof typeof STATUS_LABELS] ?? to}` }
+      const label = statusLabel(payload.to)
+      const reason = text(payload.reason)
+      return { text: reason ? `Статус: ${label}. Причина: ${reason}` : `Статус: ${label}` }
     }
     case 'role_started':
       return { text: 'начал работу' }
@@ -331,6 +339,206 @@ export function describeEvent(event: TaskEvent): Phrase {
     default:
       return { text: 'Событие ', code: event.type }
   }
+}
+
+export interface DetailLine {
+  label: string
+  value: string
+  href?: string
+}
+
+const DETAIL_LABELS: Record<string, string> = {
+  title: 'Название',
+  change_class: 'Класс задачи',
+  profile: 'Профиль',
+  provider: 'Провайдер',
+  model: 'Модель',
+  effort: 'Усилие',
+  reason: 'Причина',
+  from: 'Было',
+  to: 'Стало',
+  step: 'Шаг',
+  outcome: 'Итог',
+  summary: 'Итог словами агента',
+  arguments: 'Аргументы',
+  result: 'Результат',
+  name: 'Имя',
+  size_bytes: 'Размер, байт',
+  decision: 'Решение',
+  decision_id: 'Идентификатор решения',
+  participant_id: 'Участник',
+  expected_version: 'Версия задачи',
+  command: 'Команда',
+  exit_code: 'Код выхода',
+  duration_ms: 'Длительность',
+  commit_sha: 'Commit',
+  qa_sha: 'Commit теста QA',
+  release_id: 'Выпуск',
+  render_deploy_id: 'Деплой Render',
+  render_status: 'Статус Render',
+  verified: 'Проверка после деплоя',
+  fault: 'Управляемый сбой',
+  target_sha: 'Прежняя версия',
+  pr_number: 'PR',
+  pr_url: 'Ссылка на PR',
+  head_sha: 'Head',
+  merge_sha: 'Commit слияния',
+  review_id: 'Решение агента ревью',
+  verdict: 'Вердикт',
+  reasons: 'Обоснование',
+  kind: 'Операция',
+  blocked_by: 'Блокировка выпуска',
+  fixed_by: 'Исправляющий выпуск',
+  published_sha: 'Опубликованная версия',
+  attempt: 'Попытка',
+  limit: 'Лимит',
+  source: 'Источник',
+  materials: 'Материалы',
+  login: 'Владелец',
+  state: 'Вердикт владельца',
+  revert_of: 'Revert выпуска',
+}
+
+const CHANGE_CLASS_LABELS: Record<string, string> = { frontend_ui: 'интерфейс', backend_api: 'сервер' }
+const OUTCOME_LABELS: Record<string, string> = { ok: 'выполнено', blocked: 'заблокировано', error: 'ошибка' }
+const RESULT_LABELS: Record<string, string> = { ok: 'успешно', denied: 'отказ', error: 'ошибка' }
+const OWNER_STATE_LABELS: Record<string, string> = {
+  requested: 'ждёт отзыва',
+  approved: 'одобрено',
+  changes_requested: 'запрошены изменения',
+}
+const CONCLUSION_LABELS: Record<string, string> = { success: 'успешно', failure: 'ошибка' }
+const STEP_LABELS: Record<string, string> = {
+  spec: 'требования',
+  research: 'исследование',
+  implement: 'реализация',
+  verify: 'проверки разработчика',
+  qa: 'тест QA',
+  review: 'ревью критика',
+  verify_branch: 'повторная проверка ветки',
+  time: 'предел времени',
+  graph: 'конвейер задачи',
+  rework: 'доработка',
+  git_worktree: 'рабочая копия',
+  push: 'push ветки',
+  git_push: 'push ветки',
+  create_pr: 'создание PR',
+  close_pr: 'закрытие PR',
+  pr_checks: 'проверки PR',
+  pr_review: 'ревью PR',
+  owner_summary: 'сводка для владельца',
+  owner_review: 'отзыв владельца',
+  merge_pr: 'слияние PR',
+  merge_checks: 'проверки итогового commit',
+  release: 'выпуск',
+  deploy: 'деплой',
+  rollback: 'откат',
+  revert: 'revert',
+}
+const REWORK_SOURCE_LABELS: Record<string, string> = {
+  verify_failed: 'проверка после деплоя не пройдена',
+  rolled_back: 'выпуск откатан администратором',
+  checks_failed: 'проверки итогового commit не пройдены',
+}
+const MATERIAL_LABELS: Record<string, string> = {
+  reason: 'причина',
+  deploy_events: 'события деплоя',
+  render_logs: 'журналы Render',
+  actions_log: 'журнал GitHub Actions',
+  source_diff: 'diff исходного изменения',
+}
+const SHA_KEYS = new Set(['commit_sha', 'qa_sha', 'head_sha', 'merge_sha', 'target_sha', 'published_sha'])
+
+function mapped(labels: Record<string, string>, value: unknown): string {
+  const key = String(value)
+  return labels[key] ?? key
+}
+
+function plain(value: unknown): string {
+  return typeof value === 'string' ? value : JSON.stringify(value)
+}
+
+function detailValue(key: string, value: unknown): string {
+  if (SHA_KEYS.has(key) && typeof value === 'string') return short(value)
+  switch (key) {
+    case 'from':
+    case 'to':
+      return statusLabel(value)
+    case 'change_class':
+      return mapped(CHANGE_CLASS_LABELS, value)
+    case 'outcome':
+      return mapped(OUTCOME_LABELS, value)
+    case 'result':
+      return mapped(RESULT_LABELS, value)
+    case 'decision':
+      return decisionLabel(value)
+    case 'render_status':
+      return renderLabel(value)
+    case 'verdict':
+      return mapped(REVIEW_VERDICT_LABELS, value)
+    case 'state':
+      return mapped(OWNER_STATE_LABELS, value)
+    case 'verified':
+      return value === true ? 'пройдена' : 'не пройдена'
+    case 'fault':
+      return value === true ? 'да' : 'нет'
+    case 'duration_ms':
+      return typeof value === 'number' ? `${(value / 1000).toFixed(1)} с` : plain(value)
+    case 'pr_number':
+      return `#${String(value)}`
+    case 'step':
+    case 'kind':
+      return mapped(STEP_LABELS, value)
+    case 'source':
+      return mapped(REWORK_SOURCE_LABELS, value)
+    case 'materials':
+      return Array.isArray(value) ? value.map((item) => mapped(MATERIAL_LABELS, item)).join(', ') : plain(value)
+    default:
+      return plain(value)
+  }
+}
+
+function checkLines(checks: PullRequestCheck[]): DetailLine[] {
+  return checks.map((check) => ({
+    label: `Проверка ${check.name}`,
+    value: check.conclusion
+      ? mapped(CONCLUSION_LABELS, check.conclusion)
+      : mapped(CHECK_STATUS_LABELS, check.status).toLowerCase(),
+    ...(check.url ? { href: check.url } : {}),
+  }))
+}
+
+function blank(value: unknown): boolean {
+  return value === null || value === undefined || value === '' || (Array.isArray(value) && value.length === 0)
+}
+
+export function describeEventDetails(event: TaskEvent): DetailLine[] {
+  const known = event.type in EVENT_TYPE_LABELS
+  const lines: DetailLine[] = []
+  if (known && event.tool) lines.push({ label: 'Инструмент', value: event.tool })
+  for (const [key, value] of Object.entries(event.payload)) {
+    if (blank(value)) continue
+    if (!known) {
+      lines.push({ label: key, value: plain(value) })
+      continue
+    }
+    if (key === 'checks' && Array.isArray(value)) {
+      lines.push(...checkLines(value as PullRequestCheck[]))
+      continue
+    }
+    const label = key === 'summary' && event.role === null ? 'Пояснение' : (DETAIL_LABELS[key] ?? key)
+    const line: DetailLine = { label, value: detailValue(key, value) }
+    if (key === 'pr_url' && typeof value === 'string') line.href = value
+    lines.push(line)
+  }
+  if (known && event.artifact) {
+    lines.push({
+      label: 'Артефакт',
+      value: event.artifact,
+      href: `/api/tasks/${encodeURIComponent(event.task_id)}/artifacts/${encodeURIComponent(event.artifact)}`,
+    })
+  }
+  return lines
 }
 
 function agentView(key: AgentKey, state: AgentState, extra: Partial<AgentView> = {}): AgentView {

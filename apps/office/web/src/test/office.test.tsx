@@ -98,6 +98,46 @@ describe('TaskCard: PR задачи', () => {
     expect(screen.queryByRole('region', { name: /Доработка после отката/ })).not.toBeInTheDocument()
   })
 
+  const halted: Task = {
+    ...developing,
+    status: 'needs_attention',
+    halt_reason: 'Разработчик не изменил файлы. Разработчик сообщил: Выход требует серверного эндпоинта.',
+  }
+
+  it('показывает причину остановки и подсказку о действиях заказчику', () => {
+    fakeApi()
+    renderCard(maria, halted)
+    const block = screen.getByRole('region', { name: 'Причина остановки' })
+    expect(block).toHaveTextContent(halted.halt_reason as string)
+    expect(block).toHaveTextContent(
+      '«Повторить» запускает задачу заново с текущими требованиями. «Отменить задачу» завершает задачу.',
+    )
+  })
+
+  it('участник без прав видит причину остановки без подсказки', () => {
+    fakeApi()
+    renderCard(ivan, halted)
+    const block = screen.getByRole('region', { name: 'Причина остановки' })
+    expect(block).toHaveTextContent(halted.halt_reason as string)
+    expect(block).not.toHaveTextContent('Повторить')
+  })
+
+  it('ошибка выпуска: причина остановки после причины ошибки, без недоступных действий', () => {
+    fakeApi()
+    renderCard(maria, { ...integrating, status: 'failed', failure_kind: 'checks_failed', halt_reason: 'chat-web: failure.' })
+    const failure = screen.getByText('Причина ошибки: Обязательные проверки PR не пройдены, PR закрыт.')
+    const block = screen.getByRole('region', { name: 'Причина остановки' })
+    expect(failure.compareDocumentPosition(block) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(block).toHaveTextContent('chat-web: failure.')
+    expect(block).not.toHaveTextContent('Повторить')
+  })
+
+  it('без halt_reason и в рабочем статусе блока причины нет', () => {
+    fakeApi()
+    renderCard(maria, { ...developing, halt_reason: 'Старая причина.' })
+    expect(screen.queryByRole('region', { name: 'Причина остановки' })).not.toBeInTheDocument()
+  })
+
   it('показывает причину ошибки выпуска и запрещает повтор', () => {
     fakeApi()
     renderCard(maria, { ...integrating, status: 'failed', failure_kind: 'checks_failed' })
@@ -701,6 +741,23 @@ describe('TaskCard: вкладки', () => {
     const details = within(items[1]).getByText('Подробности').closest('details') as HTMLElement
     expect(details.querySelector('pre')?.textContent).toContain('"url": "https://github.com/run/1"')
     expect(screen.getByRole('list', { name: 'Схема конвейера' })).toBeInTheDocument()
+  })
+
+  it('лента: причина в строке смены статуса, подробности подписями, JSON под «Данные»', () => {
+    const reason = 'Разработчик не изменил файлы. Разработчик сообщил: Нужен DELETE /api/session.'
+    openJournal([taskEvent('tsk_101', 'status_changed', { from: 'developing', to: 'needs_attention', reason })])
+    const [item] = within(screen.getByRole('list', { name: 'События задачи' })).getAllByRole('listitem')
+    expect(item).toHaveTextContent(`Статус: Требует внимания. Причина: ${reason}`)
+    const details = within(item).getByText('Подробности').closest('details') as HTMLElement
+    const terms = Array.from(details.querySelectorAll('dt')).map((node) => node.textContent)
+    const values = Array.from(details.querySelectorAll('dd')).map((node) => node.textContent)
+    expect(terms).toEqual(['Было', 'Стало', 'Причина'])
+    expect(values).toEqual(['Разработка', 'Требует внимания', reason])
+    const data = within(details).getByText('Данные').closest('details') as HTMLElement
+    expect(data).not.toBe(details)
+    expect(data).not.toHaveAttribute('open')
+    expect(data.querySelector('pre')?.textContent).toContain('"to": "needs_attention"')
+    expect(details.querySelector('dl')?.textContent).not.toContain('{')
   })
 
   const feedItems = () =>

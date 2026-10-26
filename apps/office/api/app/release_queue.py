@@ -267,7 +267,7 @@ class ReleaseQueue:
             )
         if failure_kind in REWORK_SOURCES:
             self.store.set_rework_reason(conn, task, reason)
-        self.store.transition(conn, task.id, target, expected_from=task.status)
+        self.store.transition(conn, task.id, target, expected_from=task.status, reason=reason)
 
     def contained(self, candidate: ReleaseCandidate) -> frozenset[str]:
         with self.store.db.connection() as conn:

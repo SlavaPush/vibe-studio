@@ -753,15 +753,20 @@ def test_retry_without_changes_from_base_needs_attention(graph):
     approve(client, app, task_id)
     wait_status(app, task_id, TaskStatus.failed)
     wait_for(lambda: not app.state.runner.active(task_id), 30, "run stopped")
+    assert app.state.store.get_task(task_id).halt_reason
 
     gateway.handlers["developer"] = lambda call: NO_CHANGE
     decide(client, app, task_id, "retry")
+    assert app.state.store.get_task(task_id).halt_reason is None
     approve(client, app, task_id, 2)
     wait_status(app, task_id, TaskStatus.needs_attention)
     task = app.state.store.get_task(task_id)
     assert git(worktree(app, task_id), "rev-parse", "HEAD") == task.base_sha
-    assert developer_finished(app, task_id)[-1] == {
-        "step": "implement", "outcome": "blocked", "summary": "Разработчик не изменил файлы."
+    reason = "Разработчик не изменил файлы. Разработчик сообщил: Изменения уже сделаны."
+    assert developer_finished(app, task_id)[-1] == {"step": "implement", "outcome": "blocked", "summary": reason}
+    assert task.halt_reason == reason
+    assert events(app, task_id, "status_changed")[-1].payload == {
+        "from": "developing", "to": "needs_attention", "reason": reason
     }
     assert app.state.suite.calls == []
 
@@ -786,9 +791,12 @@ def test_fix_cycle_without_new_changes_rechecks_same_version(graph):
     assert [call[1] for call in app.state.suite.calls if not call[3]] == [dev_sha, qa_sha, qa_sha]
     directory = app.state.settings.artifacts_dir / task_id
     assert all((directory / f"review-{cycle}-{role}.json").is_file() for cycle in range(3) for role in ("qa", "critic"))
-    assert events(app, task_id, "role_finished")[-1].payload == {
-        "step": "review", "outcome": "blocked", "summary": "Блокирующие замечания остались после двух циклов исправления."
-    }
+    reason = (
+        "Блокирующие замечания остались после двух циклов исправления. "
+        "Первое замечание (apps/chat/web/src/App.tsx:2): Кнопка не подписана."
+    )
+    assert events(app, task_id, "role_finished")[-1].payload == {"step": "review", "outcome": "blocked", "summary": reason}
+    assert task.halt_reason == reason
 
 
 def test_qa_failure_on_task_version_becomes_blocking_finding(graph):
@@ -881,6 +889,7 @@ def test_missing_qa_evidence_is_retried_once(graph):
     assert len([call for call in app.state.suite.calls if call[3]]) == 2
     finished = [event for event in events(app, task_id, "role_finished") if event.role == "qa"]
     assert finished[-1].payload["summary"].startswith("Нет свидетельства QA")
+    assert app.state.store.get_task(task_id).halt_reason == "Нет свидетельства QA: Сборка приложения для e2e не прошла."
 
 
 STRICT = E2EResult(
@@ -944,6 +953,8 @@ def test_test_error_three_times_needs_attention(graph):
     assert finished[-1].payload["summary"].startswith(
         "Тест QA завершается ошибкой до проверки утверждения после трёх попыток: Error: locator.click: Error: strict mode violation"
     )
+    halt_reason = app.state.store.get_task(task_id).halt_reason
+    assert halt_reason.startswith("Тест QA завершается ошибкой") and STRICT.message in halt_reason
     assert not list((app.state.settings.artifacts_dir / task_id).glob("review-*-qa.json"))
 
 

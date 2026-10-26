@@ -239,6 +239,7 @@ class Task(ContractModel):
     pr_number: int | None
     head_sha: str | None
     failure_kind: FailureKind | None
+    halt_reason: str | None = None
     checks: PullRequestChecks | None
     pr_review: PullRequestReview | None
     merge_sha: str | None

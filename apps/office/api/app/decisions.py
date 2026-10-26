@@ -166,6 +166,8 @@ def decide_task(
         target = TASK_TARGETS[request.decision]
         if request.decision == TaskDecision.retry and integration:
             target = TaskStatus.awaiting_integration
+        if request.decision == TaskDecision.retry:
+            conn.execute("UPDATE tasks SET halt_reason = NULL WHERE id = :id", {"id": task_id})
         store.transition(conn, task_id, target, expected_from=task.status)
         store.signal(conn, SIGNAL_DECISION_RECORDED, task_id)
     if request.decision == TaskDecision.retry:

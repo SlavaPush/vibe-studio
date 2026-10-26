@@ -194,6 +194,8 @@ def test_render_deploy_error_fails_without_rollback(q):
     assert (current.status, current.deploy.error, current.is_published) == ("failed", "Render: build_failed", False)
     task = q.task(release.task_id)
     assert (task.status, task.failure_kind) == ("failed", FailureKind.deploy_failed)
+    assert "build_failed" in task.halt_reason
+    assert q.events(release.task_id, TaskEventType.status_changed)[-1].payload["reason"] == task.halt_reason
     assert q.state()["active_release_id"] is None
     assert q.state()["release_blocked_by"] is None
     assert len(q.render.posts()) == 1
@@ -1621,6 +1623,7 @@ def test_deploy_failed_task_reverted_with_later_release_gets_rework(q):
     task = q.task(first.task_id)
     assert (task.status, task.failure_kind) == ("failed", FailureKind.verify_failed)
     assert "Проверка после деплоя" in task.rework_reason
+    assert "Проверка после деплоя" in task.halt_reason
     candidate = finish_revert(q, worker, q.release(second.id))
     publish(q, worker, candidate)
     reworked(q, first.task_id, "verify_failed")

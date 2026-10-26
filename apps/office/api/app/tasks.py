@@ -88,8 +88,10 @@ LIMIT_REACHED = "Лимит доработки исчерпан: повторн�
 REWORK_RESET = (
     "rework_priority = :no, branch = NULL, base_sha = NULL, head_sha = NULL, pr_number = NULL, pr_url = NULL, "
     "merge_sha = NULL, checks = NULL, failure_kind = NULL, changed_files = '[]', fix_cycles = 0, pr_review_calls = 0, "
-    "contour = NULL, owner_review = NULL"
+    "contour = NULL, owner_review = NULL, halt_reason = NULL"
 )
+HALT_REASON_LIMIT = 1000
+HALT_STATUSES = frozenset({TaskStatus.needs_attention, TaskStatus.failed})
 
 SignalHandler = Callable[[str, str], None]
 
@@ -176,6 +178,7 @@ def task_from_row(row: dict[str, Any], rework_limit: int = REWORK_LIMIT) -> Task
         pr_number=row["pr_number"],
         head_sha=row["head_sha"],
         failure_kind=row["failure_kind"],
+        halt_reason=row["halt_reason"],
         checks=json.loads(row["checks"]) if row["checks"] else None,
         pr_review=review_from_row(row) if row.get("review_id") else None,
         merge_sha=row["merge_sha"],
@@ -339,7 +342,8 @@ class TaskStore:
         return event_from_row(row)
 
     def transition(
-        self, conn: Connection, task_id: str, to: TaskStatus, *, expected_from: TaskStatus
+        self, conn: Connection, task_id: str, to: TaskStatus, *, expected_from: TaskStatus,
+        reason: str | None = None,
     ) -> Task:
         if not conn.locked:
             raise RuntimeError("transition requires locked_transaction")
@@ -354,9 +358,7 @@ class TaskStore:
             "UPDATE tasks SET status = :status, version = version + 1, updated_at = :now WHERE id = :id",
             {"status": to.value, "now": to_text(utcnow()), "id": task_id},
         )
-        self.record_event(
-            conn, task_id, TaskEventType.status_changed, {"from": task.status.value, "to": to.value}
-        )
+        self.record_status_change(conn, task_id, task.status, to, reason)
         if task.status in SLOT_STATUSES and to not in SLOT_STATUSES:
             self.signal(conn, SIGNAL_SLOT_RELEASED, task_id)
             self._promote(conn)
@@ -365,6 +367,16 @@ class TaskStore:
         if to in CLOSED_STATUSES:
             self.signal(conn, SIGNAL_TASK_CLOSED, task_id)
         return self.load_task(conn, task_id)
+
+    def record_status_change(
+        self, conn: Connection, task_id: str, source: TaskStatus, to: TaskStatus, reason: str | None
+    ) -> None:
+        payload = {"from": source.value, "to": to.value}
+        if reason and to in HALT_STATUSES:
+            text = reason[:HALT_REASON_LIMIT]
+            conn.execute("UPDATE tasks SET halt_reason = :reason WHERE id = :id", {"reason": text, "id": task_id})
+            payload["reason"] = text
+        self.record_event(conn, task_id, TaskEventType.status_changed, payload)
 
     def add_event(
         self,
@@ -393,7 +405,7 @@ class TaskStore:
                 {"arguments": arguments, "result": "error", "reason": reason},
                 tool=tool,
             )
-            self.transition(conn, task_id, TaskStatus.failed, expected_from=task.status)
+            self.transition(conn, task_id, TaskStatus.failed, expected_from=task.status, reason=reason)
 
     def record_worktree(self, task_id: str, branch: str, base_sha: str, created: bool) -> bool:
         with self.db.locked_transaction() as conn:
@@ -670,7 +682,7 @@ class TaskStore:
             conn.execute(
                 "UPDATE tasks SET failure_kind = :kind WHERE id = :id", {"kind": failure_kind.value, "id": task_id}
             )
-        self.transition(conn, task_id, target, expected_from=task.status)
+        self.transition(conn, task_id, target, expected_from=task.status, reason=reason)
         return True
 
     def set_rework_reason(self, conn: Connection, task: Task, reason: str) -> None:
@@ -688,22 +700,21 @@ class TaskStore:
             conn, task_id, TaskEventType.role_finished, {"step": "release", "outcome": "error", "summary": reason[:300]}
         )
         conn.execute(
-            "UPDATE tasks SET failure_kind = :kind, version = version + 1, updated_at = :now WHERE id = :id",
-            {"kind": kind.value, "now": to_text(utcnow()), "id": task_id},
+            "UPDATE tasks SET failure_kind = :kind, halt_reason = :reason, version = version + 1, updated_at = :now "
+            "WHERE id = :id",
+            {"kind": kind.value, "reason": reason[:HALT_REASON_LIMIT], "now": to_text(utcnow()), "id": task_id},
         )
         self.set_rework_reason(conn, task, reason)
         if task.status == TaskStatus.failed:
             return True
         if task.status != TaskStatus.released:
-            self.transition(conn, task_id, TaskStatus.failed, expected_from=task.status)
+            self.transition(conn, task_id, TaskStatus.failed, expected_from=task.status, reason=reason)
             return True
         conn.execute(
             "UPDATE tasks SET status = :status, version = version + 1, updated_at = :now WHERE id = :id",
             {"status": TaskStatus.failed.value, "now": to_text(utcnow()), "id": task_id},
         )
-        self.record_event(
-            conn, task_id, TaskEventType.status_changed, {"from": task.status.value, "to": TaskStatus.failed.value}
-        )
+        self.record_status_change(conn, task_id, task.status, TaskStatus.failed, reason)
         return True
 
     def start_rework_in(self, conn: Connection, task_id: str, owner_id: str, context: dict[str, Any]) -> bool:
