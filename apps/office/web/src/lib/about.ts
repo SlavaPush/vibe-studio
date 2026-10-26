@@ -29,7 +29,7 @@ export const ABOUT: AboutContent = {
     {
       label: 'Модели',
       value:
-        'Anthropic Claude и OpenAI, у каждой роли свой резерв. Одна таблица моделей по ролям: Haiku для фильтра приёма и исследователя, Fable 5.1 для Supervisor, GPT-6 Astra для критика, Sonnet для разработчика, QA и агента ревью PR. Карточка задачи показывает оценку стоимости',
+        'Anthropic Claude и OpenAI, у каждой роли свой резерв. Одна таблица моделей по ролям: Haiku для фильтра приёма и исследователя, Fable 5.1 для Supervisor, Sonnet для разработчика, QA, критика и агента ревью PR. Карточка задачи показывает оценку стоимости',
     },
     { label: 'Хранение', value: 'SQLite на диске компьютера или VPS, где работает офис; PostgreSQL поддерживается' },
     { label: 'Деплой', value: 'Офис работает на VPS владельца за Caddy с HTTPS (или локально); чат выпускает на Render через GitHub App и Render API' },

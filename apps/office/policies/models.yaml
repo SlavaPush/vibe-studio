@@ -100,5 +100,5 @@ roles:
   supervisor: {provider: anthropic, model: claude-fable-5-1, effort: medium, fallback: openai/gpt-6-astra, max_output_tokens: 8192}
   developer: {provider: anthropic, model: claude-sonnet-5-5, effort: high, fallback: openai/gpt-6.1-sol, max_output_tokens: 32000}
   qa: {provider: anthropic, model: claude-sonnet-5-5, effort: medium, fallback: openai/gpt-6.1-sol, max_output_tokens: 16000}
-  critic: {provider: openai, model: gpt-6-astra, effort: medium, fallback: anthropic/claude-fable-5-1, max_output_tokens: 16000}
+  critic: {provider: anthropic, model: claude-sonnet-5-5, effort: medium, fallback: openai/gpt-6.1-sol, max_output_tokens: 16000}
   pr_reviewer: {provider: anthropic, model: claude-sonnet-5-5, effort: high, fallback: openai/gpt-6.1-sol, max_output_tokens: 16000}

@@ -52,7 +52,7 @@ ROUTES = {
     AgentRole.supervisor: ("anthropic/claude-fable-5-1", "openai/gpt-6-astra", "medium", 8192),
     AgentRole.developer: ("anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol", "high", 32000),
     AgentRole.qa: ("anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol", "medium", 16000),
-    AgentRole.critic: ("openai/gpt-6-astra", "anthropic/claude-fable-5-1", "medium", 16000),
+    AgentRole.critic: ("anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol", "medium", 16000),
     AgentRole.pr_reviewer: ("anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol", "high", 16000),
 }
 SONNET_COST = (120 * 2.00 + 30 * 10.00) / 1_000_000
@@ -377,9 +377,9 @@ def test_provider_schema_is_inline_and_keeps_title_property():
 
 @pytest.mark.parametrize("line", [0, -3])
 def test_finding_line_below_one_means_unknown(setup, line):
-    store, task_id, _, gpt, make = setup
+    store, task_id, claude, _, make = setup
     finding = {"blocking": True, "criterion": None, "file": "web/src/App.tsx", "line": line, "text": "Нет кнопки."}
-    gpt.answer = json.dumps({"verdict": "changes_requested", "findings": [finding]})
+    claude.answer = json.dumps({"verdict": "changes_requested", "findings": [finding]})
     review = make().structured(store, task_id, AgentRole.critic, "review", "S", "U", CriticReview)
     assert review.findings[0].line is None
     qa = QaTurn.model_validate(
