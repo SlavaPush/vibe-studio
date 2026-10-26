@@ -2,10 +2,12 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, Request, Response
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -46,6 +48,7 @@ logger = logging.getLogger("office")
 
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+ASSET_CACHE = "public, max-age=31536000, immutable"
 
 
 class OriginGuard:
@@ -68,6 +71,29 @@ class OriginGuard:
                 await response(scope, receive, send)
                 return
         await self.app(scope, receive, send)
+
+
+class AssetFiles(StaticFiles):
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = ASSET_CACHE
+        return response
+
+
+def install_web(app: FastAPI, dist: Path) -> None:
+    index = (dist / "index.html").read_text(encoding="utf-8")
+    root_files = {path.name for path in dist.iterdir() if path.is_file() and not path.is_symlink()} - {"index.html"}
+    app.mount("/assets", AssetFiles(directory=dist / "assets"), name="assets")
+
+    @app.exception_handler(404)
+    async def web_page(request: Request, _: Exception) -> Response:
+        path = request.url.path
+        if request.method not in ("GET", "HEAD") or path == "/api" or path.startswith(("/api/", "/assets/")):
+            return error_response(404, ErrorCode.not_found, "Объект не найден.")
+        name = path.removeprefix("/")
+        if name in root_files:
+            return FileResponse(dist / name)
+        return HTMLResponse(index, headers={"Cache-Control": "no-cache"})
 
 
 def create_app(
@@ -321,5 +347,8 @@ def create_app(
     @app.get("/api/slots")
     def slots(_: CurrentParticipant) -> Slots:
         return Slots(used=store.slots_used(), total=SLOTS_TOTAL)
+
+    if settings.web_dist_dir is not None:
+        install_web(app, settings.web_dist_dir)
 
     return app

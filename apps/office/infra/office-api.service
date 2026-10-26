@@ -1,0 +1,18 @@
+[Unit]
+Description=back-office API
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+User=office
+Group=office
+WorkingDirectory=/home/office/vibe-studio/apps/office/api
+EnvironmentFile=/home/office/office/.env
+EnvironmentFile=/home/office/office/vps.env
+ExecStart=/home/office/.local/bin/uv run --no-sync uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8001
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

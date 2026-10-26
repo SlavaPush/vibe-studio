@@ -72,6 +72,7 @@ class Settings:
     github_app_slug: str = "vibe-office"
     rework_limit: int = 1
     owner_login: str = "SlavaPush"
+    web_dist_dir: Path | None = None
 
     @property
     def github_app_configured(self) -> bool:
@@ -133,4 +134,5 @@ class Settings:
             github_app_slug=env.get("OFFICE_GITHUB_APP_SLUG") or cls.github_app_slug,
             rework_limit=int(env.get("OFFICE_REWORK_LIMIT") or cls.rework_limit),
             owner_login=env.get("OFFICE_OWNER_LOGIN") or cls.owner_login,
+            web_dist_dir=Path(env["OFFICE_WEB_DIST_DIR"]) if env.get("OFFICE_WEB_DIST_DIR") else None,
         )

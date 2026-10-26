@@ -2,7 +2,7 @@
 
 Мультиагентный офис, который развивает публичный сервис `vibe-chat` (каталог `apps/chat` монорепозитория [vibe-studio](https://github.com/SlavaPush/vibe-studio)). Офис находится в каталоге `apps/office` того же монорепозитория. Участники ставят задачи по разработке сервиса; фильтр приёма отклоняет посторонние задачи; до трёх задач выполняются одновременно, каждая в отдельном git worktree; пять ролей (исследователь, Supervisor, разработчик, QA, критик) на LangGraph; независимые проверки; агент ревью PR и слияние от GitHub App; очередь выпуска на Render без подтверждения администратора, с проверкой после деплоя, автоматическим откатом и revert-PR.
 
-Для демонстрации офис работает локально. Архитектура допускает деплой на сервер с Docker без переписывания.
+Офис работает локально или на VPS владельца (раздел «Деплой на VPS»).
 
 ## О приложении
 
@@ -27,8 +27,8 @@
 | Интерфейс | React, TypeScript, Vite, shadcn/ui |
 | Сервер | FastAPI, LangGraph, Python 3.12 |
 | Модели | Anthropic Claude — основной провайдер, OpenAI — резерв; одна таблица моделей по ролям, оценка стоимости задачи |
-| Хранение | SQLite локально, PostgreSQL при деплое |
-| Деплой | Офис работает локально; чат выпускает на Render через GitHub App и Render API |
+| Хранение | SQLite на диске компьютера или VPS, где работает офис; PostgreSQL поддерживается |
+| Деплой | Офис работает локально или на VPS за Caddy (`infra/`); чат выпускает на Render через GitHub App и Render API |
 | Проверки | Docker и Playwright, GitHub Actions, ruleset ветки main |
 
 ## Состав
@@ -41,9 +41,10 @@
 | `policies/` | Разрешённые пути и команды sandbox, таблица моделей ролей и цены `models.yaml` |
 | `docker/sandbox/` | Образ для сборки и проверок изменяемого кода (Node 24 + Playwright) |
 | `api/scripts/` | Smoke-проверка шлюза ролей, проверка ветки задачи `check_branch.py` |
+| `infra/` | Файлы деплоя на VPS: `Caddyfile`, unit systemd `office-api.service`, переопределения `vps.env.example` |
 | `workspace/` | Клон `vibe-studio` и worktree задач; в `.gitignore` |
 
-Статус: подэтап `P4.1` — API офиса на БД (SQLite локально, PostgreSQL при деплое): сеансы по коду доступа, проверка `Host` и `Origin`, права, фильтр приёма задач (детерминированные проверки, модерация OpenAI, классификатор), три слота и очередь `queued`, решения с версией и идемпотентностью, журнал событий и SSE, отчёты проверок и артефакты, решения по выпускам без деплоя. Подэтап `P4.2` — рабочие копии и sandbox: клон `vibe-chat`, worktree на задачу, политика путей и команд, проверки в Docker, commit кодом офиса, `GET /api/tasks/{id}/diff`. Подэтап `P4.3` — граф ролей LangGraph: шлюз моделей, требования Supervisor и подтверждение владельца, разработчик, проверки, QA и критик, циклы исправления, бюджеты, восстановление после перезапуска. Подэтап `P4.4` — панель на API офиса: вход по коду, стек задач, карточка задачи, постановка задачи, решения по задачам и выпускам, обновление через SSE с восстановлением после разрыва.
+Статус: подэтап `P4.1` — API офиса на БД (SQLite; PostgreSQL поддерживается): сеансы по коду доступа, проверка `Host` и `Origin`, права, фильтр приёма задач (детерминированные проверки, модерация OpenAI, классификатор), три слота и очередь `queued`, решения с версией и идемпотентностью, журнал событий и SSE, отчёты проверок и артефакты, решения по выпускам без деплоя. Подэтап `P4.2` — рабочие копии и sandbox: клон `vibe-chat`, worktree на задачу, политика путей и команд, проверки в Docker, commit кодом офиса, `GET /api/tasks/{id}/diff`. Подэтап `P4.3` — граф ролей LangGraph: шлюз моделей, требования Supervisor и подтверждение владельца, разработчик, проверки, QA и критик, циклы исправления, бюджеты, восстановление после перезапуска. Подэтап `P4.4` — панель на API офиса: вход по коду, стек задач, карточка задачи, постановка задачи, решения по задачам и выпускам, обновление через SSE с восстановлением после разрыва.
 
 ## Граф ролей
 
@@ -373,6 +374,132 @@ docker build -t back-office-sandbox:p4 apps/office/docker/sandbox
 ```bash
 docker run --rm -v "$PWD/apps/chat/web:/src:ro" -v "$PWD/apps/chat/contracts:/work/contracts:ro" back-office-sandbox:p4 sandbox-smoke /src
 ```
+
+## Деплой на VPS
+
+Офис целиком работает на одном VPS: API офиса раздаёт и API, и сборку панели на одном адресе, Caddy принимает HTTPS и передаёт запросы на `127.0.0.1:8001`. Состояние — SQLite на диске VPS. Коды входа — тот же реестр `access_codes` в Supabase, что у локального офиса.
+
+Раскладка на VPS (пользователь `office`, домен `vibe-studio.twc1.net`):
+
+| Путь | Назначение |
+| --- | --- |
+| `/home/office/vibe-studio` | Клон монорепозитория, из которого запускается офис |
+| `/home/office/office/.env` | Переменные офиса с ключами (копия локального `apps/office/.env`), права `600` |
+| `/home/office/office/vps.env` | Переопределения для VPS из `infra/vps.env.example`, права `600` |
+| `/home/office/office/vibe-office.private-key.pem` | Закрытый ключ GitHub App, права `600` |
+| `/home/office/office/office.sqlite`, `office.checkpoints.sqlite` | Состояние офиса и checkpoint графов |
+| `/home/office/office/workspace`, `/home/office/office/artifacts` | Рабочая область задач и артефакты |
+
+Каталог `/home/office/office` находится вне клона: `git pull` не меняет секреты и состояние. Другой домен или другие пути меняются в `infra/Caddyfile`, `infra/office-api.service` и `vps.env`.
+
+### Один экземпляр офиса на репозиторий
+
+Офис с настроенным GitHub App сразу при запуске API начинает обслуживать очередь выпуска и ветки `office/*` репозитория. Два офиса на один репозиторий конфликтуют. Поэтому:
+
+1. Перед первым `systemctl start office-api` на VPS остановить локальный офис (`office-run`). Перед остановкой проверить, что нет задач в работе и операций `started` или `unknown`.
+2. Для возврата к локальному офису сначала выполнить `sudo systemctl stop office-api` на VPS.
+
+### Коды входа
+
+Код участника одноразовый для офиса (`office_used_at`). Участник, который уже входил в локальный офис, на VPS по тому же коду не войдёт. Владелец выдаёт ему новый код (раздел «Вход по личному коду»).
+
+### Установка
+
+Команды выполняются на VPS под пользователем `office`; `sudo` запрашивает пароль `office`.
+
+1. Docker CE — по инструкции https://docs.docker.com/engine/install/ubuntu/ (репозиторий apt Docker). Добавить `office` в группу `docker` и открыть новый сеанс SSH:
+
+   ```bash
+   sudo usermod -aG docker office
+   docker ps
+   ```
+
+   `docker ps` в новом сеансе должен выполниться без `sudo`. Без этого офис не запустит проверки. Группа `docker` даёт права root на хосте; это допустимо, пока офис — единственный сервис на VPS с входом по ключу SSH.
+
+2. Node 24 — по инструкции https://nodejs.org/en/download (пакет NodeSource или nvm). `uv` — в `/home/office/.local/bin/uv`:
+
+   ```bash
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   ```
+
+3. Клон, зависимости API и сборка панели:
+
+   ```bash
+   git clone https://github.com/SlavaPush/vibe-studio.git /home/office/vibe-studio
+   cd /home/office/vibe-studio/apps/office/api && uv sync --locked
+   cd /home/office/vibe-studio/apps/office/web && npm ci && npm run build
+   ```
+
+4. Образы проверок (из корня клона):
+
+   ```bash
+   cd /home/office/vibe-studio
+   docker build -t back-office-sandbox:p4 apps/office/docker/sandbox
+   docker build -t office-python-sandbox:p5 apps/office/docker/sandbox-python
+   docker pull postgres:16-alpine
+   ```
+
+5. Переменные и ключ App. На VPS создать каталог и `vps.env` из образца:
+
+   ```bash
+   mkdir -p /home/office/office && chmod 700 /home/office/office
+   cp /home/office/vibe-studio/apps/office/infra/vps.env.example /home/office/office/vps.env
+   ```
+
+   С компьютера владельца (из корня монорепозитория) скопировать `apps/office/.env` и ключ GitHub App как есть, без правок:
+
+   ```bash
+   scp apps/office/.env office-vps:/home/office/office/.env
+   scp ~/.config/vibe-office/vibe-office.private-key.pem office-vps:/home/office/office/vibe-office.private-key.pem
+   ```
+
+   На VPS закрыть права:
+
+   ```bash
+   chmod 600 /home/office/office/.env /home/office/office/vps.env /home/office/office/vibe-office.private-key.pem
+   ```
+
+   Переменные читает systemd, а не `uv --env-file`: строки `.env` должны иметь вид `ИМЯ=значение`, без `export`. Значения из `vps.env` заменяют значения из `.env`: адрес репозитория по HTTPS, путь к ключу App, `Host` и `Origin` домена, абсолютные пути БД, рабочей области и артефактов, каталог сборки панели.
+
+6. Caddy — по инструкции https://caddyserver.com/docs/install (пакет apt Caddy). Конфигурация и перезагрузка:
+
+   ```bash
+   sudo cp /home/office/vibe-studio/apps/office/infra/Caddyfile /etc/caddy/Caddyfile
+   sudo systemctl reload caddy
+   ```
+
+   Caddy получает сертификат для домена автоматически, если DNS домена указывает на VPS и порты 80 и 443 открыты. Поток SSE (`text/event-stream`) Caddy передаёт без буферизации.
+
+7. Сервис офиса (после остановки локального офиса, подраздел «Один экземпляр офиса на репозиторий»):
+
+   ```bash
+   sudo cp /home/office/vibe-studio/apps/office/infra/office-api.service /etc/systemd/system/office-api.service
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now office-api
+   ```
+
+### Обновление
+
+```bash
+cd /home/office/vibe-studio && git pull --ff-only
+cd apps/office/api && uv sync --locked
+cd ../web && npm ci && npm run build
+sudo systemctl restart office-api
+```
+
+Перед перезапуском проверить, что нет задач в работе и операций `started` или `unknown`. Сервис запускается с `uv run --no-sync`, поэтому зависимости обновляет только `uv sync --locked`. После изменения `docker/sandbox` или `docker/sandbox-python` пересобрать соответствующий образ (шаг 4 установки). После изменения `infra/Caddyfile` или `infra/office-api.service` повторить шаг 6 или 7.
+
+### Проверка
+
+```bash
+curl https://vibe-studio.twc1.net/api/health
+systemctl status office-api
+journalctl -u office-api -n 100
+docker ps
+docker image ls
+```
+
+`/api/health` возвращает `{"status":"ok"}`. Панель открывается по `https://vibe-studio.twc1.net`. Запрос по IP получает `403 forbidden_origin`: API проверяет `Host`. Сервис запускается после перезагрузки VPS (`enable`).
 
 ## Ручной сценарий `P4`
 
