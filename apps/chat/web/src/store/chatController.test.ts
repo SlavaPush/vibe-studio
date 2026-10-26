@@ -41,6 +41,7 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     models: vi.fn().mockResolvedValue({ items: [] }),
     me: vi.fn().mockResolvedValue(session),
     createSession: vi.fn().mockResolvedValue(session),
+    logout: vi.fn().mockResolvedValue({}),
     forgetSession: vi.fn(),
     conversations: vi.fn().mockResolvedValue({ items: [conversation] }),
     createConversation: vi.fn().mockResolvedValue(conversation),
