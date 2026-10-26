@@ -82,3 +82,37 @@ def test_version_is_not_cached_and_health_is_ready(db):
     with client_for(make_app(db)) as client:
         assert client.get("/api/version").headers["cache-control"] == "no-store"
         assert client.get("/healthz").json() == {"status": "ok"}
+
+
+def test_logout_ends_session_and_old_credentials_stop_working(db):
+    with client_for(make_app(db)) as client:
+        user = login(client)
+        assert user.get("/api/conversations").status_code == 200
+
+        response = user.post("/api/logout")
+        assert response.status_code == 200
+        assert response.json() == {}
+
+        assert user.get("/api/conversations").status_code == 401
+        assert user.get("/api/me").status_code == 401
+        assert sql(db, "SELECT count(*) FROM sessions")[0][0] == 0
+
+
+def test_logout_without_session_is_unauthorized(db):
+    with client_for(make_app(db)) as client:
+        anonymous = client.post("/api/logout")
+        assert anonymous.status_code == 401
+        assert anonymous.json()["code"] == "unauthorized"
+
+        user = login(client)
+        user.post("/api/logout")
+        again = user.post("/api/logout")
+        assert again.status_code == 401
+
+
+def test_logout_requires_csrf_token(db):
+    with client_for(make_app(db)) as client:
+        user = login(client)
+        missing = client.post("/api/logout", headers={"Cookie": f"vc_session={user.token}"})
+        assert missing.status_code == 403
+        assert user.get("/api/me").status_code == 200

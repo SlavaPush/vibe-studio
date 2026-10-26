@@ -12,6 +12,7 @@ function fakeController(overrides: Partial<ChatController> = {}): ChatController
   return {
     start: vi.fn(),
     signIn: vi.fn(),
+    signOutUser: vi.fn(),
     selectConversation: vi.fn(),
     createConversation: vi.fn(),
     renameConversation: vi.fn(),
@@ -71,6 +72,30 @@ describe('App', () => {
     const header = screen.getByRole('heading', { level: 1 }).closest('header')!
     fireEvent.click(within(header).getByRole('button', { name: 'О приложении' }))
     expect(await screen.findByRole('dialog', { name: 'О приложении' })).toBeInTheDocument()
+  })
+
+  it('в шапке есть кнопка «Выйти», которая завершает сеанс через контроллер', () => {
+    const signOutUser = vi.fn()
+    const store = createChatStore(testState())
+    render(<App store={store} controller={fakeController({ signOutUser })} />)
+    const header = screen.getByRole('heading', { level: 1 }).closest('header')!
+    fireEvent.click(within(header).getByRole('button', { name: 'Выйти' }))
+    expect(signOutUser).toHaveBeenCalledTimes(1)
+  })
+
+  it('после выхода из сеанса показывает экран входа', async () => {
+    const logout = vi.fn().mockResolvedValue({})
+    const forgetSession = vi.fn()
+    const api = { logout, forgetSession } as unknown as ApiClient
+    const store = createChatStore(testState())
+    const controller = createChatController(store, api)
+    render(<App store={store} controller={controller} />)
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Выйти' })))
+    expect(logout).toHaveBeenCalledTimes(1)
+    expect(forgetSession).toHaveBeenCalledTimes(1)
+    expect(store.getState().session).toBeNull()
+    expect(screen.getByLabelText('Код доступа')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Выйти' })).not.toBeInTheDocument()
   })
 
   it('ссылка быстрого перехода переводит фокус на поле «Сообщение»', () => {

@@ -1,4 +1,4 @@
-import { Menu, X } from 'lucide-react'
+import { LogOut, Menu, X } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { AboutDialog } from '@/components/chat/AboutDialog'
 import { ChatThread } from '@/components/chat/ChatThread'
@@ -154,6 +154,16 @@ export default function App({ store, controller, version = buildVersion() }: App
                   <ExportButton store={store} />
                   <AboutDialog />
                   <ThemeToggle className="shrink-0" />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    className="shrink-0 md:w-auto md:px-4"
+                    onClick={() => void controller.signOutUser()}
+                  >
+                    <LogOut aria-hidden="true" className="md:hidden" />
+                    <span className="sr-only md:not-sr-only">Выйти</span>
+                  </Button>
                 </div>
               </header>
               <ChatThread
