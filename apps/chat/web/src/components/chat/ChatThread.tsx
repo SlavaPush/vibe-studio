@@ -8,7 +8,7 @@ import {
   type AssistantRuntime,
   type MessageState,
 } from '@assistant-ui/react'
-import { ArrowUp, ListPlus, Square } from 'lucide-react'
+import { ArrowUp, Download, ListPlus, Square } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ApiRequestError } from '@/api/client'
 import type { AssetRef, AssetUrl, Effort, ModelProfile, SystemMessageKind } from '@/api/types'
@@ -272,39 +272,52 @@ function AssetImage({ asset, loadAssetUrl }: { asset: AssetRef; loadAssetUrl: Lo
   }, [url])
 
   return (
-    <Card className="w-64 max-w-full overflow-hidden py-0">
-      <CardContent className="p-0">
-        {error ? (
-          <div role="alert" className="flex flex-col gap-2 p-3 text-sm [overflow-wrap:anywhere] text-destructive">
-            <p>{error}</p>
-            <Button size="sm" variant="outline" onClick={() => setAttempt((value) => value + 1)}>
-              Повторить
-            </Button>
-          </div>
-        ) : url ? (
-          <img
-            src={url.url}
-            alt="Сгенерированное изображение"
-            width={asset.width ?? undefined}
-            height={asset.height ?? undefined}
-            className="h-auto w-full"
-            onLoad={() => setReloaded(false)}
-            onError={() => {
-              if (reloaded) {
-                setError('Не удалось загрузить изображение.')
-                return
-              }
-              setReloaded(true)
-              setAttempt((value) => value + 1)
-            }}
-          />
-        ) : (
-          <p role="status" className="p-3 text-sm text-muted-foreground">
-            Изображение загружается…
-          </p>
-        )}
-      </CardContent>
-    </Card>
+    <div className="flex w-64 max-w-full flex-col items-start gap-2">
+      <Card className="w-full overflow-hidden py-0">
+        <CardContent className="p-0">
+          {error ? (
+            <div role="alert" className="flex flex-col gap-2 p-3 text-sm [overflow-wrap:anywhere] text-destructive">
+              <p>{error}</p>
+              <Button size="sm" variant="outline" onClick={() => setAttempt((value) => value + 1)}>
+                Повторить
+              </Button>
+            </div>
+          ) : url ? (
+            <img
+              src={url.url}
+              alt="Сгенерированное изображение"
+              width={asset.width ?? undefined}
+              height={asset.height ?? undefined}
+              className="h-auto w-full"
+              onLoad={() => setReloaded(false)}
+              onError={() => {
+                if (reloaded) {
+                  setError('Не удалось загрузить изображение.')
+                  return
+                }
+                setReloaded(true)
+                setAttempt((value) => value + 1)
+              }}
+            />
+          ) : (
+            <p role="status" className="p-3 text-sm text-muted-foreground">
+              Изображение загружается…
+            </p>
+          )}
+        </CardContent>
+      </Card>
+      {url && !error && (
+        <a
+          href={url.url}
+          download=""
+          aria-label="Скачать изображение"
+          className="inline-flex h-9 items-center gap-2 rounded-md border border-input px-3 text-sm font-medium shadow-xs transition-colors hover:bg-accent hover:text-accent-foreground"
+        >
+          <Download aria-hidden="true" className="size-4" />
+          Скачать
+        </a>
+      )}
+    </div>
   )
 }
 
