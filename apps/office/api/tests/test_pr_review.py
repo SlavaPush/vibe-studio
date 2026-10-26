@@ -124,7 +124,11 @@ def test_invalid_answer_or_model_error_needs_attention(setup, answer):
     assert setup.fake.prs[1]["state"] == "open"
     assert setup.fake.merges() == 0
     assert [row["status"] for row in setup.ops() if row["kind"] == "pr_review"] == ["failed"]
-    assert len(reviews(setup)) == (2 if answer == "provider" else 1)
+    first, second = reviews(setup)
+    if answer == "provider":
+        assert first.target != second.target
+    else:
+        assert first.target == second.target and "Предыдущий ответ" in second.user
 
 
 def test_failed_or_waiting_required_check_does_not_call_reviewer(setup):
@@ -249,14 +253,14 @@ def test_review_has_own_limit_beyond_graph_budget(setup):
     task = setup.task()
     assert task.status == TaskStatus.needs_attention
     assert task.usage.model_calls == 30
-    assert len(reviews(setup)) == 2
+    assert len(reviews(setup)) == 4
     response = decide(setup, "retry", "retry-review-2")
     assert response.status_code == 409
     assert "агента ревью" in response.json()["message"]
     setup.office.set_task(setup.task_id, status="awaiting_integration")
     drive(worker, setup.task_id)
     assert setup.task().status == TaskStatus.needs_attention
-    assert len(reviews(setup)) == 2
+    assert len(reviews(setup)) == 4
     assert setup.fake.merges() == 0
 
 

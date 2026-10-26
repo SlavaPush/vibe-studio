@@ -543,6 +543,13 @@ class TaskGraph:
             fixed.append(Entry("Замечания QA и критика", json.dumps(findings, ensure_ascii=False, indent=1), required=True))
         if state.get("check_feedback"):
             fixed.append(Entry("Результат проверок прошлой версии", state["check_feedback"]))
+        if head != task.base_sha:
+            diff = self.workspace.diff_range(self.task_id, task.base_sha, head, DIFF_LIMIT)
+            fixed.append(Entry(
+                "Изменения, уже внесённые в ветку",
+                "Эти изменения уже есть в ветке, делать их заново не нужно: "
+                f"только дополни или исправь их по требованиям и замечаниям.\n{diff}",
+            ))
         fixed += self.file_entries(task)
         system = DEVELOPER_API if backend(task) else DEVELOPER
         reply = self.turns(AgentRole.developer, "implement", system, fixed, Turn, DEV_TURNS, S.developing)
@@ -638,6 +645,12 @@ class TaskGraph:
             fixed.append(Entry(title, "\n".join(api_files), required=True))
         if feedback:
             fixed.append(Entry("Результат прошлой попытки", feedback, required=True))
+        if (root / test_file).is_file():
+            current = (root / test_file).read_text(encoding="utf-8", errors="replace")
+            fixed.append(Entry(
+                "Текущее содержимое файла теста",
+                f"Этот тест уже есть в ветке: его можно оставить, дополнить или переписать.\n{current}",
+            ))
         if backend(task):
             fixed.append(Entry("Файлы apps/chat/api/app и apps/chat/contracts", self.listing(SERVER_DIRS)))
         else:

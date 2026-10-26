@@ -697,6 +697,18 @@ def test_blocking_critic_finding_returns_to_developer_until_limit(graph):
     assert events(app, task_id, "role_finished")[-1].payload["outcome"] == "blocked"
 
 
+def test_non_blocking_qa_finding_without_anchor_does_not_stop_task(graph):
+    app, client, me = graph
+    finding = {"blocking": False, "criterion": None, "file": None, "line": None, "text": "Можно добавить подсказку."}
+    app.state.gateway.handlers["qa"] = lambda call: qa_answer(call, findings=[finding])
+    task_id = create(app, me["id"])
+    approve(client, app, task_id)
+    wait_status(app, task_id, TaskStatus.awaiting_integration, TaskStatus.failed, TaskStatus.needs_attention)
+    assert status(app, task_id) == TaskStatus.awaiting_integration, events(app, task_id)[-3:]
+    assert len(app.state.gateway.role_calls("qa")) == 1
+    assert app.state.store.get_task(task_id).fix_cycles == 0
+
+
 NO_CHANGE = {"actions": [], "done": True, "summary": "Изменения уже сделаны."}
 
 
@@ -735,6 +747,9 @@ def test_retry_without_new_changes_continues_committed_version(graph, outcome):
         ("reviewing", "awaiting_integration"),
     ]
     assert office_commits(app, task_id, "developer") == commits
+    first, *_, last = gateway.role_calls("developer")
+    assert "Изменения, уже внесённые в ветку" not in first.user
+    assert "Изменения, уже внесённые в ветку" in last.user and "+  return 'v" in last.user
     assert suite.calls[start] == (task_id, head, head, False)
     assert developer_finished(app, task_id)[-1] == {
         "step": "implement", "outcome": "ok", "summary": "Новых изменений нет, проверяется текущая версия ветки."
@@ -784,7 +799,10 @@ def test_fix_cycle_without_new_changes_rechecks_same_version(graph):
     task = app.state.store.get_task(task_id)
     assert task.fix_cycles == 2
     assert len(gateway.role_calls("developer")) == 3
-    assert len(gateway.role_calls("qa")) == 3
+    qa_calls = gateway.role_calls("qa")
+    assert len(qa_calls) == 3
+    assert "Текущее содержимое файла теста" not in qa_calls[0].user
+    assert "Текущее содержимое файла теста" in qa_calls[1].user and QA_TEST in qa_calls[1].user
     assert len(gateway.role_calls("critic")) == 3
     [dev_sha] = office_commits(app, task_id, "developer")
     [qa_sha] = office_commits(app, task_id, "qa")
@@ -1389,7 +1407,8 @@ def test_incomplete_answer_fails_without_actions(graph):
     approve(client, app, task_id)
     wait_status(app, task_id, TaskStatus.failed)
     assert not [event for event in events(app, task_id, "tool_called") if event.tool == "write_file"]
-    assert app.state.store.get_task(task_id).usage.output_tokens == 25
+    assert len(app.state.gateway.role_calls("developer")) == 2
+    assert app.state.store.get_task(task_id).usage.output_tokens == 30
     last = events(app, task_id, "role_finished")[-1]
     assert last.payload["summary"].startswith("Ответ модели не соответствует схеме роли")
 

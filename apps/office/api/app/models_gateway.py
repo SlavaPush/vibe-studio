@@ -115,6 +115,27 @@ class ProviderReply:
     truncated: bool = False
 
 
+def parse_reply(target: Target, reply: ProviderReply, reply_type: type[ReplyT]) -> ReplyT:
+    if reply.truncated:
+        raise TruncatedModelResponse(f"{target.name}: answer cut at {target.max_output_tokens} output tokens")
+    if not reply.complete:
+        raise InvalidModelResponse(f"{target.name}: incomplete answer")
+    try:
+        return reply_type.model_validate(json.loads(reply.text))
+    except (ValueError, ValidationError) as error:
+        raise InvalidModelResponse(f"{target.name}: answer does not match schema") from error
+
+
+def retry_note(error: InvalidModelResponse) -> str:
+    if isinstance(error, TruncatedModelResponse):
+        return (
+            "\n\nПредыдущий ответ обрезан пределом выходных токенов: "
+            "сократи ответ, разбей действия на несколько ходов."
+        )
+    detail = str(error) if error.__cause__ is None else f"{error}: {error.__cause__}"
+    return f"\n\nПредыдущий ответ отклонён: {detail[:1000]}. Верни ответ заново строго по схеме."
+
+
 class UsageMeter:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -226,14 +247,18 @@ class ModelsGateway:
     ) -> ReplyT:
         schema = provider_schema(reply_type)
         targets = self.targets(role)
-        for index, target in enumerate(targets):
+        note = ""
+        index = 0
+        while index < len(targets):
+            target = targets[index]
             store.reserve_model_call(task_id, role, step, target)
-            call = ModelCall(task_id, role, step, target, system, user, schema, self.timeout(target.provider))
+            call = ModelCall(task_id, role, step, target, system, user + note, schema, self.timeout(target.provider))
             try:
                 reply = self.call_provider(call)
             except ProviderError:
                 if index == len(targets) - 1:
                     raise
+                index += 1
                 continue
             store.record_usage(
                 task_id,
@@ -241,16 +266,12 @@ class ModelsGateway:
                 reply.output_tokens,
                 self.cost(target.name, reply.input_tokens, reply.output_tokens),
             )
-            if reply.truncated:
-                raise TruncatedModelResponse(
-                    f"{target.name}: answer cut at {target.max_output_tokens} output tokens"
-                )
-            if not reply.complete:
-                raise InvalidModelResponse(f"{target.name}: incomplete answer")
             try:
-                return reply_type.model_validate(json.loads(reply.text))
-            except (ValueError, ValidationError) as error:
-                raise InvalidModelResponse(f"{target.name}: answer does not match schema") from error
+                return parse_reply(target, reply, reply_type)
+            except InvalidModelResponse as error:
+                if note:
+                    raise
+                note = retry_note(error)
         raise ProviderError("no model route")
 
     def call_provider(self, call: ModelCall) -> ProviderReply:

@@ -21,11 +21,17 @@ from app.models_gateway import (
 )
 from app.roles import (
     CLIPPED,
+    CRITIC,
+    CRITIC_API,
     ContextTooLarge,
     CriticReview,
     QA,
+    QA_API,
     QA_API_FILES,
+    SUPERVISOR,
+    SUPERVISOR_API,
     Entry,
+    Finding,
     QaTurn,
     ResearchNotes,
     SpecDraft,
@@ -312,8 +318,10 @@ def test_answer_outside_schema_is_rejected(setup, answer):
     claude.answer = answer
     with pytest.raises(InvalidModelResponse):
         make().structured(store, task_id, AgentRole.developer, "implement", "S", "U", Turn)
-    assert store.get_task(task_id).usage.output_tokens == 30
-    assert raw_cost(store, task_id) == pytest.approx(SONNET_COST)
+    assert len(claude.calls) == 2
+    task = store.get_task(task_id)
+    assert task.usage.output_tokens == 60 and task.usage.model_calls == 2
+    assert raw_cost(store, task_id) == pytest.approx(2 * SONNET_COST)
 
 
 def test_openai_answer_outside_schema_is_counted(setup):
@@ -322,17 +330,70 @@ def test_openai_answer_outside_schema_is_counted(setup):
     gpt.answer = "not json"
     with pytest.raises(InvalidModelResponse):
         make().structured(store, task_id, AgentRole.qa, "qa_try", "S", "U", Turn)
+    assert len(claude.calls) == 1 and len(gpt.calls) == 2
     task = store.get_task(task_id)
-    assert (task.usage.input_tokens, task.usage.output_tokens) == (200, 40)
-    assert raw_cost(store, task_id) == pytest.approx(SOL_COST)
+    assert (task.usage.input_tokens, task.usage.output_tokens) == (400, 80)
+    assert raw_cost(store, task_id) == pytest.approx(2 * SOL_COST)
 
 
 def test_incomplete_anthropic_answer_is_rejected(setup):
     store, task_id, claude, _, make = setup
     claude.answer = json.dumps(TURN)
-    claude.stop_reason = "max_tokens"
-    with pytest.raises(InvalidModelResponse):
+    claude.stop_reason = "pause_turn"
+    with pytest.raises(InvalidModelResponse) as error:
         make().structured(store, task_id, AgentRole.developer, "implement", "S", "U", Turn)
+    assert not isinstance(error.value, TruncatedModelResponse)
+    assert len(claude.calls) == 2
+    assert "incomplete answer" in claude.calls[1]["messages"][0]["content"]
+
+
+def answer_in_turn(claude, answers):
+    create = claude.messages.create
+    queue = iter(answers)
+
+    def step(**kwargs):
+        claude.answer, claude.stop_reason = next(queue)
+        return create(**kwargs)
+
+    claude.messages = SimpleNamespace(create=step)
+
+
+def test_valid_second_answer_is_accepted_after_schema_error(setup):
+    store, task_id, claude, gpt, make = setup
+    answer_in_turn(claude, [(json.dumps(TURN | {"extra": 1}), "end_turn"), (json.dumps(TURN), "end_turn")])
+    reply = make().structured(store, task_id, AgentRole.developer, "implement", "S", "U", Turn)
+    assert reply == Turn.model_validate(TURN)
+    assert gpt.calls == []
+    first, second = claude.calls
+    assert first["system"] == second["system"] == "S"
+    assert first["messages"][0]["content"] == "U"
+    retry = second["messages"][0]["content"]
+    assert retry.startswith("U\n\nПредыдущий ответ отклонён: anthropic/claude-sonnet-5-5: answer does not match schema")
+    assert "extra" in retry and retry.endswith("Верни ответ заново строго по схеме.")
+    task = store.get_task(task_id)
+    assert task.usage.model_calls == 2 and task.usage.output_tokens == 60
+    assert raw_cost(store, task_id) == pytest.approx(2 * SONNET_COST)
+
+
+def test_retry_note_is_clipped(setup):
+    store, task_id, claude, _, make = setup
+    finding = {"blocking": True, "criterion": None, "file": None, "line": None, "text": "т" * 900}
+    review = {"verdict": "changes_requested", "findings": [finding] * 10}
+    answer_in_turn(claude, [(json.dumps(review), "end_turn"), (json.dumps({"verdict": "pass", "findings": []}), "end_turn")])
+    assert make().structured(store, task_id, AgentRole.critic, "review", "S", "U", CriticReview).verdict == "pass"
+    retry = claude.calls[1]["messages"][0]["content"]
+    detail = retry.removeprefix("U\n\nПредыдущий ответ отклонён: ").removesuffix(". Верни ответ заново строго по схеме.")
+    assert 0 < len(detail) <= 1000 and "criterion or file" in detail
+
+
+def test_valid_second_answer_is_accepted_after_truncation(setup):
+    store, task_id, claude, _, make = setup
+    answer_in_turn(claude, [('{"actions": [', "max_tokens"), (json.dumps(TURN), "end_turn")])
+    assert make().structured(store, task_id, AgentRole.qa, "qa", "S", "U", Turn) == Turn.model_validate(TURN)
+    assert claude.calls[1]["messages"][0]["content"] == (
+        "U\n\nПредыдущий ответ обрезан пределом выходных токенов: "
+        "сократи ответ, разбей действия на несколько ходов."
+    )
 
 
 @pytest.mark.parametrize("provider", ["anthropic", "openai"])
@@ -348,7 +409,8 @@ def test_answer_cut_by_output_limit_is_truncated_error(setup, provider):
         gpt.incomplete_details = SimpleNamespace(reason="max_output_tokens")
     with pytest.raises(TruncatedModelResponse, match="output tokens"):
         make().structured(store, task_id, AgentRole.qa, "qa", "S", "U", Turn)
-    assert raw_cost(store, task_id) == pytest.approx(SONNET_COST if provider == "anthropic" else SOL_COST)
+    assert len(claude.calls if provider == "anthropic" else gpt.calls) == 2
+    assert raw_cost(store, task_id) == pytest.approx(2 * (SONNET_COST if provider == "anthropic" else SOL_COST))
 
     if provider == "openai":
         gpt.incomplete_details = SimpleNamespace(reason="content_filter")
@@ -392,6 +454,35 @@ def test_finding_line_below_one_means_unknown(setup, line):
     for broken in ({"line": "x"}, {"line": 1.5}, {"criterion": 0}, {"file": None}):
         with pytest.raises(ValueError):
             CriticReview.model_validate({"verdict": "pass", "findings": [finding | broken]})
+
+
+def test_prompts_keep_requirements_and_blocking_proportional():
+    for prompt in (CRITIC, CRITIC_API):
+        assert "verdict = pass, даже если есть неблокирующие замечания" in prompt
+        assert "не требуй добавления тестов" in prompt
+    for prompt in (CRITIC, CRITIC_API, QA, QA_API):
+        assert "У блокирующего замечания должен быть заполнен criterion или file." in prompt
+        assert "У замечания должен" not in prompt
+    for prompt in (QA, QA_API):
+        assert "blocking = true только когда критерий приёмки не выполнен" in prompt
+    for prompt in (SUPERVISOR, SUPERVISOR_API):
+        assert "только из того, что написал участник" in prompt
+        assert "критериев от 1 до 3, а план — не длиннее 4 шагов" in prompt
+        assert "не задают способ реализации" in prompt
+
+
+def test_only_blocking_finding_requires_anchor():
+    loose = {"blocking": False, "criterion": None, "file": None, "line": None, "text": "Можно короче."}
+    stored = loose | {"id": "qa-0-1", "source": "qa"}
+    assert CriticReview.model_validate({"verdict": "pass", "findings": [loose]}).findings[0].file is None
+    assert QaTurn.model_validate(
+        {"summary": "s", "criteria_covered": [1], "findings": [loose], "done": True, "actions": []}
+    ).findings[0].criterion is None
+    assert Finding.model_validate(stored).model_dump() == stored
+    with pytest.raises(ValueError, match="criterion or file"):
+        CriticReview.model_validate({"verdict": "pass", "findings": [loose | {"blocking": True}]})
+    with pytest.raises(ValueError, match="criterion or file"):
+        Finding.model_validate(stored | {"blocking": True})
 
 
 @pytest.mark.parametrize("reply_type", [Turn, QaTurn])
