@@ -1,5 +1,5 @@
 import { Pencil } from 'lucide-react'
-import { useState, type KeyboardEvent } from 'react'
+import { useRef, useState, type KeyboardEvent } from 'react'
 import type { Conversation } from '@/api/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -11,6 +11,27 @@ interface ConversationListProps {
   onCreate: () => void
   onRename: (id: string, title: string) => void
   loadFailed?: boolean
+}
+
+function ConversationTitle({ title }: { title: string }) {
+  const ref = useRef<HTMLSpanElement>(null)
+  const [truncated, setTruncated] = useState(false)
+
+  const check = () => {
+    const element = ref.current
+    setTruncated(element ? element.scrollWidth > element.clientWidth : false)
+  }
+
+  return (
+    <span
+      ref={ref}
+      className="block truncate"
+      title={truncated ? title : undefined}
+      onMouseEnter={check}
+    >
+      {title}
+    </span>
+  )
 }
 
 export function ConversationList({
@@ -78,7 +99,7 @@ export function ConversationList({
                 onClick={() => onSelect(conversation.id)}
                 className="min-w-0 flex-1 justify-start"
               >
-                <span className="truncate">{conversation.title}</span>
+                <ConversationTitle title={conversation.title} />
               </Button>
               <Button
                 variant="ghost"
