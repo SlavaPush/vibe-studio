@@ -14,6 +14,7 @@ import { ApiRequestError } from '@/api/client'
 import type { AssetRef, AssetUrl, Effort, ModelProfile, SystemMessageKind } from '@/api/types'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
+import { ImageLoader } from '@/components/chat/ImageLoader'
 import { LoadingStatus } from '@/components/chat/Notices'
 import {
   readMessageCustom,
@@ -47,6 +48,8 @@ const COMPOSER_BUTTON = 'rounded-full md:h-9 md:w-auto md:rounded-md md:px-4'
 const COMPOSER_HINT_ID = 'composer-hint'
 
 const MAX_MESSAGE_LENGTH = 4000
+
+const IMAGE_MODEL_ID = 'gpt-image-2.5-flare'
 
 const THINKING_DOT_DELAYS = ['[animation-delay:0ms]', '[animation-delay:200ms]', '[animation-delay:400ms]']
 
@@ -356,15 +359,18 @@ function ChatMessage({ message, models, loadAssetUrl }: ChatMessageProps) {
 
   const model = models.find((profile) => profile.id === custom.effective_model)
   const isPending = message.status?.type === 'running'
+  const isImageModel = model?.kind === 'image' || custom.effective_model === IMAGE_MODEL_ID
+  const imageLoading = isPending && !custom.incomplete && isImageModel && !custom.asset
   return (
     <article
       aria-label="Ответ ассистента"
       className="flex max-w-[85%] min-w-0 flex-col gap-2 text-sm [overflow-wrap:anywhere] md:max-w-[80%]"
     >
+      {imageLoading && <ImageLoader />}
       {custom.asset && <AssetImage asset={custom.asset} loadAssetUrl={loadAssetUrl} />}
       {text && <p className="whitespace-pre-wrap">{text}</p>}
       {custom.incomplete && <p className="text-xs text-destructive">Ответ не завершён</p>}
-      {isPending && !custom.incomplete && (
+      {isPending && !custom.incomplete && !imageLoading && (
         <p role="status" className="flex items-center gap-0.5 text-muted-foreground">
           Думаю<span className="sr-only">…</span>
           <span aria-hidden="true" className="inline-flex translate-y-0.5 gap-1 pl-0.5">
