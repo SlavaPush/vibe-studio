@@ -50,7 +50,7 @@ SPEC = {
 ROUTES = {
     AgentRole.researcher: ("anthropic/claude-haiku-5-5", "openai/gpt-6-luna", "low", 8192),
     AgentRole.supervisor: ("anthropic/claude-fable-5-1", "openai/gpt-6-astra", "medium", 8192),
-    AgentRole.developer: ("anthropic/claude-opus-5-5", "openai/gpt-5.6-sol", "high", 32000),
+    AgentRole.developer: ("anthropic/claude-opus-5-5", "openai/gpt-5.6-sol", "medium", 32000),
     AgentRole.qa: ("anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol", "medium", 16000),
     AgentRole.critic: ("openai/gpt-6-astra", "anthropic/claude-fable-5-1", "medium", 16000),
     AgentRole.pr_reviewer: ("anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol", "high", 16000),
@@ -100,7 +100,7 @@ def test_anthropic_call_uses_effort_schema_and_accounting(setup):
     assert call["model"] == "claude-opus-5-5"
     assert call["max_tokens"] == 32000
     assert call["system"] == "SYSTEM" and call["messages"] == [{"role": "user", "content": "USER"}]
-    assert call["output_config"] == {"effort": "high", "format": {"type": "json_schema", "schema": provider_schema(Turn)}}
+    assert call["output_config"] == {"effort": "medium", "format": {"type": "json_schema", "schema": provider_schema(Turn)}}
     assert call["timeout"] == 300
     task = store.get_task(task_id)
     assert (task.usage.model_calls, task.usage.input_tokens, task.usage.output_tokens) == (1, 120, 30)
@@ -113,7 +113,7 @@ def test_anthropic_call_uses_effort_schema_and_accounting(setup):
         "result": "ok",
         "provider": "anthropic",
         "model": "claude-opus-5-5",
-        "effort": "high",
+        "effort": "medium",
     }
 
 

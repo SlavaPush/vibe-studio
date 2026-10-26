@@ -253,7 +253,7 @@ CREATE POLICY office_codes_update ON access_codes FOR UPDATE TO office_codes USI
 | Фильтр приёма (`intake_filter`) | модерация OpenAI `omni-moderation-latest` и `claude-haiku-5-5` `low` | `gpt-6-luna` `low` | 1024 |
 | Исследователь | `claude-haiku-5-5` `low` | `gpt-6-luna` `low` | 8192 |
 | Supervisor | `claude-fable-5-1` `medium` | `gpt-6-astra` `medium` | 8192 |
-| Разработчик | `claude-opus-5-5` `high` | `gpt-5.6-sol` `high` | 32000 |
+| Разработчик | `claude-opus-5-5` `medium` | `gpt-5.6-sol` `medium` | 32000 |
 | QA | `claude-sonnet-5-5` `medium` | `gpt-6.1-sol` `medium` | 16000 |
 | Критик | `gpt-6-astra` `medium` | `claude-fable-5-1` `medium` | 16000 |
 | Агент ревью PR | `claude-sonnet-5-5` `high` | `gpt-6.1-sol` `high` | 16000 |
