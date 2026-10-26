@@ -43,6 +43,23 @@ function select(task: Task) {
   return button
 }
 
+describe('новые элементы на узкой ширине', () => {
+  it('шапка: переключатель темы с целями касания 44 px, список: название в две строки, карточка: описание', async () => {
+    backend()
+    viewport(true)
+    await ready()
+    const theme = screen.getByRole('radiogroup', { name: 'Тема оформления' })
+    expect(screen.queryByRole('button', { name: 'Тёмная тема' })).not.toBeInTheDocument()
+    for (const option of within(theme).getAllByRole('radio')) expect(option).toHaveClass('size-11', 'desk:size-8')
+    const title = within(item(first)).getByText(first.title)
+    expect(title).toHaveClass('line-clamp-2')
+    expect(title).toHaveAttribute('title', first.title)
+    expect(item(first)).toHaveTextContent(`Заказчик: ${first.owner_name}`)
+    const description = screen.getByRole('region', { name: 'Описание' })
+    expect(within(description).getByText(first.text.split('\n')[0], { exact: false })).toHaveClass('whitespace-pre-wrap')
+  })
+})
+
 describe('выбор задачи на узкой ширине', () => {
   it('переводит фокус на заголовок карточки, в том числе при повторном выборе', async () => {
     backend()

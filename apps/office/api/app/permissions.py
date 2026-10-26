@@ -45,7 +45,7 @@ def require_task_owner(participant: Participant, task: Task, decision: TaskDecis
         raise OfficeError(
             403,
             ErrorCode.forbidden_not_owner,
-            "Решения по задаче принимает только её владелец.",
+            "Решения по задаче принимает только её заказчик.",
         )
 
 

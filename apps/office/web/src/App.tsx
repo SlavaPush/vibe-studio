@@ -26,6 +26,7 @@ import { ReleaseQueue } from '@/components/office/ReleaseQueue'
 import { TaskCard } from '@/components/office/TaskCard'
 import { TaskForm } from '@/components/office/TaskForm'
 import { TaskStack } from '@/components/office/TaskStack'
+import { ThemeToggle } from '@/components/office/ThemeToggle'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -41,6 +42,7 @@ import { Button } from '@/components/ui/button'
 import { AboutDialog } from '@/components/office/AboutDialog'
 import { connectOfficeEvents, type OfficeEvents, type StreamState } from '@/lib/events'
 import { initialOfficeState, officeReducer } from '@/lib/office-state'
+import { clearAwaitedDecisions } from '@/lib/use-decision'
 
 const COALESCE_MS = 300
 const SESSION_EXPIRED = 'Сеанс истёк или код отозван. Для нового входа нужен новый личный код.'
@@ -79,7 +81,6 @@ function App() {
   const [gateNotice, setGateNotice] = useState<string | null>(null)
   const [sessionError, setSessionError] = useState<string | null>(null)
   const [state, dispatch] = useReducer(officeReducer, initialOfficeState)
-  const [dark, setDark] = useState(false)
   const [leaving, setLeaving] = useState(false)
   const [logoutError, setLogoutError] = useState<string | null>(null)
   const [headingFocus, setHeadingFocus] = useState(0)
@@ -88,10 +89,6 @@ function App() {
   const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>())
   const slotsSeq = useRef(0)
   const stream = useRef<OfficeEvents | null>(null)
-
-  useEffect(() => {
-    document.documentElement.classList.toggle('dark', dark)
-  }, [dark])
 
   useEffect(() => {
     if (headingFocus > 0) document.getElementById('task-heading')?.focus()
@@ -121,6 +118,7 @@ function App() {
     generation.current += 1
     for (const timer of timers.current.values()) clearTimeout(timer)
     timers.current.clear()
+    clearAwaitedDecisions()
     dispatch({ type: 'reset' })
     setLastEvents({})
     setParticipant(null)
@@ -316,14 +314,7 @@ function App() {
               {participant.display_name} ({participant.role === 'admin' ? 'администратор' : 'участник'})
             </p>
             <AboutDialog />
-            <Button
-              type="button"
-              variant="outline"
-              aria-pressed={dark}
-              onClick={() => setDark((value) => !value)}
-            >
-              Тёмная тема
-            </Button>
+            <ThemeToggle />
             <AlertDialog>
               <AlertDialogTrigger asChild>
                 <Button type="button" variant="outline" disabled={leaving}>

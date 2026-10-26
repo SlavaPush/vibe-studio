@@ -36,12 +36,14 @@ export function TaskStack({ tasks, slots, selectedId, onSelect }: TaskStackProps
                   task.id === selectedId && 'border-primary',
                 )}
               >
-                <span className="font-medium">{task.title}</span>
+                <span className="line-clamp-2 font-medium" title={task.title}>
+                  {task.title}
+                </span>
                 <span className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
                   <Badge variant={task.status === 'rejected' ? 'destructive' : 'secondary'}>
                     {STATUS_LABELS[task.status]}
                   </Badge>
-                  <span>Владелец: {task.owner_name}</span>
+                  <span>Заказчик: {task.owner_name}</span>
                 </span>
               </button>
             </li>

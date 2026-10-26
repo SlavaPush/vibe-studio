@@ -111,9 +111,14 @@ def contract_error_codes() -> dict[str, int]:
 CONTRACT_CODES = contract_error_codes()
 
 
-def classification(related: bool = True, change_class: str = "frontend_ui", reason: str = "ok") -> str:
+MODEL_TITLE = "Кнопка копирования ответа ассистента"
+
+
+def classification(
+    related: bool = True, change_class: str = "frontend_ui", reason: str = "ok", title: str = MODEL_TITLE
+) -> str:
     return json.dumps(
-        {"related_to_vibe_chat": related, "change_class": change_class, "reason": reason},
+        {"related_to_vibe_chat": related, "change_class": change_class, "reason": reason, "title": title},
         ensure_ascii=False,
     )
 
@@ -533,7 +538,7 @@ class Office:
     def start_tasks(self, app: FastAPI, owner_id: str, count: int = 1) -> list[str]:
         store: TaskStore = app.state.store
         ids = [
-            store.create_task(owner_id, UI_TASK, IntakeOutcome(True, None)).id
+            store.create_task(owner_id, UI_TASK, IntakeOutcome(True, None, title=MODEL_TITLE)).id
             for _ in range(count)
         ]
         store.promote_queue()

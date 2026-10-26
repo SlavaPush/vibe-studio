@@ -38,8 +38,9 @@ CLASSIFICATION_SCHEMA: dict[str, Any] = {
             "enum": ["frontend_ui", "backend_api", "out_of_scope", "internal_probe", "other"],
         },
         "reason": {"type": "string"},
+        "title": {"type": "string"},
     },
-    "required": ["related_to_vibe_chat", "change_class", "reason"],
+    "required": ["related_to_vibe_chat", "change_class", "reason", "title"],
     "additionalProperties": False,
 }
 
@@ -50,6 +51,7 @@ class Classification(BaseModel):
     related_to_vibe_chat: bool
     change_class: Literal["frontend_ui", "backend_api", "out_of_scope", "internal_probe", "other"]
     reason: str = Field(max_length=300)
+    title: str
 
 
 class ProviderError(Exception):

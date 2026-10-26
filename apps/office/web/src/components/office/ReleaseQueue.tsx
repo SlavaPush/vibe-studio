@@ -28,6 +28,7 @@ import { newDecision, useDecision } from '@/lib/use-decision'
 const QUEUE_STATUSES: readonly ReleaseStatus[] = ['pending', 'deploying', 'verifying', 'rolling_back']
 const FIX_SHA = /^[0-9a-f]{40}$/
 const REASON_LIMIT = 500
+const RELEASE_SLOW = 'Решение записано, обновляем выпуск…'
 
 interface ReleaseQueueProps {
   releases: ReleaseCandidate[]
@@ -43,16 +44,36 @@ interface ReleaseItemProps {
   release: ReleaseCandidate
   task: Task | undefined
   queue: ReleaseQueueState | null
+  releases: ReleaseCandidate[]
   participant: Participant
   run: Run
   onRefresh: (release: ReleaseCandidate) => void
   onOpenTask: (id: string) => void
 }
 
-function useReleaseDecision(release: ReleaseCandidate, run: Run, onRefresh: (release: ReleaseCandidate) => void) {
+function useReleaseDecision(
+  form: string,
+  release: ReleaseCandidate,
+  run: Run,
+  onRefresh: (release: ReleaseCandidate) => void,
+  settled?: (decisionId: string | null) => boolean,
+) {
   return useDecision<ReleaseDecision>(
+    `release:${release.id}:${form}`,
     (body) => run(() => decideRelease(release.id, body)),
     () => onRefresh(release),
+    release.version,
+    { slowText: RELEASE_SLOW, settled },
+  )
+}
+
+function rollbackQueued(release: ReleaseCandidate, releases: ReleaseCandidate[]): boolean {
+  return releases.some(
+    (other) =>
+      other.kind === 'rollback' &&
+      other.commit_sha === release.expected_previous_sha &&
+      other.expected_previous_sha === release.commit_sha &&
+      QUEUE_STATUSES.includes(other.status),
   )
 }
 
@@ -67,11 +88,23 @@ function prLabel(url: string): string {
   return number ? `PR #${number}` : 'PR'
 }
 
-function ReleaseItem({ release, task, queue, participant, run, onRefresh, onOpenTask }: ReleaseItemProps) {
-  const decision = useReleaseDecision(release, run, onRefresh)
+function ReleaseItem({
+  release,
+  task,
+  queue,
+  releases,
+  participant,
+  run,
+  onRefresh,
+  onOpenTask,
+}: ReleaseItemProps) {
+  const action: ReleaseDecision = QUEUE_STATUSES.includes(release.status) ? 'resume_releases' : 'rollback'
+  const queued = action === 'rollback' && rollbackQueued(release, releases)
+  const created = (decisionId: string | null) =>
+    decisionId !== null && releases.some((other) => other.origin_decision_id === decisionId)
+  const decision = useReleaseDecision(action, release, run, onRefresh, action === 'rollback' ? created : undefined)
   const reasonId = useId()
   const [reason, setReason] = useState('')
-  const action: ReleaseDecision = QUEUE_STATUSES.includes(release.status) ? 'resume_releases' : 'rollback'
   const start = () => {
     const body = newDecision(action, release.version)
     const text = reason.trim()
@@ -97,15 +130,16 @@ function ReleaseItem({ release, task, queue, participant, run, onRefresh, onOpen
             type="button"
             className="tap-target min-w-0 text-left underline"
             aria-label={`Открыть задачу «${task.title}»`}
+            title={task.title}
             onClick={() => onOpenTask(task.id)}
           >
-            {task.title}
+            <span className="line-clamp-2">{task.title}</span>
           </button>
         ) : (
           <span className="text-muted-foreground">Задача {release.task_id}</span>
         )}
         {release.pr_url && (
-          <a className="tap-target underline" href={release.pr_url} target="_blank" rel="noreferrer">
+          <a className="tap-target min-w-10 justify-center underline" href={release.pr_url} target="_blank" rel="noreferrer">
             {prLabel(release.pr_url)}
           </a>
         )}
@@ -199,7 +233,7 @@ function ReleaseItem({ release, task, queue, participant, run, onRefresh, onOpen
                   ? `В очередь встанет кандидат отката на версию ${release.expected_previous_sha}.`
                   : 'Офис сверит Render и опубликованную версию и освободит очередь. Если деплой ещё идёт, решение будет отклонено.'
               }
-              disabled={decision.pending}
+              disabled={decision.pending || queued}
               onConfirm={start}
             />
           </div>
@@ -225,7 +259,7 @@ interface BlockedProps {
 function ResumeForm({ release, run, onRefresh }: { release: ReleaseCandidate; run: Run; onRefresh: BlockedProps['onRefresh'] }) {
   const id = useId()
   const [fixSha, setFixSha] = useState('')
-  const decision = useReleaseDecision(release, run, onRefresh)
+  const decision = useReleaseDecision('fix', release, run, onRefresh)
   const valid = FIX_SHA.test(fixSha)
   const revert = release.revert
   const retry = revert?.status === 'needs_attention' && !(revert.source === 'auto' && revert.fix_sha)
@@ -285,7 +319,7 @@ function BlockedNotice({ blocked, queue, participant, run, onRefresh }: BlockedP
           {revert.pr_url && (
             <>
               {': '}
-              <a className="tap-target underline" href={revert.pr_url} target="_blank" rel="noreferrer">
+              <a className="tap-target min-w-10 justify-center underline" href={revert.pr_url} target="_blank" rel="noreferrer">
                 PR #{revert.pr_number}
               </a>
             </>
@@ -327,6 +361,7 @@ export function ReleaseQueue({ releases, tasks, queue, participant, run, onRefre
       release={release}
       task={tasks.find((task) => task.id === release.task_id)}
       queue={queue}
+      releases={releases}
       participant={participant}
       run={run}
       onRefresh={onRefresh}

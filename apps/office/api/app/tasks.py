@@ -2,6 +2,7 @@ import json
 import logging
 import math
 import secrets
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -81,6 +82,7 @@ TASK_SELECT = (
 )
 PR_REVIEW_CALLS_LIMIT = 2
 REWORK_LIMIT = 1
+TITLE_LIMIT = 60
 REWORK_MATERIALS = ("reason", "deploy_events", "render_logs", "actions_log", "source_diff")
 LIMIT_REACHED = "Лимит доработки исчерпан: повторной доработки не будет."
 REWORK_RESET = (
@@ -113,6 +115,7 @@ class IntakeOutcome:
     effort: str | None = None
     cost_usd: float = 0.0
     meter: Any = field(default=None, compare=False, repr=False)
+    title: str | None = None
 
 
 def new_id(prefix: str) -> str:
@@ -123,9 +126,31 @@ def rework_tree(task_id: str, count: int) -> str:
     return f"{task_id}-r{count}" if count else task_id
 
 
-def task_title(text: str) -> str:
+def _one_line(value: str) -> str:
+    return " ".join("".join(" " if unicodedata.category(char).startswith("C") else char for char in value).split())
+
+
+def _shorten(value: str) -> str | None:
+    if len(value) <= TITLE_LIMIT:
+        return value
+    cut = value[: TITLE_LIMIT - 1]
+    if value[TITLE_LIMIT - 1] != " ":
+        if " " not in cut:
+            return None
+        cut = cut[: cut.rfind(" ")]
+    cut = cut.rstrip(" ,.;:")
+    return f"{cut}…" if cut else None
+
+
+def task_title(text: str, suggested: str | None = None) -> str:
+    title = _shorten(_one_line(suggested or ""))
+    if title and any(char.isalpha() for char in title):
+        return title
     lines = text.strip().splitlines()
-    return lines[0].strip()[:80] if lines else ""
+    line = _one_line(lines[0]) if lines else ""
+    if not line:
+        return ""
+    return _shorten(line) or f"{line[: TITLE_LIMIT - 1]}…"
 
 
 def _json(value: Any) -> str:
@@ -796,7 +821,7 @@ class TaskStore:
     ) -> Task:
         task_id = new_id("tsk")
         now = to_text(utcnow())
-        title = task_title(text)
+        title = task_title(text, outcome.title)
         status = TaskStatus.queued if outcome.accepted else TaskStatus.rejected
         with self.db.locked_transaction() as conn:
             if reservation_id is not None:

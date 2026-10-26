@@ -25,7 +25,7 @@ from app.sandbox import SandboxError
 from app.schemas import AgentRole, CheckReport, CheckResult, FailureKind, ReleaseStatus, TaskEventType, TaskStatus
 from app.service_check import SERVICE_TIMEOUT
 from app.workspace import PushResult, Workspace
-from conftest import CI_JOBS, FakeGitHub, FakeSuite, ScriptedGateway, git
+from conftest import CI_JOBS, MODEL_TITLE, FakeGitHub, FakeSuite, ScriptedGateway, git
 
 pytestmark = pytest.mark.pg
 
@@ -184,7 +184,8 @@ def test_task_reaches_open_pr_and_passed_checks(setup):
     assert (task.status, task.head_sha, task.pr_number) == (TaskStatus.awaiting_integration, setup.head, 1)
     assert task.pr_url == "https://github.com/SlavaPush/vibe-studio/pull/1"
     pr = setup.fake.prs[1]
-    assert (pr["head"]["ref"], pr["base"]["ref"], pr["title"]) == (f"office/{setup.task_id}", "main", task.title)
+    assert task.title == MODEL_TITLE
+    assert (pr["head"]["ref"], pr["base"]["ref"], pr["title"]) == (f"office/{setup.task_id}", "main", MODEL_TITLE)
     for text in (SPEC["summary"], *SPEC["acceptance_criteria"], "QA: тест проходит.", "Вердикт pass, замечаний: 0."):
         assert text in pr["body"]
     assert "Generated" not in pr["body"] and "Co-Authored" not in pr["body"]
@@ -745,7 +746,7 @@ def test_approved_pr_is_merged_checked_and_becomes_candidate(setup):
     sha = task.merge_sha
     [put] = [request for request in setup.fake.requests if request.method == "PUT"]
     assert put.url.path == "/repos/SlavaPush/vibe-studio/pulls/1/merge"
-    assert json.loads(put.content) == {"sha": setup.head, "merge_method": "squash", "commit_title": f"{task.title} (#1)"}
+    assert json.loads(put.content) == {"sha": setup.head, "merge_method": "squash", "commit_title": f"{MODEL_TITLE} (#1)"}
     assert git(setup.origin.bare, "rev-parse", "main~1") == setup.published
     assert [event.payload for event in setup.events(TaskEventType.pr_merged)] == [{"pr_number": 1, "merge_sha": sha}]
     assert task.status == TaskStatus.awaiting_integration

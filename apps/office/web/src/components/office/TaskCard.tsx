@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   asApiError,
   decideTask,
@@ -99,7 +99,12 @@ export function TaskCard({
   const [journal, setJournal] = useState<StreamState>('connecting')
   const [diff, setDiff] = useState<Loadable<string>>({ state: 'loading' })
   const [report, setReport] = useState<Loadable<CheckReport>>({ state: 'loading' })
-  const decision = useDecision<TaskDecision>((body) => run(() => decideTask(task.id, body)), onRefresh)
+  const decision = useDecision<TaskDecision>(
+    `task:${task.id}`,
+    (body) => run(() => decideTask(task.id, body)),
+    onRefresh,
+    task.version,
+  )
 
   useEffect(() => {
     if (tab !== 'events') return
@@ -166,7 +171,7 @@ export function TaskCard({
     <Card>
       <CardHeader>
         <CardTitle>
-          <h2 id="task-heading" tabIndex={-1} className="text-lg">
+          <h2 id="task-heading" tabIndex={-1} className="text-lg leading-snug">
             {task.title}
           </h2>
         </CardTitle>
@@ -175,11 +180,12 @@ export function TaskCard({
             {STATUS_LABELS[task.status]}
           </Badge>
           {task.contour && <Badge variant="outline">Контур: {CONTOUR_LABELS[task.contour]}</Badge>}
-          <span>Владелец: {task.owner_name}</span>
+          <span>Заказчик: {task.owner_name}</span>
           <span>Версия: {task.version}</span>
         </CardDescription>
       </CardHeader>
       <CardContent className="grid grid-cols-1 gap-4">
+        <TaskDescription text={task.text} />
         {task.status === 'failed' && task.failure_kind && (
           <p className="text-sm text-destructive">Причина ошибки: {failureLabel(task)}</p>
         )}
@@ -271,7 +277,6 @@ export function TaskCard({
             ) : (
               <>
                 <PipelineBoard pipeline={pipeline} />
-                <h3 className="font-medium">Лента событий</h3>
                 <EventFeed events={events} />
               </>
             )}
@@ -585,23 +590,58 @@ function ReportView({ report }: { report: Loadable<CheckReport> }) {
   )
 }
 
+function TaskDescription({ text }: { text: string }) {
+  const ref = useRef<HTMLParagraphElement>(null)
+  const [expanded, setExpanded] = useState(false)
+  const [overflows, setOverflows] = useState(false)
+
+  useLayoutEffect(() => {
+    if (expanded) return
+    const measure = () => {
+      const node = ref.current
+      if (node) setOverflows(node.scrollHeight > node.clientHeight + 1)
+    }
+    measure()
+    window.addEventListener('resize', measure)
+    return () => window.removeEventListener('resize', measure)
+  }, [text, expanded])
+
+  return (
+    <section aria-labelledby="task-description-heading" className="grid gap-1 text-sm">
+      <h3 id="task-description-heading" className="font-medium">
+        Описание
+      </h3>
+      <p id="task-description" ref={ref} className={expanded ? 'whitespace-pre-wrap' : 'line-clamp-4 whitespace-pre-wrap'}>
+        {text}
+      </p>
+      {(overflows || expanded) && (
+        <Button
+          type="button"
+          variant="link"
+          size="sm"
+          className="w-fit px-0"
+          aria-expanded={expanded}
+          aria-controls="task-description"
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? 'Свернуть' : 'Показать полностью'}
+        </Button>
+      )}
+    </section>
+  )
+}
+
 function SpecPanel({ task }: { task: Task }) {
   if (task.rejection_reason) {
     return (
       <div className="grid gap-2 text-sm">
         <p className="font-medium text-destructive">Задача отклонена фильтром приёма</p>
         <p>{task.rejection_reason}</p>
-        <p className="text-muted-foreground">Текст задачи: {task.text}</p>
       </div>
     )
   }
   if (!task.spec) {
-    return (
-      <div className="grid gap-2 text-sm">
-        <p className="text-muted-foreground">Требования ещё не подготовлены.</p>
-        <p className="text-muted-foreground">Текст задачи: {task.text}</p>
-      </div>
-    )
+    return <p className="text-sm text-muted-foreground">Требования ещё не подготовлены.</p>
   }
   return (
     <div className="grid gap-3 text-sm">

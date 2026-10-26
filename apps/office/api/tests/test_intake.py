@@ -8,7 +8,8 @@ import pytest
 
 from app.intake import CLASS_REASONS, REASON_FORBIDDEN, REASON_MODERATION, REASON_NO_LETTERS, UNAVAILABLE
 from app.sessions import COOKIE_NAME
-from conftest import UI_TASK, classification, wait_for
+from app.tasks import TITLE_LIMIT, task_title
+from conftest import MODEL_TITLE, UI_TASK, classification, wait_for
 
 pytestmark = pytest.mark.pg
 
@@ -38,6 +39,7 @@ def test_accepted_task_uses_primary_classifier(office):
     task = office.post_task(client).json()
     assert task["status"] == "queued"
     assert task["rejection_reason"] is None
+    assert task["title"] == MODEL_TITLE
     assert task["usage"] == {
         "model_calls": 2, "model_calls_limit": 30, "input_tokens": 120, "output_tokens": 30, "cost_usd": 0.0
     }
@@ -198,7 +200,10 @@ def test_moderation_rejects_flagged_text(office):
 
 @pytest.mark.parametrize(
     "breakdown",
-    ["moderation_error", "moderation_timeout", "both_providers_down", "out_of_schema", "refusal", "extra_field"],
+    [
+        "moderation_error", "moderation_timeout", "both_providers_down", "out_of_schema", "refusal", "extra_field",
+        "no_title",
+    ],
 )
 def test_fail_closed(office, breakdown):
     client, _ = office.login()
@@ -215,12 +220,15 @@ def test_fail_closed(office, breakdown):
         office.anthropic.stop_reason = "refusal"
     elif breakdown == "extra_field":
         office.anthropic.answer = (
-            '{"related_to_vibe_chat": true, "change_class": "frontend_ui", "reason": "", "accept": true}'
+            '{"related_to_vibe_chat": true, "change_class": "frontend_ui", "reason": "", "title": "Кнопка", '
+            '"accept": true}'
         )
+    elif breakdown == "no_title":
+        office.anthropic.answer = '{"related_to_vibe_chat": true, "change_class": "frontend_ui", "reason": ""}'
     task = office.post_task(client).json()
     assert task["status"] == "rejected"
     assert task["rejection_reason"] == UNAVAILABLE
-    answered = breakdown in ("out_of_schema", "refusal", "extra_field")
+    answered = breakdown in ("out_of_schema", "refusal", "extra_field", "no_title")
     assert usage(office, task["id"]) == pytest.approx((120, 30, HAIKU_COST) if answered else (0, 0, 0))
 
 
@@ -417,3 +425,87 @@ def test_unexpected_intake_crash_is_unavailable(office, monkeypatch):
     monkeypatch.setattr(office.openai.moderations, "create", crash)
     task = office.post_task(client).json()
     assert task["rejection_reason"] == UNAVAILABLE
+
+
+def assert_word_cut(title: str, text: str) -> None:
+    head = title.removesuffix("…")
+    assert title.endswith("…") and len(title) <= TITLE_LIMIT
+    assert text.startswith(head) and text[len(head)] in " ,.;:"
+
+
+LONG_TITLE = "Показывать по центру пустого диалога подсказку с примерами первых вопросов для нового пользователя"
+
+
+@pytest.mark.parametrize(
+    ("suggested", "expected"),
+    [
+        ("  Подсказка\nв пустом\t\tдиалоге  ", "Подсказка в пустом диалоге"),
+        (f"Подсказка\x00 в{chr(0x200B)} пустом\x1b диалоге", "Подсказка в пустом диалоге"),
+        (LONG_TITLE, "Показывать по центру пустого диалога подсказку с примерами…"),
+        ("Слово" * 20, "Добавить под каждым ответом ассистента кнопку копирования…"),
+        ("Кнопка " + "Слово" * 20, "Кнопка…"),
+    ],
+)
+def test_model_title_is_normalized(suggested, expected):
+    title = task_title(UI_TASK, suggested)
+    assert title == expected
+    assert len(title) <= TITLE_LIMIT
+
+
+def test_fallback_without_word_boundary_is_cut_hard():
+    assert task_title("Слово" * 20, "Слово" * 20) == "Слово" * 11 + "Слов…"
+
+
+@pytest.mark.parametrize("suggested", [None, "", "   \n\t", "!!! 123 ...", "\x00\x01"])
+def test_empty_model_title_falls_back_to_first_line(suggested):
+    text = f"{LONG_TITLE} и кнопкой «Начать»\nВторая строка с деталями."
+    title = task_title(text, suggested)
+    assert_word_cut(title, text)
+    assert task_title("Короткая задача\nподробности", suggested) == "Короткая задача"
+
+
+def test_model_title_names_task_of_any_outcome(office):
+    client, _ = office.login()
+    office.anthropic.answer = classification(False, "internal_probe", title="Просьба показать ключи")
+    task = office.post_task(client).json()
+    assert (task["status"], task["title"]) == ("rejected", "Просьба показать ключи")
+    assert events_of(office, task["id"])[0].payload["title"] == "Просьба показать ключи"
+
+
+def test_long_multiline_model_title_is_normalized(office):
+    client, _ = office.login()
+    office.anthropic.answer = classification(title=f"{LONG_TITLE}\nвторая строка")
+    task = office.post_task(client).json()
+    assert task["title"] == "Показывать по центру пустого диалога подсказку с примерами…"
+
+
+def test_model_title_with_forbidden_topic_falls_back(office):
+    client, _ = office.login()
+    office.anthropic.answer = classification(title="Отключить проверки CI")
+    task = office.post_task(client).json()
+    assert task["status"] == "queued"
+    assert_word_cut(task["title"], UI_TASK)
+
+
+@pytest.mark.parametrize("case", ["no_letters", "forbidden", "moderation", "unavailable", "late"])
+def test_title_without_model_answer_is_cut_by_word(office, case):
+    app = office.new_app(intake_timeout_seconds=0.3) if case == "late" else None
+    client, _ = office.login(app=app)
+    text = UI_TASK
+    if case == "no_letters":
+        text = "1234567890 " * 8
+    elif case == "forbidden":
+        text = "Пересобери образ контейнера чата, чтобы под каждым ответом появилась кнопка копирования."
+    elif case == "moderation":
+        office.openai.flagged = True
+    elif case == "unavailable":
+        office.anthropic.error = anthropic_down()
+        office.openai.error = openai.APIConnectionError(request=REQUEST)
+    else:
+        office.anthropic.delay = 0.6
+    task = office.post_task(client, text).json()
+    assert task["status"] == "rejected"
+    assert_word_cut(task["title"], text)
+    if case == "late":
+        wait_for(lambda: usage(office, task["id"])[0] > 0, 5, "late usage")
+        assert office.store.get_task(task["id"]).title == task["title"]

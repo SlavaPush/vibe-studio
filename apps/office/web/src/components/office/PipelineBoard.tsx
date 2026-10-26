@@ -1,5 +1,7 @@
+import { useLayoutEffect, useMemo, useRef, useState, type Ref } from 'react'
 import type { PullRequestCheck, TaskEvent } from '@/api/types'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { AGENT_ROLE_LABELS, CHECK_STATUS_LABELS, eventTypeLabel, formatDateTime } from '@/lib/labels'
 import {
   STAGE_STATE_LABELS,
@@ -246,11 +248,78 @@ export function PipelineBoard({ pipeline }: { pipeline: Pipeline }) {
   )
 }
 
+const AT_TOP = 4
+
+function reducedMotion(): boolean {
+  return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+}
+
 export function EventFeed({ events }: { events: readonly TaskEvent[] }) {
+  const scroller = useRef<HTMLDivElement>(null)
+  const list = useRef<HTMLOListElement>(null)
+  const ordered = useMemo(() => [...events].reverse(), [events])
+  const newest = useRef(ordered[0]?.seq ?? 0)
+  const [unseen, setUnseen] = useState(0)
+
+  useLayoutEffect(() => {
+    const previous = newest.current
+    newest.current = ordered[0]?.seq ?? 0
+    const node = scroller.current
+    if (!node || newest.current <= previous || node.scrollTop <= AT_TOP) return
+    const added = ordered.filter((event) => event.seq > previous).length
+    const items = list.current?.children
+    const anchor = items?.[added] as HTMLElement | undefined
+    const first = items?.[0] as HTMLElement | undefined
+    if (anchor && first) node.scrollTop += anchor.offsetTop - first.offsetTop
+    setUnseen((count) => count + added)
+  }, [ordered])
+
+  const toTop = () => {
+    const node = scroller.current
+    if (!node) return
+    if (typeof node.scrollTo === 'function') node.scrollTo({ top: 0, behavior: reducedMotion() ? 'auto' : 'smooth' })
+    else node.scrollTop = 0
+    setUnseen(0)
+  }
+
   return (
-    <ol className="grid gap-2" aria-label="События задачи">
+    <div className="grid gap-2">
+      <h3 id="task-feed-heading" className="font-medium">
+        Лента событий
+      </h3>
+      <div className="relative">
+        {unseen > 0 && (
+          <Button
+            type="button"
+            size="sm"
+            className="absolute top-2 left-1/2 z-10 -translate-x-1/2 shadow-md"
+            onClick={toTop}
+          >
+            Новые события ({unseen})
+          </Button>
+        )}
+        <div
+          ref={scroller}
+          role="region"
+          aria-labelledby="task-feed-heading"
+          tabIndex={0}
+          onScroll={(event) => {
+            if (unseen > 0 && event.currentTarget.scrollTop <= AT_TOP) setUnseen(0)
+          }}
+          className="relative max-h-[60vh] overflow-y-auto overscroll-contain rounded-md [overflow-anchor:none] desk:max-h-96"
+        >
+          <EventList ref={list} events={ordered} />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function EventList({ events, ref }: { events: readonly TaskEvent[]; ref: Ref<HTMLOListElement> }) {
+  return (
+    <ol ref={ref} className="grid gap-2" aria-label="События задачи">
       {events.map((event) => (
-        <li key={event.event_id} className="grid gap-1 rounded-md border p-3 text-sm">
+        <li key={event.event_id} data-seq={event.seq} className="grid gap-1 rounded-md border p-3 text-sm">
           <span className="flex flex-wrap gap-x-3 gap-y-1">
             <span className="text-muted-foreground">
               <time dateTime={event.timestamp}>{formatDateTime(event.timestamp)}</time>

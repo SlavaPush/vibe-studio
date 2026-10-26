@@ -48,7 +48,7 @@ export function canAct(
       target.status === 'needs_attention' &&
       target.integration_started
     if (participant.id !== target.owner_id && !adminRetry) {
-      return { allowed: false, reason: 'Решения по задаче принимает только её владелец.' }
+      return { allowed: false, reason: 'Решения по задаче принимает только её заказчик.' }
     }
     if (!TASK_DECISION_STATUSES[action as TaskDecision].includes(target.status)) {
       return { allowed: false, reason: `Недоступно в статусе «${STATUS_LABELS[target.status]}».` }

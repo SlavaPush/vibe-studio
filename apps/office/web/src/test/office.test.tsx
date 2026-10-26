@@ -1,13 +1,15 @@
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup as unmountAll, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import type { Run } from '@/api/client'
 import type { CheckReport, Participant, ReleaseCandidate, ReleaseQueueState, Task, TaskEvent } from '@/api/types'
 import { ReleaseQueue } from '@/components/office/ReleaseQueue'
 import { TaskCard } from '@/components/office/TaskCard'
+import { DECISION_SLOW_MS } from '@/lib/use-decision'
 import { blockedRelease, participants, releaseQueue, releases, tasks } from '@/mocks/data'
 import {
   FakeEventSource,
   apiError,
+  deferred,
   fakeApi,
   installEventSource,
   json,
@@ -272,7 +274,7 @@ describe('TaskCard: действия', () => {
     renderCard(ivan)
     const button = screen.getByRole('button', { name: 'Отменить задачу' })
     expect(button).toBeDisabled()
-    expect(button).toHaveAccessibleDescription('Решения по задаче принимает только её владелец.')
+    expect(button).toHaveAccessibleDescription('Решения по задаче принимает только её заказчик.')
   })
 
   it('администратор не принимает решения по чужой задаче', () => {
@@ -351,12 +353,151 @@ describe('TaskCard: действия', () => {
   it('403 показывает сообщение без повтора', async () => {
     const api = fakeApi()
     api.on('POST /api/tasks/tsk_101/decisions', () =>
-      apiError(403, 'forbidden_not_owner', 'Решения по задаче принимает только её владелец.'),
+      apiError(403, 'forbidden_not_owner', 'Решения по задаче принимает только её заказчик.'),
     )
     const { onRefresh } = renderCard(maria, { ...developing, status: 'failed' })
     fireEvent.click(screen.getByRole('button', { name: 'Повторить' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('принимает только её владелец')
+    expect(await screen.findByRole('alert')).toHaveTextContent('принимает только её заказчик')
     expect(onRefresh).not.toHaveBeenCalled()
+  })
+
+  async function cancelTask() {
+    fireEvent.click(screen.getByRole('button', { name: 'Отменить задачу' }))
+    fireEvent.click(
+      within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Отменить задачу' }),
+    )
+  }
+
+  it('после отмены кнопки решений неактивны до прихода новой версии задачи', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const api = fakeApi()
+    api.on('POST /api/tasks/tsk_101/decisions', { decision_id: 'dec_20' })
+    const { onRefresh, rerender } = renderCard(maria)
+    await cancelTask()
+    await screen.findByText('Решение записано.')
+    const button = screen.getByRole('button', { name: 'Отменить задачу' })
+    expect(button).toBeDisabled()
+    expect(onRefresh).toHaveBeenCalledTimes(1)
+
+    act(() => {
+      vi.advanceTimersByTime(DECISION_SLOW_MS)
+    })
+    expect(screen.getByText('Решение записано, обновляем задачу…')).toHaveAttribute('role', 'status')
+    expect(onRefresh).toHaveBeenCalledTimes(2)
+    expect(button).toBeDisabled()
+
+    rerender({ ...developing })
+    expect(button).toBeDisabled()
+    rerender({ ...developing, version: developing.version + 1 })
+    expect(screen.getByRole('button', { name: 'Отменить задачу' })).toBeEnabled()
+    expect(screen.getByText('Решение записано.')).toBeInTheDocument()
+    act(() => {
+      vi.advanceTimersByTime(DECISION_SLOW_MS)
+    })
+    expect(onRefresh).toHaveBeenCalledTimes(2)
+  })
+
+  it('ожидание новой версии сохраняется после повторного открытия карточки', async () => {
+    const api = fakeApi()
+    api.on('POST /api/tasks/tsk_101/decisions', { decision_id: 'dec_23' })
+    renderCard(maria)
+    await cancelTask()
+    await screen.findByText('Решение записано.')
+    unmountAll()
+    const { rerender } = renderCard(maria)
+    expect(screen.getByRole('button', { name: 'Отменить задачу' })).toBeDisabled()
+    expect(screen.getByText('Решение записано.')).toBeInTheDocument()
+    rerender({ ...developing, version: developing.version + 1 })
+    expect(screen.getByRole('button', { name: 'Отменить задачу' })).toBeEnabled()
+    unmountAll()
+    renderCard(maria, { ...developing, version: developing.version + 1 })
+    expect(screen.getByRole('button', { name: 'Отменить задачу' })).toBeEnabled()
+  })
+
+  it('карточка, открытая заново до ответа на решение, получает блокировку, сообщение и повторную загрузку', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const api = fakeApi()
+    const answer = deferred<Response>()
+    api.on('POST /api/tasks/tsk_101/decisions', () => answer.promise)
+    renderCard(maria)
+    await cancelTask()
+    await waitFor(() => expect(api.count('POST /api/tasks/tsk_101/decisions')).toBe(1))
+    unmountAll()
+    const { onRefresh } = renderCard(maria)
+    expect(screen.getByRole('button', { name: 'Отменить задачу' })).toBeDisabled()
+    expect(screen.queryByText('Решение записано.')).not.toBeInTheDocument()
+    await act(async () => {
+      answer.resolve(json(200, { decision_id: 'dec_25' }))
+    })
+    expect(await screen.findByText('Решение записано.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Отменить задачу' })).toBeDisabled()
+    act(() => {
+      vi.advanceTimersByTime(DECISION_SLOW_MS)
+    })
+    expect(onRefresh).toHaveBeenCalledTimes(1)
+    expect(screen.getByText('Решение записано, обновляем задачу…')).toBeInTheDocument()
+  })
+
+  it('ошибка решения снимает блокировку кнопок', async () => {
+    const api = fakeApi()
+    api.on('POST /api/tasks/tsk_101/decisions', () => apiError(500, 'internal_error', 'Внутренняя ошибка.'))
+    renderCard(maria)
+    await cancelTask()
+    expect(await screen.findByRole('alert')).toHaveTextContent('Внутренняя ошибка API офиса')
+    expect(screen.getByRole('button', { name: 'Отменить задачу' })).toBeEnabled()
+  })
+})
+
+describe('TaskCard: название и описание', () => {
+  const long: Task = {
+    ...developing,
+    title: 'Подсказка в пустом диалоге',
+    text: 'В пустом диалоге покажи подсказку.\nВторая строка.\nТретья строка.\nЧетвёртая строка.\nПятая строка.',
+  }
+
+  function stubOverflow(overflow: boolean) {
+    const height = vi.spyOn(Element.prototype, 'scrollHeight', 'get').mockReturnValue(overflow ? 200 : 80)
+    const client = vi.spyOn(Element.prototype, 'clientHeight', 'get').mockReturnValue(80)
+    return () => {
+      height.mockRestore()
+      client.mockRestore()
+    }
+  }
+
+  it('показывает название в заголовке, заказчика и полный текст в блоке «Описание»', () => {
+    fakeApi()
+    renderCard(maria, long)
+    expect(screen.getByRole('heading', { level: 2, name: long.title })).toBeInTheDocument()
+    expect(screen.getByText(`Заказчик: ${long.owner_name}`)).toBeInTheDocument()
+    expect(screen.queryByText(/Владелец:/)).not.toBeInTheDocument()
+    const description = screen.getByRole('region', { name: 'Описание' })
+    const text = within(description).getByText((_, element) => element?.tagName === 'P' && element.textContent === long.text)
+    expect(text).toHaveClass('whitespace-pre-wrap', 'line-clamp-4')
+    expect(within(description).queryByRole('button')).not.toBeInTheDocument()
+    openTab('Требования')
+    expect(screen.queryByText(/Текст задачи:/)).not.toBeInTheDocument()
+  })
+
+  it('длинный текст свёрнут и раскрывается кнопкой', () => {
+    const restore = stubOverflow(true)
+    fakeApi()
+    renderCard(maria, long)
+    const description = screen.getByRole('region', { name: 'Описание' })
+    const toggle = within(description).getByRole('button', { name: 'Показать полностью' })
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(toggle)
+    const collapse = within(description).getByRole('button', { name: 'Свернуть' })
+    expect(collapse).toHaveAttribute('aria-expanded', 'true')
+    expect(description.querySelector('#task-description')).not.toHaveClass('line-clamp-4')
+    fireEvent.click(collapse)
+    expect(description.querySelector('#task-description')).toHaveClass('line-clamp-4')
+    restore()
+  })
+
+  it.each(['rejected', 'awaiting_spec_approval', 'released'] as const)('описание видно при статусе %s', (status) => {
+    fakeApi()
+    renderCard(maria, { ...long, status, spec: null, rejection_reason: status === 'rejected' ? 'Не про чат.' : null })
+    expect(screen.getByRole('region', { name: 'Описание' })).toHaveTextContent('Пятая строка.')
   })
 })
 
@@ -482,8 +623,8 @@ describe('TaskCard: вкладки', () => {
     })
     const items = within(screen.getByRole('list', { name: 'События задачи' })).getAllByRole('listitem')
     expect(items).toHaveLength(2)
-    expect(items[0]).toHaveTextContent('Задача создана')
-    expect(items[1]).toHaveTextContent('начал работу')
+    expect(items[0]).toHaveTextContent('начал работу')
+    expect(items[1]).toHaveTextContent('Задача создана')
     openTab('Требования')
     expect(source.closed).toBe(true)
   })
@@ -554,12 +695,68 @@ describe('TaskCard: вкладки', () => {
     ])
     const feed = screen.getByRole('list', { name: 'События задачи' })
     const items = within(feed).getAllByRole('listitem')
-    expect(items[0]).toHaveTextContent('Обязательные проверки: 1 из 1 успешно для b7c8d9e')
-    expect(items[1]).toHaveTextContent('Событие owner_review_requested')
+    expect(items[1]).toHaveTextContent('Обязательные проверки: 1 из 1 успешно для b7c8d9e')
+    expect(items[0]).toHaveTextContent('Событие owner_review_requested')
     expect(feed.textContent).not.toContain('[object Object]')
-    const details = within(items[0]).getByText('Подробности').closest('details') as HTMLElement
+    const details = within(items[1]).getByText('Подробности').closest('details') as HTMLElement
     expect(details.querySelector('pre')?.textContent).toContain('"url": "https://github.com/run/1"')
     expect(screen.getByRole('list', { name: 'Схема конвейера' })).toBeInTheDocument()
+  })
+
+  const feedItems = () =>
+    within(screen.getByRole('list', { name: 'События задачи' }))
+      .getAllByRole('listitem')
+      .map((item) => item.dataset.seq)
+
+  function emit(...events: TaskEvent[]) {
+    const source = FakeEventSource.last('/api/tasks/tsk_101/events')
+    act(() => {
+      for (const event of events) source.emit(event)
+    })
+  }
+
+  it('лента в области прокрутки с ограниченной высотой, новые события сверху', () => {
+    const first = taskEvent('tsk_101', 'task_created', { title: 'x' })
+    const second = roleEvent('role_started', 'supervisor', { step: 'spec' })
+    openJournal([first, second])
+    const feed = screen.getByRole('region', { name: 'Лента событий' })
+    expect(feed).toHaveAttribute('tabindex', '0')
+    expect(feed).toHaveClass('max-h-[60vh]', 'desk:max-h-96', 'overflow-y-auto')
+    expect(screen.getByRole('list', { name: 'Схема конвейера' }).closest('[role="region"]')).toBeNull()
+    expect(feedItems()).toEqual([String(second.seq), String(first.seq)])
+
+    const third = roleEvent('role_finished', 'supervisor', { step: 'spec', outcome: 'ok', summary: 'Готово.' })
+    emit(third)
+    expect(feedItems()).toEqual([String(third.seq), String(second.seq), String(first.seq)])
+    expect(feed.scrollTop).toBe(0)
+    expect(screen.queryByRole('button', { name: /Новые события/ })).not.toBeInTheDocument()
+  })
+
+  it('после прокрутки вниз сохраняет позицию и предлагает перейти к новым событиям', () => {
+    const offset = vi.spyOn(HTMLElement.prototype, 'offsetTop', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.parentElement ? Array.from(this.parentElement.children).indexOf(this) * 100 : 0
+    })
+    openJournal([taskEvent('tsk_101', 'task_created', { title: 'x' }), roleEvent('role_started', 'supervisor', { step: 'spec' })])
+    const feed = screen.getByRole('region', { name: 'Лента событий' })
+    feed.scrollTop = 150
+    fireEvent.scroll(feed)
+    emit(roleEvent('role_started', 'developer', { step: 'implement' }), roleEvent('role_started', 'qa', { step: 'qa' }))
+    expect(feed.scrollTop).toBe(350)
+    const button = screen.getByRole('button', { name: 'Новые события (2)' })
+    emit(roleEvent('role_started', 'critic', { step: 'review' }))
+    expect(feed.scrollTop).toBe(450)
+    expect(button).toHaveTextContent('Новые события (3)')
+    fireEvent.click(button)
+    expect(feed.scrollTop).toBe(0)
+    expect(screen.queryByRole('button', { name: /Новые события/ })).not.toBeInTheDocument()
+
+    feed.scrollTop = 300
+    emit(roleEvent('role_finished', 'critic', { step: 'review', outcome: 'ok', summary: 'pass' }))
+    expect(screen.getByRole('button', { name: 'Новые события (1)' })).toBeInTheDocument()
+    feed.scrollTop = 0
+    fireEvent.scroll(feed)
+    expect(screen.queryByRole('button', { name: /Новые события/ })).not.toBeInTheDocument()
+    offset.mockRestore()
   })
 
   it('индикатор новых событий на закрытой вкладке снимается открытием', () => {
@@ -617,6 +814,20 @@ describe('TaskCard: вкладки', () => {
 
 const freeQueue: ReleaseQueueState = { ...releaseQueue, release_blocked_by: null, blocked_reason: null }
 
+function rollbackOf(release: ReleaseCandidate, decisionId: string, status: ReleaseCandidate['status']): ReleaseCandidate {
+  return {
+    ...release,
+    id: `rel_rollback_${decisionId}`,
+    kind: 'rollback',
+    origin: 'manual_rollback',
+    origin_decision_id: decisionId,
+    status,
+    is_published: false,
+    commit_sha: release.expected_previous_sha,
+    expected_previous_sha: release.commit_sha,
+  }
+}
+
 function renderQueue(
   participant: Participant,
   list: ReleaseCandidate[] = releases,
@@ -652,6 +863,7 @@ describe('ReleaseQueue', () => {
     expect(link).toHaveAttribute('href', 'https://github.com/SlavaPush/vibe-studio/pull/12')
     expect(link).toHaveAttribute('target', '_blank')
     expect(link).toHaveAttribute('rel', 'noreferrer')
+    expect(link).toHaveClass('tap-target', 'min-w-10')
     fireEvent.click(open)
     expect(onOpenTask).toHaveBeenCalledWith(task.id)
   })
@@ -687,10 +899,9 @@ describe('ReleaseQueue', () => {
     fakeApi()
     renderQueue(maria, [...releases, blockedRelease], releaseQueue)
     const blocked = screen.getByRole('region', { name: 'Выпуск заблокирован после отката rel_5' })
-    expect(within(blocked).getByRole('link', { name: 'PR #11' })).toHaveAttribute(
-      'href',
-      'https://github.com/SlavaPush/vibe-studio/pull/11',
-    )
+    const revertLink = within(blocked).getByRole('link', { name: 'PR #11' })
+    expect(revertLink).toHaveAttribute('href', 'https://github.com/SlavaPush/vibe-studio/pull/11')
+    expect(revertLink).toHaveClass('tap-target', 'min-w-10')
     expect(within(blocked).getByText(/состояние: выполняется/)).toBeInTheDocument()
     expect(screen.getByText('не пройдена: /healthz не ответил status ok')).toBeInTheDocument()
     expect(
@@ -766,6 +977,56 @@ describe('ReleaseQueue', () => {
     const [body] = api.bodies(`POST /api/releases/${pending.id}/decisions`) as Record<string, unknown>[]
     expect(body).toMatchObject({ decision: 'resume_releases', expected_version: pending.version })
     expect(body).not.toHaveProperty('fix_sha')
+  })
+
+  it('после возобновления кнопка неактивна до новой версии кандидата', async () => {
+    const api = fakeApi()
+    const halted = { ...pending, blocked_reason: 'Состав выпуска не подтверждён.' }
+    api.on(`POST /api/releases/${pending.id}/decisions`, { decision_id: 'dec_21' })
+    const { rerender } = renderQueue(admin, [halted, published])
+    fireEvent.click(screen.getByRole('button', { name: 'Возобновить выпуск' }))
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Возобновить выпуск' }))
+    await screen.findByText('Решение записано.')
+    expect(screen.getByRole('button', { name: 'Возобновить выпуск' })).toBeDisabled()
+    rerender([{ ...halted, version: halted.version + 1 }, published])
+    expect(screen.getByRole('button', { name: 'Возобновить выпуск' })).toBeEnabled()
+  })
+
+  it('после отката кнопка неактивна, пока откат в очереди, и снова активна после его ошибки', async () => {
+    const api = fakeApi()
+    api.on(`POST /api/releases/${published.id}/decisions`, { decision_id: 'dec_22' })
+    const { rerender } = renderQueue(admin, [published])
+    await confirmRollback()
+    await screen.findByText('Решение записано.')
+    const rollback = () => screen.getByRole('button', { name: 'Откатить' })
+    expect(rollback()).toBeDisabled()
+    const queued = rollbackOf(published, 'dec_22', 'pending')
+    rerender([{ ...queued, id: 'rel_old', origin_decision_id: 'dec_old', status: 'failed' }, published])
+    expect(rollback()).toBeDisabled()
+    rerender([queued, published])
+    expect(rollback()).toBeDisabled()
+    rerender([{ ...queued, status: 'failed', version: queued.version + 1 }, published])
+    expect(rollback()).toBeEnabled()
+  })
+
+  it('кнопка отката активна, если первое обновление уже содержит неудавшийся откат этого решения', async () => {
+    const api = fakeApi()
+    api.on(`POST /api/releases/${published.id}/decisions`, { decision_id: 'dec_24' })
+    const { rerender } = renderQueue(admin, [published])
+    await confirmRollback()
+    await screen.findByText('Решение записано.')
+    expect(screen.getByRole('button', { name: 'Откатить' })).toBeDisabled()
+    rerender([rollbackOf(published, 'dec_24', 'failed'), published])
+    expect(screen.getByRole('button', { name: 'Откатить' })).toBeEnabled()
+  })
+
+  it('ошибка решения выпуска снимает блокировку', async () => {
+    const api = fakeApi()
+    api.on(`POST /api/releases/${published.id}/decisions`, () => apiError(500, 'internal_error', 'Внутренняя ошибка.'))
+    renderQueue(admin)
+    await confirmRollback()
+    expect(await screen.findByRole('alert')).toHaveTextContent('Внутренняя ошибка API офиса')
+    expect(screen.getByRole('button', { name: 'Откатить' })).toBeEnabled()
   })
 
   it('откат требует подтверждения в диалоге', async () => {
