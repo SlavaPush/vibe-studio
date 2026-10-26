@@ -114,6 +114,60 @@
   }
 }
 
+.dog-follower {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 64px;
+  height: 64px;
+  z-index: 40;
+  pointer-events: none;
+  user-select: none;
+  will-change: transform;
+}
+
+.dog-follower .dog-flip {
+  width: 100%;
+  height: 100%;
+}
+
+.dog-follower svg {
+  display: block;
+  overflow: visible;
+}
+
+.dog-follower .dog-leg {
+  transform-box: fill-box;
+  transform-origin: 50% 0;
+  animation: dog-leg-swing 0.35s ease-in-out infinite alternate;
+}
+
+.dog-follower .dog-leg-b {
+  animation-direction: alternate-reverse;
+}
+
+.dog-follower[data-state="running"] .dog-flip {
+  animation: dog-bounce 0.35s ease-in-out infinite alternate;
+}
+
+@keyframes dog-leg-swing {
+  from {
+    transform: rotate(-30deg);
+  }
+  to {
+    transform: rotate(30deg);
+  }
+}
+
+@keyframes dog-bounce {
+  from {
+    margin-top: 0;
+  }
+  to {
+    margin-top: -3px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
