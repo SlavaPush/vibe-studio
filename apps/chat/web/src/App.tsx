@@ -14,6 +14,7 @@ import {
   UpdateDialog,
   UpdateNotice,
 } from '@/components/chat/Notices'
+import { DogFollower } from '@/components/DogFollower'
 import { ThemeToggle } from '@/components/ThemeToggle'
 import { Button } from '@/components/ui/button'
 import { Sheet, SheetClose, SheetContent, SheetTitle, SheetTrigger } from '@/components/ui/sheet'
@@ -181,6 +182,7 @@ export default function App({ store, controller, version = buildVersion() }: App
       ) : (
         <LoginScreen onSubmit={controller.signIn} />
       )}
+      <DogFollower />
     </div>
   )
 }
