@@ -185,6 +185,101 @@
   animation-direction: alternate-reverse;
 }
 
+/* Сцена «за решёткой»: стоит в шапке слева от селектора моделей, на одной линии с ним. */
+.jail-scene {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  height: 72px;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.jail-scene .jail-cell {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-end;
+  gap: 4px;
+  height: 100%;
+  padding: 0 8px;
+  overflow: hidden;
+  border: 3px solid #4a4a52;
+  border-radius: 4px;
+  background: #2b2b33;
+}
+
+.jail-scene svg {
+  display: block;
+  flex-shrink: 0;
+  overflow: visible;
+}
+
+.jail-scene .jail-cat {
+  width: 64px;
+  height: 64px;
+}
+
+.jail-scene .jail-dog {
+  width: 44px;
+  height: 44px;
+}
+
+.jail-scene .jail-cards {
+  width: 28px;
+  height: 28px;
+  margin-bottom: 4px;
+}
+
+.jail-scene .jail-suitcase {
+  width: 32px;
+  height: 26px;
+  margin-bottom: 2px;
+}
+
+.jail-scene .jail-bars {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  background: repeating-linear-gradient(90deg, #8c8c96 0 3px, transparent 3px 12px);
+}
+
+/* На узких экранах сцена компактнее, чтобы не вытеснять селектор моделей; кошка по-прежнему крупнее собаки. */
+@media (max-width: 767px) {
+  .jail-scene {
+    height: 52px;
+  }
+
+  .jail-scene .jail-cell {
+    gap: 2px;
+    padding: 0 4px;
+  }
+
+  .jail-scene .jail-cat {
+    width: 44px;
+    height: 44px;
+  }
+
+  .jail-scene .jail-dog {
+    width: 30px;
+    height: 30px;
+  }
+
+  .jail-scene .jail-cards {
+    width: 20px;
+    height: 20px;
+    margin-bottom: 2px;
+  }
+
+  .jail-scene .jail-suitcase {
+    width: 22px;
+    height: 18px;
+    margin-bottom: 1px;
+  }
+}
+
 @keyframes dog-leg-swing {
   from {
     transform: rotate(-30deg);
