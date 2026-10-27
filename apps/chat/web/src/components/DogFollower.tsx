@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 
 export type DogState = 'running' | 'sitting'
 
-type Phase = 'idle' | 'approach' | 'chase' | 'away' | 'return'
+type Phase = 'idle' | 'approach' | 'chase' | 'away'
 type Vec = { x: number; y: number }
 
 const SIZE = 64
@@ -20,6 +20,8 @@ const JAIL_DELAY_MS = 3000
 // Дистанция, на которой кошка останавливается перед собакой.
 const STOP_MIN = 100
 const STOP_MAX = 150
+// Допуск (px): кошка считается остановившейся, если осталось меньше этого расстояния.
+const STOP_EPS = 0.5
 // Скорости в пикселях в секунду.
 const APPROACH_SPEED = 300
 const CAT_RUN_SPEED = 380
@@ -28,8 +30,6 @@ const DOG_RUN_SPEED = 400
 const FACE_OFF_S = 0.6
 // Страховка: погоня не длится дольше этого времени.
 const CHASE_MAX_S = 12
-// Страховка: возвращение собаки не длится дольше этого времени, даже если курсор движется.
-const RETURN_MAX_S = 5
 
 function randomBetween(min: number, max: number) {
   return min + Math.random() * Math.max(0, max - min)
@@ -167,12 +167,10 @@ export function DogFollower({ onReturned }: DogFollowerProps = {}) {
     let last: number | undefined
 
     let phase: Phase = 'idle'
-    let originEdge = 0
     let stopDist = STOP_MIN
     let dir: Vec = { x: 1, y: 0 }
     let faceOffTime = 0
     let chaseTime = 0
-    let returnTime = 0
     // Минутный таймер сработал, когда сцена ещё шла: запустить кошку сразу после возврата в покой.
     let pendingScene = false
 
@@ -223,7 +221,7 @@ export function DogFollower({ onReturned }: DogFollowerProps = {}) {
       pendingScene = false
       const w = window.innerWidth
       const h = window.innerHeight
-      originEdge = Math.floor(Math.random() * 4)
+      const originEdge = Math.floor(Math.random() * 4)
       stopDist = randomBetween(STOP_MIN, STOP_MAX)
       let start = edgePoint(originEdge, w, h)
       let dx = start.x - pos.x
@@ -260,7 +258,7 @@ export function DogFollower({ onReturned }: DogFollowerProps = {}) {
       awayTimer = setTimeout(() => onReturnedRef.current?.(), JAIL_DELAY_MS)
     }
 
-    const followStep = (dt: number) => {
+    const followStep = () => {
       if (!cursor) return
       const dx = cursor.x - pos.x
       const dy = cursor.y - pos.y
@@ -273,15 +271,6 @@ export function DogFollower({ onReturned }: DogFollowerProps = {}) {
       pos.y += uy * step
       if (Math.abs(dx) > 2) setFacing(dx > 0 ? 'right' : 'left')
       render()
-      if (phase === 'return') {
-        returnTime += dt
-        // Возврат завершается по сближению или по тайм-ауту: при движущемся курсоре сближение может не наступить.
-        if (Math.abs(dist - GAP) < 6 || returnTime > RETURN_MAX_S) {
-          phase = 'idle'
-          armIdle()
-          render()
-        }
-      }
     }
 
     const tick = (ts: number) => {
@@ -292,14 +281,12 @@ export function DogFollower({ onReturned }: DogFollowerProps = {}) {
         if (pendingScene) {
           startScene()
         } else if (cursor && !sitting) {
-          followStep(dt)
+          followStep()
         }
-      } else if (phase === 'return') {
-        followStep(dt)
       } else if (phase === 'approach') {
         const remaining = Math.hypot(cat.x - pos.x, cat.y - pos.y) - stopDist
         const step = APPROACH_SPEED * dt
-        if (remaining > 0) {
+        if (remaining > STOP_EPS) {
           if (step >= remaining) {
             cat.x = pos.x + dir.x * stopDist
             cat.y = pos.y + dir.y * stopDist
