@@ -137,22 +137,22 @@ function RunningCat() {
 }
 
 interface DogFollowerProps {
-  // Вызывается через 3 секунды после ухода кошки и собаки: они вернулись и сидят за решёткой.
-  onReturned?: () => void
+  // Сообщает, сидят ли кошка с собакой за решёткой: true — через 3 секунды после ухода, false — когда собака вернулась.
+  onJailChange?: (inJail: boolean) => void
 }
 
-export function DogFollower({ onReturned }: DogFollowerProps = {}) {
+export function DogFollower({ onJailChange }: DogFollowerProps = {}) {
   const rootRef = useRef<HTMLDivElement>(null)
   const catRef = useRef<HTMLDivElement>(null)
-  const onReturnedRef = useRef(onReturned)
+  const onJailChangeRef = useRef(onJailChange)
   const [state, setState] = useState<DogState>('sitting')
   const [facing, setFacing] = useState<'left' | 'right'>('right')
   const [catVisible, setCatVisible] = useState(false)
   const [catFacing, setCatFacing] = useState<'left' | 'right'>('right')
 
   useEffect(() => {
-    onReturnedRef.current = onReturned
-  }, [onReturned])
+    onJailChangeRef.current = onJailChange
+  }, [onJailChange])
 
   useEffect(() => {
     const root = rootRef.current
@@ -223,9 +223,19 @@ export function DogFollower({ onReturned }: DogFollowerProps = {}) {
       if (phase === 'idle') wake()
     }
 
+    // Сбрасывает таймер сцены и сообщает наружу, что сцены за решёткой больше нет.
+    const clearJail = () => {
+      if (jailTimer !== undefined) {
+        clearTimeout(jailTimer)
+        jailTimer = undefined
+      }
+      onJailChangeRef.current?.(false)
+    }
+
     const startScene = () => {
       if (phase !== 'idle') return
       pendingScene = false
+      clearJail()
       const w = window.innerWidth
       const h = window.innerHeight
       originEdge = Math.floor(Math.random() * 4)
@@ -257,6 +267,8 @@ export function DogFollower({ onReturned }: DogFollowerProps = {}) {
     }
 
     const returnDog = () => {
+      // Собака вернулась: сцена за решёткой убирается.
+      clearJail()
       const w = window.innerWidth
       const h = window.innerHeight
       const start = edgePoint((originEdge + 2) % 4, w, h)
@@ -279,7 +291,10 @@ export function DogFollower({ onReturned }: DogFollowerProps = {}) {
       awayTimer = setTimeout(returnDog, AWAY_MS)
       // Через 3 секунды кошка с собакой возвращаются с чемоданом и садятся за решётку.
       if (jailTimer !== undefined) clearTimeout(jailTimer)
-      jailTimer = setTimeout(() => onReturnedRef.current?.(), JAIL_DELAY_MS)
+      jailTimer = setTimeout(() => {
+        jailTimer = undefined
+        onJailChangeRef.current?.(true)
+      }, JAIL_DELAY_MS)
     }
 
     const followStep = (dt: number) => {
