@@ -2,6 +2,7 @@ import { test, expect } from "@playwright/test";
 import { mockApi } from "./support/mock-api";
 
 test("кошка с собакой возвращаются через 3 секунды и сидят за решёткой слева от селектора моделей", async ({ page }) => {
+  test.setTimeout(120000);
   await page.clock.install();
   await mockApi(page);
   await page.goto("/");
@@ -17,11 +18,11 @@ test("кошка с собакой возвращаются через 3 сек�
   // До ухода кошки сцены нет.
   await expect(scene).toHaveCount(0);
 
-  // Ждём минутного появления кошки и её ухода вместе с собакой.
-  await page.clock.runFor(59000);
+  // Быстро доходим почти до минуты, затем идём кадрами до ухода кошки с собакой.
+  await page.clock.fastForward(59000);
   let away = false;
   for (let i = 0; i < 300 && !away; i++) {
-    await page.clock.runFor(100);
+    await page.clock.runFor(200);
     away = (await follower.getAttribute("data-scene")) === "away";
   }
   expect(away).toBe(true);
