@@ -15,8 +15,8 @@ const FOLLOW = 0.08
 const IDLE_MS = 1200
 // Как часто появляется кошка.
 const SCENE_INTERVAL_MS = 60_000
-// Сколько собака отсутствует после погони.
-const AWAY_MS = 10_000
+// Через сколько миллисекунд после ухода кошка с собакой возвращаются с чемоданом и садятся за решётку.
+const JAIL_DELAY_MS = 3000
 // Дистанция, на которой кошка останавливается перед собакой.
 const STOP_MIN = 100
 const STOP_MAX = 150
@@ -132,13 +132,23 @@ function RunningCat() {
   )
 }
 
-export function DogFollower() {
+interface DogFollowerProps {
+  // Вызывается через 3 секунды после ухода кошки и собаки: они вернулись и сидят за решёткой.
+  onReturned?: () => void
+}
+
+export function DogFollower({ onReturned }: DogFollowerProps = {}) {
   const rootRef = useRef<HTMLDivElement>(null)
   const catRef = useRef<HTMLDivElement>(null)
+  const onReturnedRef = useRef(onReturned)
   const [state, setState] = useState<DogState>('sitting')
   const [facing, setFacing] = useState<'left' | 'right'>('right')
   const [catVisible, setCatVisible] = useState(false)
   const [catFacing, setCatFacing] = useState<'left' | 'right'>('right')
+
+  useEffect(() => {
+    onReturnedRef.current = onReturned
+  }, [onReturned])
 
   useEffect(() => {
     const root = rootRef.current
@@ -241,27 +251,13 @@ export function DogFollower() {
       render()
     }
 
-    const returnDog = () => {
-      const w = window.innerWidth
-      const h = window.innerHeight
-      const start = edgePoint((originEdge + 2) % 4, w, h)
-      pos.x = start.x
-      pos.y = start.y
-      if (!cursor) cursor = { x: w / 2, y: h / 2 }
-      phase = 'return'
-      returnTime = 0
-      sitting = false
-      setState('running')
-      root.style.visibility = ''
-      render()
-    }
-
     const endChase = () => {
       phase = 'away'
       root.style.visibility = 'hidden'
       setCatVisible(false)
       render()
-      awayTimer = setTimeout(returnDog, AWAY_MS)
+      // Через 3 секунды кошка с собакой возвращаются с чемоданом и садятся за решётку.
+      awayTimer = setTimeout(() => onReturnedRef.current?.(), JAIL_DELAY_MS)
     }
 
     const followStep = (dt: number) => {
