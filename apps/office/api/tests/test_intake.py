@@ -97,7 +97,6 @@ def test_server_task_is_accepted_with_backend_class(office):
         "Поменять обработчик в api/routes/chat.py, чтобы он отвечал быстрее.",
         "Поменять обработчик в apps/chat/api/app/main.py, чтобы он отвечал быстрее.",
         "Обновить зависимости в package.json интерфейса vibe-chat.",
-        "Сделать модель Claude Sonnet выбранной по умолчанию в списке моделей.",
         "Изменить маршрутизацию сложных вопросов на другой уровень усилий.",
         "Увеличь лимит токенов ответа для длинных вопросов.",
         "Increase the token limit for model responses in the chat.",
@@ -124,6 +123,27 @@ def test_interface_task_keeps_frontend_class(office):
     task = office.post_task(client).json()
     assert (task["status"], task["change_class"]) == ("queued", "frontend_ui")
     assert task["usage"]["model_calls_limit"] == 30
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Сделать модель Claude Sonnet выбранной по умолчанию в списке моделей.",
+        "Добавить кнопку слева от селектора моделей.",
+        "Show a badge next to the models list.",
+    ],
+)
+def test_model_mention_keeps_frontend_class(office, text):
+    client, _ = office.login()
+    task = office.post_task(client, text).json()
+    assert (task["status"], task["change_class"]) == ("queued", "frontend_ui")
+
+
+def test_classifier_backend_answer_for_model_choice(office):
+    client, _ = office.login()
+    office.anthropic.answer = classification(True, "backend_api")
+    task = office.post_task(client, "Сделать модель Claude Sonnet выбранной по умолчанию в списке моделей.").json()
+    assert (task["status"], task["change_class"]) == ("queued", "backend_api")
 
 
 @pytest.mark.parametrize(

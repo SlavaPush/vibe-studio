@@ -429,6 +429,13 @@ class TaskStore:
                 )
             return True
 
+    def set_change_class(self, task_id: str, change_class: ChangeClass) -> None:
+        with self.db.locked_transaction() as conn:
+            conn.execute(
+                "UPDATE tasks SET change_class = :change_class, version = version + 1, updated_at = :now WHERE id = :id",
+                {"change_class": change_class.value, "now": to_text(utcnow()), "id": task_id},
+            )
+
     def record_commit(
         self, task_id: str, sha: str, changed_files: list[str], role: AgentRole | None = None,
         contour: Contour = Contour.ui,

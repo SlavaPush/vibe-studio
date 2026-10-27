@@ -87,8 +87,6 @@ server_patterns:
   - '\baccess\s+codes?\b'
 
 model_patterns:
-  - '\bмодел'
-  - '\bmodels?\b'
   - 'маршрутиз'
   - '\brout(e|es|ing)\b'
   - 'уровн\w*\s+усили'

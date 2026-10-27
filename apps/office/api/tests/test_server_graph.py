@@ -2,12 +2,14 @@ import json
 import threading
 
 import pytest
-from conftest import QA_PYTEST, git
-from test_graph import approve, create, events, graph, office_commits, status, wait_status, worktree  # noqa: F401
+from conftest import QA_PYTEST, git, spec_answer
+from test_graph import (  # noqa: F401
+    approve, create, events, graph, office_commits, spec_required, status, wait_status, worktree
+)
 
 from app.graph import TaskGraph, commit_message
-from app.roles import CRITIC_API, DEVELOPER_API, QA_API, SUPERVISOR_API
-from app.schemas import AgentRole, CheckResult, Contour, TaskStatus
+from app.roles import CRITIC, CRITIC_API, DEVELOPER, DEVELOPER_API, QA, QA_API, SUPERVISOR_API
+from app.schemas import AgentRole, ChangeClass, CheckResult, Contour, TaskStatus
 
 PACKAGE = '{"name": "web", "dependencies": {"left-pad": "^1.3.0"}}\n'
 
@@ -40,8 +42,35 @@ def test_backend_task_uses_server_prompts_and_pytest_qa(office, origin, graph):
     assert git(root, "show", f"{qa_sha}:{test_file}") == QA_PYTEST.rstrip("\n")
     task = app.state.store.get_task(task_id)
     assert task.contour == Contour.server and "apps/chat/api/app/notes.py" in task.changed_files
+    assert task.change_class == ChangeClass.backend_api
     assert all("api-test" in steps for steps in app.state.suite.steps)
     assert app.state.suite.lock_node.calls == [] and app.state.suite.python.lock.calls == []
+
+
+@pytest.mark.pg
+def test_backend_task_without_server_change_moves_to_frontend(office, origin, graph):
+    app, client, me = graph
+    gateway = app.state.gateway
+    gateway.handlers["supervisor"] = lambda call: spec_answer(call, server_change=False)
+    task_id = create(app, me["id"], change_class="backend_api")
+    spec_required(app, task_id)
+    assert app.state.store.get_task(task_id).change_class == ChangeClass.frontend_ui
+    [spec_event] = [event for event in events(app, task_id, "role_finished") if event.role == "supervisor"]
+    assert spec_event.payload["summary"] == (
+        "Требования: 2 критериев приёмки. Серверных изменений не нужно: задача переведена в контур интерфейса."
+    )
+    spec = json.loads((app.state.settings.artifacts_dir / task_id / "spec-1.json").read_text(encoding="utf-8"))
+    assert "server_change" not in spec
+    approve(client, app, task_id)
+    wait_status(app, task_id, TaskStatus.awaiting_integration, TaskStatus.failed, TaskStatus.needs_attention)
+    assert status(app, task_id) == TaskStatus.awaiting_integration, events(app, task_id)[-3:]
+    systems = {role: {call.system for call in gateway.role_calls(role, task_id)} for role in ("supervisor", "developer", "qa", "critic")}
+    assert systems == {"supervisor": {SUPERVISOR_API}, "developer": {DEVELOPER}, "qa": {QA}, "critic": {CRITIC}}
+    [qa_call] = gateway.role_calls("qa", task_id)
+    assert f"apps/chat/web/e2e/office/{task_id}.pw.ts" in qa_call.user
+    task = app.state.store.get_task(task_id)
+    assert task.contour == Contour.ui and task.change_class == ChangeClass.frontend_ui
+    assert not any("api-test" in steps for steps in app.state.suite.steps)
 
 
 @pytest.mark.pg

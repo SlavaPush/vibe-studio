@@ -457,7 +457,10 @@ def test_restart_after_second_qa_attempt_continues_with_last_attempt(office, ori
     [qa_call] = fresh.role_calls("qa")
     assert "Тест прошёл на исходной версии" in qa_call.user
     finished = [event for event in events(second, task_id, "role_finished") if event.role == "qa"]
-    assert finished[-1].payload["summary"] == "Тест QA проходит на исходной версии после трёх попыток."
+    assert finished[-1].payload["summary"] == (
+        "Тест QA не отличает новую версию от исходной после трёх попыток: повтор без изменения формулировки задачи "
+        "не поможет. QA: Тест кнопки копирования"
+    )
 
 
 @pytest.mark.pg
@@ -861,14 +864,21 @@ def test_qa_failure_on_task_version_becomes_blocking_finding(graph):
 def test_qa_test_passing_on_base_is_rejected(graph):
     app, client, me = graph
     app.state.suite.e2e = lambda task_id, app_sha, test_file: E2EResult("passed")
+    explanations = iter(["Первая попытка.", "Вторая попытка.", "Критерий не отличает новую версию от исходной."])
+    app.state.gateway.handlers["qa"] = lambda call: qa_answer(call) | {"summary": next(explanations)}
     task_id = create(app, me["id"])
     approve(client, app, task_id)
     wait_status(app, task_id, TaskStatus.needs_attention)
     qa_calls = app.state.gateway.role_calls("qa")
     assert len(qa_calls) == 3
     assert all("Тест прошёл на исходной версии" in call.user for call in qa_calls[1:])
+    reason = (
+        "Тест QA не отличает новую версию от исходной после трёх попыток: повтор без изменения формулировки задачи "
+        "не поможет. QA: Критерий не отличает новую версию от исходной."
+    )
+    assert app.state.store.get_task(task_id).halt_reason == reason
     finished = [event for event in events(app, task_id, "role_finished") if event.role == "qa"]
-    assert finished[-1].payload["summary"] == "Тест QA проходит на исходной версии после трёх попыток."
+    assert finished[-1].payload["summary"] == reason
     assert not (app.state.settings.artifacts_dir / task_id / "review-0-qa.json").exists()
 
 
@@ -1077,7 +1087,9 @@ def test_unmocked_api_twice_needs_attention_without_developer_finding(graph):
     assert len(app.state.gateway.role_calls("developer")) == 1
     assert store.get_task(task_id).fix_cycles == 0
     finished = [event for event in events(app, task_id, "role_finished") if event.role == "qa"]
-    assert finished[-1].payload["summary"] == "Тест QA обращается к API vibe-chat без подмены после трёх попыток."
+    assert finished[-1].payload["summary"] == (
+        "Тест QA обращается к API vibe-chat без подмены после трёх попыток. QA: Тест кнопки копирования"
+    )
     assert not list((app.state.settings.artifacts_dir / task_id).glob("review-*-qa.json"))
 
 

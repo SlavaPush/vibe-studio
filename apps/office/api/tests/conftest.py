@@ -25,6 +25,7 @@ from app.config import Settings
 from app.db import Database
 from app.main import create_app
 from app.models_gateway import ModelCall, ModelsGateway, ProviderReply
+from app.roles import SUPERVISOR_API
 from app.runner import Checkpoints, Runner
 from app.sandbox import COMPAT_COMMANDS, E2EResult, SandboxCancelled, suite_steps
 from app.schemas import ApiError, CheckReport, CheckResult, ReleaseCandidate, ReleaseKind
@@ -194,6 +195,12 @@ SPEC_ANSWER = {
 }
 
 
+def spec_answer(call: ModelCall, server_change: bool = True) -> dict[str, Any]:
+    if call.system == SUPERVISOR_API:
+        return SPEC_ANSWER | {"server_change": server_change}
+    return SPEC_ANSWER
+
+
 def developer_answer(content: str, path: str = "apps/chat/web/src/App.tsx", done: bool = True) -> dict[str, Any]:
     return {
         "actions": [{"kind": "write_file", "path": path, "content": content, "step": None}],
@@ -239,7 +246,7 @@ class ScriptedGateway(ModelsGateway):
         self.lock = threading.Lock()
         self.versions = 0
         self.handlers: dict[str, Callable[[ModelCall], Any]] = {
-            "supervisor": lambda call: SPEC_ANSWER,
+            "supervisor": spec_answer,
             "researcher": lambda call: {"urls": []},
             "developer": self.next_version,
             "qa": qa_answer,

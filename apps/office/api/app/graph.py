@@ -36,6 +36,7 @@ from app.roles import (
     ResearchNotes,
     ResearchPlan,
     SpecDraft,
+    SpecDraftApi,
     Turn,
     assemble,
 )
@@ -390,12 +391,15 @@ class TaskGraph:
             raise Stopped("developing without spec")
         self.started(AgentRole.supervisor, "spec")
         fixed = [Entry("Текст задачи участника", task.text, required=True), *self.file_entries(task)]
-        system = SUPERVISOR_API if backend(task) else SUPERVISOR
-        draft = self.ask(AgentRole.supervisor, "spec", system, fixed, [], SpecDraft, S.awaiting_spec_approval)
-        self.finished(
-            AgentRole.supervisor, "spec", "ok", f"Требования: {len(draft.acceptance_criteria)} критериев приёмки."
-        )
-        return {"draft": draft.model_dump()}
+        server = backend(task)
+        system, reply_type = (SUPERVISOR_API, SpecDraftApi) if server else (SUPERVISOR, SpecDraft)
+        draft = self.ask(AgentRole.supervisor, "spec", system, fixed, [], reply_type, S.awaiting_spec_approval)
+        summary = f"Требования: {len(draft.acceptance_criteria)} критериев приёмки."
+        if server and not draft.server_change:
+            self.store.set_change_class(self.task_id, ChangeClass.frontend_ui)
+            summary += " Серверных изменений не нужно: задача переведена в контур интерфейса."
+        self.finished(AgentRole.supervisor, "spec", "ok", summary)
+        return {"draft": draft.model_dump(exclude={"server_change"})}
 
     def research(self, state: State) -> State:
         task = self.guard(S.awaiting_spec_approval)
@@ -692,7 +696,12 @@ class TaskGraph:
         base = self.evidence(task.base_sha, qa_sha, test_file)
         if base.status == "passed":
             passed = PASSED_ON_BASE_API if backend(task) else PASSED_ON_BASE
-            return passed, f"Тест QA проходит на исходной версии {QA_EXHAUSTED}.", None
+            return (
+                passed,
+                f"Тест QA не отличает новую версию от исходной {QA_EXHAUSTED}: "
+                "повтор без изменения формулировки задачи не поможет.",
+                None,
+            )
         after = base if base.status in ("invalid", "test_error") else self.evidence(qa_sha, qa_sha, test_file)
         if after.status == "invalid":
             return after.reason, f"Тест QA обращается к API vibe-chat без подмены {QA_EXHAUSTED}.", None
@@ -743,7 +752,8 @@ class TaskGraph:
             if feedback is None:
                 break
             if qa_state["qa_try"] >= QA_ATTEMPTS:
-                self.halt(AgentRole.qa, "qa", reason)
+                summary = qa_state["answer"]["summary"]
+                self.halt(AgentRole.qa, "qa", f"{reason} QA: {summary}" if summary else reason)
             qa_state.update(phase="checked", feedback=feedback)
             self.save_qa_state(path, qa_state)
         answer = qa_state["answer"]
