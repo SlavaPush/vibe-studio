@@ -15,6 +15,7 @@ import {
   UpdateNotice,
 } from '@/components/chat/Notices'
 import { DogFollower } from '@/components/DogFollower'
+import { JailScene } from '@/components/JailScene'
 import { ThemeToggle } from '@/components/ThemeToggle'
 import { Button } from '@/components/ui/button'
 import { Sheet, SheetClose, SheetContent, SheetTitle, SheetTrigger } from '@/components/ui/sheet'
@@ -51,6 +52,8 @@ export default function App({ store, controller, version = buildVersion() }: App
   )
   const [updatePrompt, setUpdatePrompt] = useState<'pending' | 'open' | 'closed'>('pending')
   const [navOpen, setNavOpen] = useState(false)
+  // Кошка с собакой вернулись с чемоданом и сидят за решёткой.
+  const [returned, setReturned] = useState(false)
   if (
     state.updateAvailable &&
     updatePrompt === 'pending' &&
@@ -147,6 +150,7 @@ export default function App({ store, controller, version = buildVersion() }: App
                   <h1 className="min-w-0 flex-1 truncate text-base font-semibold">{active?.title ?? 'vibe-chat'}</h1>
                 </div>
                 <div className="flex min-w-0 items-center gap-2 md:gap-3">
+                  {returned && <JailScene />}
                   <ModelSelector
                     models={state.models}
                     value={state.selectedModel}
@@ -182,7 +186,7 @@ export default function App({ store, controller, version = buildVersion() }: App
       ) : (
         <LoginScreen onSubmit={controller.signIn} />
       )}
-      <DogFollower />
+      <DogFollower onReturned={() => setReturned(true)} />
     </div>
   )
 }
