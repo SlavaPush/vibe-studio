@@ -280,6 +280,40 @@ describe('TaskCard: PR задачи', () => {
       ),
     ).toBeInTheDocument()
   })
+
+  const revertedTask: Task = {
+    ...integrating,
+    status: 'failed',
+    failure_kind: 'checks_failed',
+    merge_sha: 'c3d4e5f6a7b8091a2b3c4d5e6f708192a3b4c5d6',
+    halt_reason: 'Критический E2E итогового commit c3d4e5f не пройден: тест прежней задачи «кошка» (a.pw.ts): нет.',
+    rework_count: 0,
+    rework_limit: 1,
+  }
+
+  it('провал итогового commit объясняет, что доработка начнётся после отката', () => {
+    fakeApi()
+    renderCard(maria, revertedTask)
+    const block = screen.getByRole('region', { name: 'Причина остановки' })
+    expect(block).toHaveTextContent(
+      'Код задачи отменён revert-PR. После публикации отката офис сам начнёт доработку (попытка 1 из 1) с причиной отката; «Повторить» не требуется.',
+    )
+    expect(screen.getByRole('button', { name: 'Повторить' })).toBeDisabled()
+  })
+
+  it('провал итогового commit после исчерпания доработок предлагает новую задачу', () => {
+    fakeApi()
+    renderCard(maria, { ...revertedTask, rework_count: 1 })
+    const block = screen.getByRole('region', { name: 'Причина остановки' })
+    expect(block).toHaveTextContent('Лимит доработки исчерпан: поставьте новую задачу с учётом причины.')
+    expect(block).not.toHaveTextContent('revert-PR')
+  })
+
+  it('провал проверок PR до слияния не обещает доработку', () => {
+    fakeApi()
+    renderCard(maria, { ...revertedTask, merge_sha: null })
+    expect(screen.getByRole('region', { name: 'Причина остановки' })).not.toHaveTextContent('доработк')
+  })
 })
 
 describe('TaskCard: действия', () => {

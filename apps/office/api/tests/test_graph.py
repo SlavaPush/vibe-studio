@@ -8,7 +8,7 @@ from conftest import QA_TEST, SPEC_ANSWER, UI_TASK, FakeSuite, ScriptedGateway, 
 from langgraph.types import Command
 
 from app.db import utcnow
-from app.graph import TaskGraph, spec_hash
+from app.graph import TaskGraph, qa_writable, spec_hash
 from app.models_gateway import ProviderReply
 from app.roles import Finding, SpecDraft
 from app.sandbox import E2EResult, SandboxCancelled
@@ -880,6 +880,111 @@ def test_qa_test_passing_on_base_is_rejected(graph):
     finished = [event for event in events(app, task_id, "role_finished") if event.role == "qa"]
     assert finished[-1].payload["summary"] == reason
     assert not (app.state.settings.artifacts_dir / task_id / "review-0-qa.json").exists()
+
+
+OLD_TEST = "apps/chat/web/e2e/office/tsk_old.pw.ts"
+
+
+def test_failing_test_of_previous_task_returns_task_to_developer(graph):
+    app, client, me = graph
+    runs = {"after": 0}
+    broken = {"file": OLD_TEST, "title": "кошка появляется раз в минуту", "message": "Error: expect(locator).toBeVisible() failed"}
+
+    def others(task_id, app_sha, test_file):
+        assert app_sha != app.state.store.get_task(task_id).base_sha
+        runs["after"] += 1
+        return [broken] if runs["after"] == 1 else []
+
+    app.state.suite.others = others
+    task_id = create(app, me["id"])
+    approve(client, app, task_id)
+    wait_status(app, task_id, TaskStatus.awaiting_integration)
+    data = json.loads((app.state.settings.artifacts_dir / task_id / "review-0-qa.json").read_text())
+    [finding] = data["findings"]
+    assert Finding.model_validate(finding)
+    assert finding == {
+        "id": "qa-0-regress-1",
+        "source": "qa",
+        "blocking": True,
+        "criterion": None,
+        "file": OLD_TEST,
+        "line": None,
+        "text": (
+            f"Изменение ломает тест прежней задачи «кошка появляется раз в минуту» ({OLD_TEST}): "
+            "Error: expect(locator).toBeVisible() failed. Сохрани прежнее поведение или, если требования задачи его "
+            "меняют, QA обновит этот тест."
+        ),
+    }
+    finished = [event.payload["summary"] for event in events(app, task_id, "role_finished") if event.role == "qa"]
+    assert finished[0] == "Тест QA проходит на версии задачи, но изменение ломает тесты прежних задач: 1."
+    developer = app.state.gateway.role_calls("developer")
+    assert len(developer) == 2 and "кошка появляется раз в минуту" in developer[1].user
+    qa_calls = app.state.gateway.role_calls("qa")
+    assert len(qa_calls) == 2
+    title = "Тесты прежних задач, которые не проходят на версии задачи"
+    assert title not in qa_calls[0].user
+    assert title in qa_calls[1].user and f"{OLD_TEST} — «кошка появляется раз в минуту»" in qa_calls[1].user
+    assert app.state.store.get_task(task_id).fix_cycles == 1
+    assert json.loads((app.state.settings.artifacts_dir / task_id / "review-1-qa.json").read_text())["findings"] == []
+
+
+def test_qa_updates_and_deletes_tests_of_previous_tasks(office, origin, tmp_path):
+    origin.push(OLD_TEST, QA_TEST)
+    gone = "apps/chat/web/e2e/office/tsk_gone.pw.ts"
+    origin.push(gone, QA_TEST)
+    app = office.graph_app(origin, tmp_path)
+    client, me = office.login(app=app)
+    updated = QA_TEST.replace("feature", "new behaviour")
+
+    def qa(call):
+        answer = qa_answer(call)
+        answer["actions"] += [
+            {"kind": "write_file", "path": OLD_TEST, "content": updated, "step": None},
+            {"kind": "delete_file", "path": gone, "content": None, "step": None},
+            {"kind": "write_file", "path": "apps/chat/web/e2e/office/support/extra.pw.ts", "content": QA_TEST, "step": None},
+            {"kind": "write_file", "path": "apps/chat/web/e2e/office/nested/extra.pw.ts", "content": QA_TEST, "step": None},
+        ]
+        return answer
+
+    app.state.gateway.handlers["qa"] = qa
+    task_id = create(app, me["id"])
+    approve(client, app, task_id)
+    wait_status(app, task_id, TaskStatus.awaiting_integration, TaskStatus.needs_attention, TaskStatus.failed)
+    assert status(app, task_id) == TaskStatus.awaiting_integration, events(app, task_id)[-3:]
+    [qa_sha] = office_commits(app, task_id, "qa")
+    root = worktree(app, task_id)
+    assert git(root, "show", f"{qa_sha}:{OLD_TEST}") == updated.rstrip("\n")
+    base = app.state.store.get_task(task_id).base_sha
+    assert git(root, "ls-tree", "--name-only", base, gone) == gone
+    assert git(root, "ls-tree", "--name-only", qa_sha, gone) == ""
+    assert git(root, "ls-tree", "-r", "--name-only", qa_sha, "apps/chat/web/e2e/office/support/extra.pw.ts") == ""
+    denied = [
+        event.payload for event in events(app, task_id, "tool_called")
+        if event.role == "qa" and event.payload.get("result") == "denied"
+    ]
+    assert [item["arguments"] for item in denied] == [
+        "apps/chat/web/e2e/office/support/extra.pw.ts", "apps/chat/web/e2e/office/nested/extra.pw.ts"
+    ]
+    assert all("QA записывает и удаляет только файлы тестов QA apps/chat/web/e2e/office/*.pw.ts" in item["reason"] for item in denied)
+    assert app.state.workspace.verify_branch(task_id) == []
+
+
+@pytest.mark.parametrize(
+    ("path", "test_file", "allowed"),
+    [
+        (OLD_TEST, "apps/chat/web/e2e/office/tsk_new.pw.ts", True),
+        ("apps/chat/web/e2e/office/support/mock-api.ts", "apps/chat/web/e2e/office/tsk_new.pw.ts", False),
+        ("apps/chat/web/e2e/office/support/x.pw.ts", "apps/chat/web/e2e/office/tsk_new.pw.ts", False),
+        ("apps/chat/web/e2e/x.pw.ts", "apps/chat/web/e2e/office/tsk_new.pw.ts", False),
+        ("apps/chat/web/src/App.tsx", "apps/chat/web/e2e/office/tsk_new.pw.ts", False),
+        ("apps/chat/api/tests/office/test_tsk_old.py", "apps/chat/api/tests/office/test_tsk_new.py", True),
+        ("apps/chat/api/tests/office/conftest.py", "apps/chat/api/tests/office/test_tsk_new.py", False),
+        ("apps/chat/api/tests/test_api.py", "apps/chat/api/tests/office/test_tsk_new.py", False),
+        (OLD_TEST, "apps/chat/api/tests/office/test_tsk_new.py", False),
+    ],
+)
+def test_qa_writable_paths(path, test_file, allowed):
+    assert qa_writable(path, test_file) is allowed
 
 
 def test_qa_rewrite_after_base_pass_is_accepted(graph):

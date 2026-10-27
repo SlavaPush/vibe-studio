@@ -353,6 +353,19 @@ function HaltPanel({ task, participant }: { task: Task; participant: Participant
   if (canAct(participant, task, 'cancel').allowed) {
     hints.push(`«${DECISION_LABELS.cancel}» завершает задачу.`)
   }
+  if (
+    task.status === 'failed' &&
+    task.merge_sha !== null &&
+    (task.failure_kind === 'checks_failed' ||
+      task.failure_kind === 'verify_failed' ||
+      task.failure_kind === 'rolled_back')
+  ) {
+    hints.push(
+      task.rework_count < task.rework_limit
+        ? `Код задачи отменён revert-PR. После публикации отката офис сам начнёт доработку (попытка ${task.rework_count + 1} из ${task.rework_limit}) с причиной отката; «${DECISION_LABELS.retry}» не требуется.`
+        : 'Лимит доработки исчерпан: поставьте новую задачу с учётом причины.',
+    )
+  }
   return (
     <section aria-labelledby="task-halt-heading" className="grid gap-1 text-sm">
       <h3 id="task-halt-heading" className="font-medium">

@@ -20,10 +20,12 @@ from app.github import GitHubError, GitHubUnavailable, github_client
 from app.models_gateway import ProviderReply
 from app.operations import OperationLog, OpStatus
 from app.release import ReleaseWorker, task_carrier
+from app.rework import ReworkMaterials
 from app.required_checks import load_required_checks
 from app.sandbox import SandboxError
 from app.schemas import AgentRole, CheckReport, CheckResult, FailureKind, ReleaseStatus, TaskEventType, TaskStatus
 from app.service_check import SERVICE_TIMEOUT
+from app.tasks import HALT_REASON_LIMIT
 from app.workspace import PushResult, Workspace
 from conftest import CI_JOBS, MODEL_TITLE, FakeGitHub, FakeSuite, ScriptedGateway, git
 
@@ -1044,6 +1046,47 @@ def test_failed_critical_e2e_fails_and_blocks_for_revert(setup, step):
     assert [check.exit_code for check in candidate.e2e.checks if check.exit_code] == [1]
     reason = [event for event in setup.events(TaskEventType.role_finished) if event.payload["step"] == "merge_checks"]
     assert "exit 1" in reason[-1].payload["summary"]
+
+
+def test_failed_critical_e2e_reason_names_failed_tests(setup):
+    worker = merged(setup)
+    sha = setup.task().merge_sha
+    setup.fake.add_push_runs(sha)
+    setup.suite.exits = lambda task_id, app, qa, e2e: {"e2e": 1}
+    old = "apps/chat/web/e2e/office/tsk_d678e976e193.pw.ts"
+    own = f"apps/chat/web/e2e/office/{setup.task_id}.pw.ts"
+    message = "Error: expect(received).toBe(expected)\n\nExpected: true\nReceived: false\n" + "x" * 400
+    seen = []
+
+    def others(task_id, app_sha, test_file):
+        seen.append((task_id, app_sha, test_file))
+        return [
+            {"file": old, "title": "кошка появляется раз в минуту", "message": message},
+            {"file": own, "title": "решётка", "message": "Test timeout of 30000ms exceeded."},
+        ]
+
+    setup.suite.others = others
+    drive(worker, setup.task_id)
+    task = setup.task()
+    assert (task.status, task.failure_kind) == (TaskStatus.failed, FailureKind.checks_failed)
+    assert seen[-1] == (setup.task_id, sha, "")
+    first = " ".join(message.split())[:300]
+    reason = (
+        f"Критический E2E итогового commit {sha[:7]} не пройден: тест прежней задачи «кошка появляется раз в минуту» "
+        f"({old}): {first}; тест задачи «решётка» ({own}): Test timeout of 30000ms exceeded."
+    )
+    assert task.halt_reason == reason
+    candidate = blocked_by_checks(setup)
+    assert candidate.blocked_reason == reason == task.rework_reason
+    materials = ReworkMaterials(setup.settings, setup.store, setup.workspace)
+    text = materials.reason(task, {"source": "checks_failed", "release_id": candidate.id}, candidate, None)
+    assert text.count("кошка появляется раз в минуту") == 2
+
+    setup.suite.others = lambda task_id, app_sha, test_file: [
+        {"file": old, "title": f"тест {index}", "message": message} for index in range(10)
+    ]
+    critical, long = worker._verdict(sha, candidate.e2e, [check.command for check in candidate.e2e.checks])
+    assert critical and len(long) == HALT_REASON_LIMIT
 
 
 def test_interrupted_suite_is_repeated_and_complete_report_is_reused(setup, monkeypatch):

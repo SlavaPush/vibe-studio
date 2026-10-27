@@ -20,7 +20,7 @@ from app.operations import Operation, OperationLog, OpStatus
 from app.release_queue import QueueBusy, ReleaseQueue, fixed_targets, targets_of
 from app.render import RenderClient, RenderError, RenderUnavailable
 from app.required_checks import RequiredCheck
-from app.roles import CHECKLIST, PR_REVIEWER, ContextTooLarge, Entry, PrReview, assemble
+from app.roles import CHECKLIST, PR_REVIEWER, QA_TEST_DIR, ContextTooLarge, Entry, PrReview, assemble
 from app.sandbox import CommandsPolicy, SandboxCancelled, SandboxError, suite_commands, suite_steps
 from app.schemas import (
     AgentRole,
@@ -45,6 +45,7 @@ from app.schemas import (
 )
 from app.service_check import SERVICE_TIMEOUT, BaseUnavailable, ServiceCheck
 from app.tasks import (
+    HALT_REASON_LIMIT,
     SIGNAL_DECISION_RECORDED,
     SIGNAL_SLOT_RELEASED,
     SIGNAL_TASK_CLOSED,
@@ -76,6 +77,7 @@ MAX_ATTEMPTS = 3
 STEPS_PER_PASS = 8
 SHUTDOWN_TIMEOUT = 30.0
 REVIEW_DIFF_LIMIT = 200 * 1024
+FAILED_TEST_MESSAGE = 300
 INTEGRATING = frozenset({S.awaiting_integration})
 CANDIDATES = (
     "SELECT id, created_at FROM tasks WHERE status = 'awaiting_integration' "
@@ -1167,11 +1169,26 @@ class ReleaseWorker:
             return None
         return self._judge(c, report, commands)
 
+    def _failed_tests(self, report: CheckReport) -> list[str]:
+        own = f"{QA_TEST_DIR}/{report.task_id}.pw.ts"
+        return [
+            f"тест {'задачи' if item['file'] == own else 'прежней задачи'} «{item['title']}» ({item['file']}): "
+            f"{' '.join(item['message'].split())[:FAILED_TEST_MESSAGE].rstrip('.')}"
+            for item in self.suite.other_failures(report.task_id, report, "")
+        ]
+
     def _verdict(self, sha: str, report: CheckReport, commands: list[str]) -> tuple[bool, str | None]:
         sha = sha[:7]
         failed = [f"{check.command} (exit {check.exit_code})" for check in report.checks if check.exit_code != 0]
         if any(check.exit_code != 0 and check.command in commands for check in report.checks):
-            return True, f"Критический E2E итогового commit {sha} не пройден: {', '.join(failed)}."
+            e2e = self.commands.steps["e2e"].command
+            tests = self._failed_tests(report)
+            failed = tests + [
+                f"{check.command} (exit {check.exit_code})"
+                for check in report.checks
+                if check.exit_code != 0 and not (tests and check.command == e2e)
+            ]
+            return True, f"Критический E2E итогового commit {sha} не пройден: {'; '.join(failed)}."[:HALT_REASON_LIMIT]
         found = {check.command for check in report.checks}
         missing = [f"{command} (не выполнен)" for command in commands if command not in found]
         if failed or missing or not report.suite_hash:

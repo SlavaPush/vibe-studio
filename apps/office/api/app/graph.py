@@ -97,6 +97,7 @@ class State(TypedDict, total=False):
     check_feedback: str
     findings: list[dict[str, Any]]
     qa_findings: list[dict[str, Any]]
+    qa_regressions: list[dict[str, str]]
     critic_findings: list[dict[str, Any]]
     fix: bool
     lock_check: dict[str, Any] | None
@@ -135,6 +136,17 @@ def recheck_feedback(message: str, line: int | None) -> str:
 def describe(action: Action) -> str:
     target = action.step if action.kind == "run_step" else action.path
     return f"{action.kind} {target}"
+
+
+def qa_writable(path: str, test_file: str) -> bool:
+    directory, _, name = path.rpartition("/")
+    if test_file.endswith(".py"):
+        return directory == QA_PYTEST_DIR and name.startswith("test_") and name.endswith(".py")
+    return directory == QA_TEST_DIR and name.endswith(".pw.ts")
+
+
+def regressions_text(others: list[dict[str, str]]) -> str:
+    return "\n\n".join(f"{item['file']} — «{item['title']}»:\n{item['message']}" for item in others)
 
 
 class TaskGraph:
@@ -325,14 +337,19 @@ class TaskGraph:
         return ToolOutcome("ok", f"Код выхода {result.exit_code}.\n{note}{tail}")
 
     def execute(
-        self, actions: list[Action], role: AgentRole, status: TaskStatus, only_path: str | None = None
+        self, actions: list[Action], role: AgentRole, status: TaskStatus, qa_file: str | None = None
     ) -> list[Entry]:
         tools = WorkspaceTools(self.store, self.workspace, self.task_id, role)
         entries = []
         for index, action in enumerate(actions, 1):
             self.guard(status)
-            if only_path is not None and action.kind in ("write_file", "delete_file") and action.path != only_path:
-                outcome = ToolOutcome("denied", f"QA записывает только файл {only_path}.")
+            if (
+                qa_file is not None
+                and action.kind in ("write_file", "delete_file")
+                and not qa_writable(action.path or "", qa_file)
+            ):
+                scope = f"{QA_PYTEST_DIR}/test_*.py" if qa_file.endswith(".py") else f"{QA_TEST_DIR}/*.pw.ts"
+                outcome = ToolOutcome("denied", f"QA записывает и удаляет только файлы тестов QA {scope}.")
                 self.store.add_event(
                     self.task_id,
                     TaskEventType.tool_called,
@@ -362,14 +379,14 @@ class TaskGraph:
         reply_type: type,
         limit: int,
         status: TaskStatus,
-        only_path: str | None = None,
+        qa_file: str | None = None,
     ) -> Any:
         history: list[list[Entry]] = []
         reply = None
         for number in range(1, limit + 1):
             reply = self.ask(role, step, system, fixed, history, reply_type, status)
             entries = [Entry(f"Ход {number}: ответ роли", reply.summary)]
-            entries += self.execute(reply.actions, role, status, only_path)
+            entries += self.execute(reply.actions, role, status, qa_file)
             history.append(entries)
             if reply.done:
                 break
@@ -613,7 +630,7 @@ class TaskGraph:
             )
             result = self.sandbox.e2e_result(self.task_id, report, test_file)
             if result.status != "no_evidence":
-                return result
+                return result, report
         self.halt(AgentRole.qa, "qa", f"Нет свидетельства QA: {result.reason}")
 
     def load_qa_state(self, path: Path) -> dict[str, Any] | None:
@@ -636,7 +653,7 @@ class TaskGraph:
             return None
         return hashlib.sha256(data).hexdigest()
 
-    def ask_qa(self, task: Task, test_file: str, feedback: str) -> dict[str, Any]:
+    def ask_qa(self, task: Task, test_file: str, feedback: str, others: list[dict[str, str]]) -> dict[str, Any]:
         fixed = self.spec_entries(task) + self.rework_reason(task) + [Entry("Файл теста QA", test_file, required=True)]
         root = self.workspace.worktree_path(self.task_id)
         if backend(task):
@@ -649,6 +666,10 @@ class TaskGraph:
             fixed.append(Entry(title, "\n".join(api_files), required=True))
         if feedback:
             fixed.append(Entry("Результат прошлой попытки", feedback, required=True))
+        if others:
+            fixed.append(Entry(
+                "Тесты прежних задач, которые не проходят на версии задачи", regressions_text(others), required=True
+            ))
         if (root / test_file).is_file():
             current = (root / test_file).read_text(encoding="utf-8", errors="replace")
             fixed.append(Entry(
@@ -693,7 +714,7 @@ class TaskGraph:
         if pending and not qa_state["changed"]:
             return None, "", pending
         qa_sha = qa_state["qa_sha"]
-        base = self.evidence(task.base_sha, qa_sha, test_file)
+        base, _ = self.evidence(task.base_sha, qa_sha, test_file)
         if base.status == "passed":
             passed = PASSED_ON_BASE_API if backend(task) else PASSED_ON_BASE
             return (
@@ -702,7 +723,11 @@ class TaskGraph:
                 "повтор без изменения формулировки задачи не поможет.",
                 None,
             )
-        after = base if base.status in ("invalid", "test_error") else self.evidence(qa_sha, qa_sha, test_file)
+        if base.status in ("invalid", "test_error"):
+            after = base
+        else:
+            after, report = self.evidence(qa_sha, qa_sha, test_file)
+            qa_state["others"] = self.sandbox.other_failures(self.task_id, report, test_file)
         if after.status == "invalid":
             return after.reason, f"Тест QA обращается к API vibe-chat без подмены {QA_EXHAUSTED}.", None
         if after.status == "test_error":
@@ -728,10 +753,11 @@ class TaskGraph:
         test_file = f"{QA_PYTEST_DIR}/test_{self.task_id}.py" if backend(task) else f"{QA_TEST_DIR}/{self.task_id}.pw.ts"
         path = self.settings.artifacts_dir / self.task_id / f"qa-state-{marker}.json"
         qa_state = self.load_qa_state(path) or {
-            "qa_try": 1, "phase": "start", "feedback": "", "recheck_used": False, "pending": None
+            "qa_try": 1, "phase": "start", "feedback": "", "recheck_used": False, "pending": None,
+            "others": state.get("qa_regressions") or [],
         }
         if qa_state["phase"] == "done":
-            return {"qa_findings": qa_state["findings"]}
+            return {"qa_findings": qa_state["findings"], "qa_regressions": qa_state.get("others") or []}
         self.started(AgentRole.qa, "qa")
         while True:
             if qa_state["phase"] == "checked":
@@ -742,11 +768,14 @@ class TaskGraph:
                 )
                 self.save_qa_state(path, qa_state)
             if qa_state["phase"] == "calling":
-                answer = self.ask_qa(task, test_file, qa_state["feedback"])
+                answer = self.ask_qa(task, test_file, qa_state["feedback"], qa_state.get("others") or [])
                 qa_state.update(phase="answered", answer=answer, changed=self.test_hash(test_file) != qa_state["hash_before"])
                 self.save_qa_state(path, qa_state)
             if qa_state["phase"] == "answered":
-                qa_state.update(phase="committed", qa_sha=self.qa_commit(qa_state, marker))
+                qa_sha = self.qa_commit(qa_state, marker)
+                qa_state.update(
+                    phase="committed", qa_sha=qa_sha, changed=qa_state["changed"] or qa_sha != qa_state["head_before"]
+                )
                 self.save_qa_state(path, qa_state)
             feedback, reason, failure = self.qa_check(task, qa_state, test_file)
             if feedback is None:
@@ -774,14 +803,35 @@ class TaskGraph:
                     text=failure["message"],
                 )
             )
+        others = qa_state.get("others") or []
+        for index, item in enumerate(others, 1):
+            findings.append(
+                Finding(
+                    id=f"qa-{cycle}-regress-{index}",
+                    source="qa",
+                    blocking=True,
+                    criterion=None,
+                    file=item["file"],
+                    line=None,
+                    text=(
+                        f"Изменение ломает тест прежней задачи «{item['title']}» ({item['file']}): {item['message'].rstrip('.')}. "
+                        "Сохрани прежнее поведение или, если требования задачи его меняют, QA обновит этот тест."
+                    ),
+                )
+            )
         data = [item.model_dump() for item in findings]
         self.artifact(f"review-{cycle}-qa.json", {"qa_sha": qa_state["qa_sha"], "findings": data}, AgentRole.qa)
         blocking = any(item.blocking for item in findings)
-        summary = "Тест QA не проходит на версии задачи." if failure is not None else "Тест QA проходит на версии задачи и не проходит на исходной."
+        if failure is not None:
+            summary = "Тест QA не проходит на версии задачи."
+        elif others:
+            summary = f"Тест QA проходит на версии задачи, но изменение ломает тесты прежних задач: {len(others)}."
+        else:
+            summary = "Тест QA проходит на версии задачи и не проходит на исходной."
         self.finished(AgentRole.qa, "qa", "blocked" if blocking else "ok", summary)
         qa_state.update(phase="done", findings=data)
         self.save_qa_state(path, qa_state)
-        return {"qa_findings": data}
+        return {"qa_findings": data, "qa_regressions": others}
 
     def critic(self, state: State) -> State:
         task = self.guard(S.reviewing)

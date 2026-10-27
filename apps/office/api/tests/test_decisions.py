@@ -128,6 +128,7 @@ def test_retry_after_final_release_failure_is_not_allowed(office, owner, kind):
     response = decide(client, task_id, "retry", version_of(office, task_id), f"retry-{kind}")
     assert response.status_code == 409
     assert response.json()["code"] == "decision_not_allowed"
+    assert ("после публикации отката офис начнёт доработку" in response.json()["message"]) == (kind == "checks_failed")
 
 
 def test_retry_without_release_operations_returns_to_queue(office, owner):

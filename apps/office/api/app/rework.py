@@ -149,7 +149,7 @@ class ReworkMaterials:
             if release.e2e is not None:
                 failed = [f"{check.command} (exit {check.exit_code})" for check in release.e2e.checks if check.exit_code]
                 if failed:
-                    lines.append(f"Критический E2E итогового commit: {', '.join(failed)}")
+                    lines.append(release.blocked_reason or f"Критический E2E итогового commit: {', '.join(failed)}")
         if rollback is not None:
             lines.append(f"Ручной откат {rollback.id}: причина — {rollback.reason or 'не указана'}")
             if rollback.verify is not None:

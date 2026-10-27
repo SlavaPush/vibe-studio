@@ -248,7 +248,9 @@ def test_qa_prompt_requires_mock_module_and_exact_locators():
         "падать на проверке expect, а не на ошибке локатора",
         'page.goto("/")',
         "без сети",
-        "только в файл, указанный в данных",
+        "Тест пишется в файл, указанный в данных",
+        "Тесты прежних задач, которые не проходят на версии задачи",
+        "Ослаблять или удалять проверки, не связанные с задачей, нельзя.",
     ):
         assert rule in QA
     assert "apps/chat/web/e2e/office/support/mock-api.ts" in QA_API_FILES

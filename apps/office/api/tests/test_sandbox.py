@@ -21,6 +21,7 @@ from app.sandbox import (
     SandboxCancelled,
     SandboxError,
     StepDenied,
+    failed_tests,
     parse_playwright,
     run_process,
     unmocked_reason,
@@ -840,6 +841,52 @@ def test_playwright_failure_details():
     parsed = parse_playwright(report(result("passed"), result("failed", FAILURE)), QA_FILE)
     assert (parsed.status, parsed.line) == ("failed", 12)
     assert parsed.message == "Error: expect(locator).toBeVisible() failed"
+
+
+OTHER_FILE = "web/e2e/office/tsk_0.pw.ts"
+
+
+def two_files(own, other, other_file=OTHER_FILE):
+    data = report(own)
+    data["suites"].append(report(other, file=other_file)["suites"][0])
+    return data
+
+
+def test_failed_tests_lists_failures_of_other_files():
+    assert failed_tests(two_files(result("passed"), result("passed")), QA_FILE) == []
+    expected = [{"file": OTHER_FILE, "title": "t", "message": "Error: expect(locator).toBeVisible() failed"}]
+    assert failed_tests(two_files(result("passed"), result("failed", FAILURE)), QA_FILE) == expected
+    assert failed_tests(two_files(result("passed"), result("failed", FAILURE), f"../{OTHER_FILE}"), QA_FILE) == expected
+    timed_out = failed_tests(two_files(result("failed", FAILURE), result("timedOut", TIMEOUT)), QA_FILE)
+    assert timed_out == [{"file": OTHER_FILE, "title": "t", "message": "Test timeout of 30000ms exceeded."}]
+    assert [item["file"] for item in failed_tests(two_files(result("failed", FAILURE), result("timedOut", TIMEOUT)))] == [
+        QA_FILE, OTHER_FILE
+    ]
+    assert failed_tests(two_files(result("passed"), result("failed", FAILURE), "web/e2e/office/support/x.ts"), QA_FILE) == []
+    assert failed_tests(None, QA_FILE) == []
+
+
+def test_other_failures_reads_report_artifact(setup):
+    app, _, _, make, start = setup
+    sandbox = make()
+    [task_id] = start()
+    command = sandbox.policy.steps["e2e"].command
+    directory = app.state.settings.artifacts_dir / task_id
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "e2e-1-0-playwright-report.json").write_text(json.dumps(two_files(result("passed"), result("failed", FAILURE))))
+    urls = [f"/api/tasks/{task_id}/artifacts/e2e-1.log", f"/api/tasks/{task_id}/artifacts/e2e-1-0-playwright-report.json"]
+
+    def suite(artifact_urls, checks=None):
+        check = CheckResult(command=command, exit_code=1, duration_ms=1, artifact_urls=artifact_urls)
+        return CheckReport(task_id=task_id, commit_sha="a" * 40, spec_hash=None, suite_hash=None, checks=checks or [check])
+
+    [found] = sandbox.other_failures(task_id, suite(urls), QA_FILE)
+    assert (found["file"], found["title"]) == (OTHER_FILE, "t")
+    assert sandbox.e2e_result(task_id, suite(urls), QA_FILE).status == "passed"
+    assert sandbox.other_failures(task_id, suite(urls[:1]), QA_FILE) == []
+    assert sandbox.other_failures(task_id, suite(urls), "apps/chat/api/tests/office/test_tsk_1.py") == []
+    lint = CheckResult(command="npm run lint", exit_code=1, duration_ms=1, artifact_urls=[])
+    assert sandbox.other_failures(task_id, suite(urls, [lint]), QA_FILE) == []
 
 
 def test_e2e_result_reads_report_artifact(setup):

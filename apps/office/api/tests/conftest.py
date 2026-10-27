@@ -312,6 +312,7 @@ class FakeSuite:
         self.reuses: list[bool] = []
         self.exits: Callable[[str, str, str, bool], dict[str, int]] = lambda task_id, app, qa, e2e: {}
         self.e2e: Callable[[str, str, str], E2EResult] = self.default_e2e
+        self.others: Callable[[str, str, str], list[dict[str, str]]] = lambda task_id, app_sha, test_file: []
         self.on_suite: Callable[[str, str, str, bool], None] | None = None
         self.cancelled: set[str] = set()
         self.stale_removed = 0
@@ -362,6 +363,9 @@ class FakeSuite:
 
     def e2e_result(self, task_id: str, report: CheckReport, test_file: str) -> E2EResult:
         return self.e2e(task_id, report.commit_sha, test_file)
+
+    def other_failures(self, task_id: str, report: CheckReport, test_file: str) -> list[dict[str, str]]:
+        return self.others(task_id, report.commit_sha, test_file)
 
     def run_step(self, task_id: str, step: str, role: Any) -> CheckResult:
         self.check_cancelled(task_id)

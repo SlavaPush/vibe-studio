@@ -243,6 +243,29 @@ def parse_playwright(report: Any, test_file: str) -> E2EResult:
     )
 
 
+def failed_tests(report: Any, test_file: str = "") -> list[dict[str, str]]:
+    if not isinstance(report, dict):
+        return []
+    failures = []
+    for suite in report.get("suites") or []:
+        for spec in _specs(suite):
+            file = re.sub(r"^(\.\./)+", "", str(spec.get("file") or ""))
+            if not file.endswith(".pw.ts") or (test_file and file.endswith(test_file)):
+                continue
+            for test in spec.get("tests") or []:
+                results = test.get("results") or []
+                if not results or results[-1].get("status") not in ("failed", "timedOut"):
+                    continue
+                errors = [error for error in results[-1].get("errors") or [] if isinstance(error, dict)]
+                failures.append({
+                    "file": file,
+                    "title": str(spec.get("title") or ""),
+                    "message": error_message(errors[0])[:MESSAGE_LIMIT] if errors else results[-1]["status"],
+                })
+                break
+    return failures
+
+
 def suite_steps(changed: list[str], change_class: ChangeClass | None, playwright: bool) -> list[str]:
     steps = [*SUITE[:3], *(["e2e"] if playwright else [])]
     if change_class == ChangeClass.backend_api or any(path.startswith(API_PREFIXES) for path in changed):
@@ -871,11 +894,9 @@ class Sandbox:
     def e2e_result(self, task_id: str, report: CheckReport, test_file: str) -> E2EResult:
         if test_file.endswith(".py"):
             return self.pytest_result(task_id, report, test_file)
-        command = self.policy.steps["e2e"].command
-        checks = [check for check in report.checks if check.command == command]
-        if not checks:
+        check = self.e2e_check(report)
+        if check is None:
             return E2EResult("no_evidence", "Шаг e2e не выполнялся.")
-        check = checks[-1]
         if check.exit_code == BUILD_EXIT:
             return E2EResult("no_evidence", "Сборка приложения для e2e не прошла.")
         if check.exit_code == TIMEOUT_EXIT:
@@ -883,16 +904,26 @@ class Sandbox:
         unmocked = unmocked_requests(self.artifacts_dir / task_id, check.artifact_urls)
         if unmocked:
             return E2EResult("invalid", unmocked_reason(unmocked))
-        data = None
+        return parse_playwright(self.playwright_report(task_id, check), test_file)
+
+    def other_failures(self, task_id: str, report: CheckReport, test_file: str) -> list[dict[str, str]]:
+        check = None if test_file.endswith(".py") else self.e2e_check(report)
+        return failed_tests(self.playwright_report(task_id, check), test_file) if check else []
+
+    def e2e_check(self, report: CheckReport) -> CheckResult | None:
+        command = self.policy.steps["e2e"].command
+        checks = [check for check in report.checks if check.command == command]
+        return checks[-1] if checks else None
+
+    def playwright_report(self, task_id: str, check: CheckResult) -> Any:
         for url in check.artifact_urls:
             name = url.rsplit("/", 1)[-1]
             if name.endswith(REPORT_NAME):
                 try:
-                    data = json.loads((self.artifacts_dir / task_id / name).read_text(encoding="utf-8"))
+                    return json.loads((self.artifacts_dir / task_id / name).read_text(encoding="utf-8"))
                 except (OSError, ValueError):
-                    data = None
-                break
-        return parse_playwright(data, test_file)
+                    return None
+        return None
 
     def pytest_result(self, task_id: str, report: CheckReport, test_file: str) -> E2EResult:
         checks = [check for check in report.checks if check.command == API_TEST_COMMAND]

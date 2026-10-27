@@ -28,7 +28,10 @@ TASK_DECISION_STATUSES: dict[TaskDecision, frozenset[TaskStatus]] = {
 }
 
 FINAL_FAILURES: dict[FailureKind, str] = {
-    FailureKind.checks_failed: "Обязательные проверки PR не пройдены, PR закрыт. Повтор недоступен: поставьте новую задачу.",
+    FailureKind.checks_failed: (
+        "Обязательные проверки не пройдены. Повтор недоступен: после публикации отката офис начнёт доработку, "
+        "иначе поставьте новую задачу."
+    ),
     FailureKind.pr_rejected: "Агент ревью отклонил PR. Повтор недоступен: поставьте новую задачу.",
     FailureKind.owner_rejected: "Владелец отклонил PR. Повтор недоступен: поставьте новую задачу.",
     FailureKind.deploy_failed: "Деплой выпуска не выполнен. Повтор недоступен: изменение уже в main и войдёт в следующий выпуск.",
