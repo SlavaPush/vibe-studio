@@ -403,7 +403,7 @@ docker run --rm -v "$PWD/apps/chat/web:/src:ro" -v "$PWD/apps/chat/contracts:/wo
 | `/home/office/office/office.sqlite`, `office.checkpoints.sqlite` | Состояние офиса и checkpoint графов |
 | `/home/office/office/workspace`, `/home/office/office/artifacts` | Рабочая область задач и артефакты |
 
-Каталог `/home/office/office` находится вне клона: `git pull` не меняет секреты и состояние. Другой домен или другие пути меняются в `infra/Caddyfile`, `infra/office-api.service` и `vps.env`.
+Каталог `/home/office/office` находится вне клона: `git pull` не меняет секреты и состояние. Домен — параметр `--domain` скрипта `infra/install.sh`: скрипт вписывает его в `vps.env` и `/etc/caddy/Caddyfile`. Файлы `infra/Caddyfile` и `infra/vps.env.example` содержат значения текущего VPS и служат образцами для скрипта. Пользователь `office` и пути зафиксированы в `infra/office-api.service` и скриптах.
 
 ### Один экземпляр офиса на репозиторий
 
@@ -416,80 +416,86 @@ docker run --rm -v "$PWD/apps/chat/web:/src:ro" -v "$PWD/apps/chat/contracts:/wo
 
 Код участника одноразовый для офиса (`office_used_at`). Участник, который уже входил в локальный офис, на VPS по тому же коду не войдёт. Владелец выдаёт ему новый код (раздел «Вход по личному коду»).
 
-### Установка
+При смене домена офиса новые коды нужны всем участникам. Cookie сеанса привязана к домену, а база хранит только хеш токена: сеанс не переходит на новый адрес, а прежние коды уже использованы.
 
-Команды выполняются на VPS под пользователем `office`; `sudo` запрашивает пароль `office`.
+### Установка скриптом
 
-1. Docker CE — по инструкции https://docs.docker.com/engine/install/ubuntu/ (репозиторий apt Docker). Добавить `office` в группу `docker` и открыть новый сеанс SSH:
+Условия:
 
-   ```bash
-   sudo usermod -aG docker office
-   docker ps
-   ```
+- VPS с Ubuntu, пользователь `office` с `sudo` (пароль запрашивается) и ключом SSH владельца в `~/.ssh/authorized_keys`;
+- DNS домена указывает на VPS: иначе Caddy не получит сертификат;
+- на компьютере владельца в `~/.ssh/config` есть хост SSH нового VPS (ниже — `office-vps`).
 
-   `docker ps` в новом сеансе должен выполниться без `sudo`. Без этого офис не запустит проверки. Группа `docker` даёт права root на хосте; это допустимо, пока офис — единственный сервис на VPS с входом по ключу SSH.
-
-2. Node 24 — по инструкции https://nodejs.org/en/download (пакет NodeSource или nvm). `uv` — в `/home/office/.local/bin/uv`:
+1. На VPS под пользователем `office` получить скрипт и запустить его с доменом:
 
    ```bash
-   curl -LsSf https://astral.sh/uv/install.sh | sh
+   curl -fsSL https://raw.githubusercontent.com/SlavaPush/vibe-studio/main/apps/office/infra/install.sh -o install.sh
+   bash install.sh --domain <домен>
    ```
 
-3. Клон, зависимости API и сборка панели:
+   Параметр `--ref <ветка или commit>` выбирает версию клона (по умолчанию `main`). Скрипт можно запускать повторно: выполненные шаги пропускаются. Сервис `office-api` скрипт не запускает.
+
+2. С компьютера владельца из корня монорепозитория перенести секреты и, если есть, резервную копию состояния (подраздел «Резервная копия»):
 
    ```bash
-   git clone https://github.com/SlavaPush/vibe-studio.git /home/office/vibe-studio
-   cd /home/office/vibe-studio/apps/office/api && uv sync --locked
-   cd /home/office/vibe-studio/apps/office/web && npm ci && npm run build
+   bash apps/office/infra/restore.sh --host office-vps --backup ~/backups/vibe-office/<ГГГГ-ММ-ДД>/office
    ```
 
-4. Образы проверок (из корня клона):
+   Без `--backup` офис запустится с чистым состоянием: базы создаст API. Для этого в `/home/office/office` на VPS не должно быть баз, `workspace` и `artifacts`: иначе `restore.sh` завершается с ошибкой и ничего не удаляет.
+
+3. Остановить прежний офис (подраздел «Один экземпляр офиса на репозиторий»), затем на VPS запустить сервис и проверить его:
 
    ```bash
-   cd /home/office/vibe-studio
-   docker build -t back-office-sandbox:p4 apps/office/docker/sandbox
-   docker build -t office-python-sandbox:p5 apps/office/docker/sandbox-python
-   docker pull postgres:16-alpine
+   sudo systemctl start office-api
+   curl https://<домен>/api/health
    ```
 
-5. Переменные и ключ App. На VPS создать каталог и `vps.env` из образца:
+Что делает `install.sh`:
 
-   ```bash
-   mkdir -p /home/office/office && chmod 700 /home/office/office
-   cp /home/office/vibe-studio/apps/office/infra/vps.env.example /home/office/office/vps.env
-   ```
+1. Проверяет пользователя `office`, Ubuntu и `sudo`.
+2. Ставит `git`, `curl`, `ca-certificates`, `rsync`, `ufw`, Docker CE (https://docs.docker.com/engine/install/ubuntu/) и Caddy (https://caddyserver.com/docs/install) из официальных репозиториев apt, добавляет `office` в группу `docker`. Группа `docker` даёт права root на хосте; это допустимо, пока офис — единственный сервис на VPS с входом по ключу SSH.
+3. Открывает в `ufw` OpenSSH, `80/tcp` и `443/tcp`. Если `~/.ssh/authorized_keys` непустой, записывает `/etc/ssh/sshd_config.d/00-hardening.conf` (`PermitRootLogin no`, `PasswordAuthentication no`).
+4. Ставит `uv` в `/home/office/.local/bin` и Node 24 из репозитория NodeSource.
+5. Клонирует репозиторий в `/home/office/vibe-studio` (или обновляет до `--ref`), выполняет `uv sync --locked` в `apps/office/api` и `npm ci && npm run build` в `apps/office/web`.
+6. Собирает образы `back-office-sandbox:p4` и `office-python-sandbox:p5` (повторная сборка берёт слои из кэша) и загружает `postgres:16-alpine`.
+7. Создаёт `/home/office/office` с правами `700` и `vps.env` из `infra/vps.env.example` с `OFFICE_ALLOWED_HOSTS=<домен>` и `OFFICE_ALLOWED_ORIGINS=https://<домен>`. В существующем `vps.env` заменяются только эти две строки. Записывает `/etc/caddy/Caddyfile` по образцу `infra/Caddyfile` с переданным доменом и перезагружает Caddy. Устанавливает `infra/office-api.service` в `/etc/systemd/system/` и включает автозапуск (`enable`) без запуска.
 
-   С компьютера владельца (из корня монорепозитория) скопировать `apps/office/.env` и ключ GitHub App как есть, без правок:
+Что делает `restore.sh`:
 
-   ```bash
-   scp apps/office/.env office-vps:/home/office/office/.env
-   scp ~/.config/vibe-office/vibe-office.private-key.pem office-vps:/home/office/office/vibe-office.private-key.pem
-   ```
+1. Проверяет, что на VPS есть `/home/office/office` и сервис `office-api` не активен. Без `--backup` проверяет, что состояния на VPS ещё нет.
+2. Копирует `apps/office/.env` и `~/.config/vibe-office/vibe-office.private-key.pem` с компьютера владельца. Секреты из резервной копии не используются.
+3. С `--backup` копирует состояние в `/home/office/office`: файлы на VPS, которых нет в копии, удаляются. `vps.env`, `.env`, `*.pem` и `office-api.service` из копии не переносятся: `vps.env` с новым доменом создаёт `install.sh`.
+4. Ставит права `600` на `.env`, `vps.env` и ключ. С `--backup` проверяет, что у задач `needs_attention` в `workspace/vibe-studio` есть ветка `office/<id>`. Без ветки повтор задачи начнёт работу разработчика заново, скрипт выводит предупреждение.
 
-   На VPS закрыть права:
+Переменные читает systemd, а не `uv --env-file`: строки `.env` должны иметь вид `ИМЯ=значение`, без `export`. Значения из `vps.env` заменяют значения из `.env`: адрес репозитория по HTTPS, путь к ключу App, `Host` и `Origin` домена, абсолютные пути БД, рабочей области и артефактов, каталог сборки панели. Caddy получает сертификат для домена автоматически, если DNS домена указывает на VPS и порты 80 и 443 открыты. Поток SSE (`text/event-stream`) Caddy передаёт без буферизации.
 
-   ```bash
-   chmod 600 /home/office/office/.env /home/office/office/vps.env /home/office/office/vibe-office.private-key.pem
-   ```
+### Резервная копия
 
-   Переменные читает systemd, а не `uv --env-file`: строки `.env` должны иметь вид `ИМЯ=значение`, без `export`. Значения из `vps.env` заменяют значения из `.env`: адрес репозитория по HTTPS, путь к ключу App, `Host` и `Origin` домена, абсолютные пути БД, рабочей области и артефактов, каталог сборки панели.
+Копию делает `infra/backup.sh` на компьютере владельца, когда сервис на VPS остановлен: копировать SQLite работающего сервиса нельзя. Перед остановкой проверить, что нет задач в работе и операций `started` или `unknown`.
 
-6. Caddy — по инструкции https://caddyserver.com/docs/install (пакет apt Caddy). Конфигурация и перезагрузка:
+```bash
+ssh -t office-vps sudo systemctl stop office-api
+bash apps/office/infra/backup.sh --host office-vps --dest ~/backups/vibe-office/<ГГГГ-ММ-ДД>
+```
 
-   ```bash
-   sudo cp /home/office/vibe-studio/apps/office/infra/Caddyfile /etc/caddy/Caddyfile
-   sudo systemctl reload caddy
-   ```
+По умолчанию `--host office-vps`, `--dest ~/backups/vibe-office/<текущая дата>`. При активном сервисе скрипт останавливается с ошибкой. Состав копии:
 
-   Caddy получает сертификат для домена автоматически, если DNS домена указывает на VPS и порты 80 и 443 открыты. Поток SSE (`text/event-stream`) Caddy передаёт без буферизации.
+- `<dest>/office/` — `/home/office/office` целиком, кроме `*.bak-*`: `.env`, `vps.env`, ключ GitHub App, `office.sqlite`, `office.checkpoints.sqlite` с `-wal` и `-shm`, `artifacts/` (журналы и состояние QA), `workspace/` (клон и worktree; локальные ветки `office/*` незавершённых задач есть только там);
+- `<dest>/versions.txt` — commit клона `/home/office/vibe-studio`, образы Docker (id, дата, размер), ветки `office/*` в `workspace/vibe-studio`.
 
-7. Сервис офиса (после остановки локального офиса, подраздел «Один экземпляр офиса на репозиторий»):
+Скрипт проверяет обе базы `PRAGMA integrity_check` и выводит путь, размер копии и список веток. Хранить копию вне репозитория: в ней `.env` и ключ GitHub App. Каталог копии получает права `700`.
 
-   ```bash
-   sudo cp /home/office/vibe-studio/apps/office/infra/office-api.service /etc/systemd/system/office-api.service
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now office-api
-   ```
+### Отключение VPS
+
+1. Убедиться, что нет задач в работе и операций `started` или `unknown`.
+2. Остановить сервис: `sudo systemctl stop office-api` на VPS.
+3. Сделать копию: `bash apps/office/infra/backup.sh --host office-vps`. Скрипт проверяет базы и записывает commit офиса и образы в `versions.txt`.
+4. Записать в документы путь копии, commit офиса и теги образов из `versions.txt`.
+5. Удалить сервер в панели провайдера.
+6. Обновить адрес офиса в документах и хост `office-vps` в `~/.ssh/config`.
+7. По желанию — заменить ключи: на удалённом диске они хранились в `.env` и файле ключа GitHub App с правами `600`.
+
+При повторном развёртывании на другом домене участникам нужны новые коды (подраздел «Коды входа»).
 
 ### Обновление
 
@@ -500,7 +506,7 @@ cd ../web && npm ci && npm run build
 sudo systemctl restart office-api
 ```
 
-Перед перезапуском проверить, что нет задач в работе и операций `started` или `unknown`. Сервис запускается с `uv run --no-sync`, поэтому зависимости обновляет только `uv sync --locked`. После изменения `docker/sandbox` или `docker/sandbox-python` пересобрать соответствующий образ (шаг 4 установки). После изменения `infra/Caddyfile` или `infra/office-api.service` повторить шаг 6 или 7.
+Перед перезапуском проверить, что нет задач в работе и операций `started` или `unknown`. Сервис запускается с `uv run --no-sync`, поэтому зависимости обновляет только `uv sync --locked`. После изменения `docker/sandbox` или `docker/sandbox-python` пересобрать соответствующий образ из корня клона: `docker build -t back-office-sandbox:p4 apps/office/docker/sandbox` или `docker build -t office-python-sandbox:p5 apps/office/docker/sandbox-python`. После изменения `infra/Caddyfile` или `infra/office-api.service` повторить установку: `bash /home/office/vibe-studio/apps/office/infra/install.sh --domain <домен>`, затем `sudo systemctl restart office-api`.
 
 ### Проверка
 
