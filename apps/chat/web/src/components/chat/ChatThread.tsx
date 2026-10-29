@@ -51,6 +51,8 @@ const MAX_MESSAGE_LENGTH = 4000
 
 const IMAGE_MODEL_ID = 'gpt-image-2.5-flare'
 
+const COPIED_RESET_MS = 2000
+
 const THINKING_DOT_DELAYS = ['[animation-delay:0ms]', '[animation-delay:200ms]', '[animation-delay:400ms]']
 
 export type LoadAssetUrl = (id: string) => Promise<AssetUrl>
@@ -244,6 +246,44 @@ interface ChatMessageProps {
   loadAssetUrl: LoadAssetUrl
 }
 
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false)
+  const timerRef = useRef<number | null>(null)
+  const mountedRef = useRef(false)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      if (timerRef.current !== null) {
+        window.clearTimeout(timerRef.current)
+        timerRef.current = null
+      }
+    }
+  }, [])
+
+  const handleClick = async () => {
+    try {
+      await navigator.clipboard.writeText(text)
+    } catch {
+      return
+    }
+    if (!mountedRef.current) return
+    setCopied(true)
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current)
+    timerRef.current = window.setTimeout(() => {
+      timerRef.current = null
+      setCopied(false)
+    }, COPIED_RESET_MS)
+  }
+
+  return (
+    <Button type="button" variant="ghost" size="xs" className="self-start" onClick={() => void handleClick()}>
+      {copied ? 'Скопировано' : 'Скопировать'}
+    </Button>
+  )
+}
+
 function AssetImage({ asset, loadAssetUrl }: { asset: AssetRef; loadAssetUrl: LoadAssetUrl }) {
   const [url, setUrl] = useState<AssetUrl | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -389,6 +429,7 @@ function ChatMessage({ message, models, loadAssetUrl }: ChatMessageProps) {
           {custom.effort && ` · усилия: ${EFFORT_LABELS[custom.effort]}`}
         </p>
       )}
+      {text && <CopyButton text={text} />}
     </article>
   )
 }
